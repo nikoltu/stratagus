@@ -1,0 +1,63 @@
+name: Android
+
+# Staged Android bring-up.
+#   Stage 1a (this job): prove the engine + vendored dependencies cross-compile
+#     for arm64-v8a with the NDK toolchain, producing libmain.so.
+#   Stage 1b (later): wrap in a Gradle/SDLActivity project to produce an APK.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'third-party'
+      - 'android/**'
+      - '.github/workflows/android.yml'
+
+jobs:
+  native-arm64:
+    name: Native arm64-v8a (NDK cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Locate NDK
+        run: |
+          echo "Using NDK at: $ANDROID_NDK_LATEST_HOME"
+          test -d "$ANDROID_NDK_LATEST_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - name: Configure (arm64-v8a, android-24)
+        run: |
+          cmake -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_VENDORED_SDL=ON \
+            -DBUILD_TESTING=OFF
+
+      - name: Build engine (.so)
+        run: cmake --build build-android -j"$(nproc)"
+
+      - name: Collect native libraries
+        if: always()
+        run: |
+          mkdir -p out
+          find build-android -name '*.so' -exec cp -v {} out/ \; || true
+          ls -la out || true
+
+      - name: Upload native libraries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wargushd-native-arm64
+          path: out/**
+          if-no-files-found: warn

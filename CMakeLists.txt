@@ -1135,7 +1135,12 @@ add_custom_command(OUTPUT tolua.cpp
 )
 
 add_library(stratagus_lib STATIC ${stratagus_SRCS} ${stratagus_HDRS})
-if (ENABLE_STDIO_REDIRECT)
+if (ANDROID)
+	# On Android the game is a shared library loaded by SDLActivity via JNI;
+	# SDL redefines main() to SDL_main() through <SDL_main.h> (pulled in by <SDL.h>).
+	add_library(stratagus SHARED src/stratagus/main.cpp)
+	set_target_properties(stratagus PROPERTIES OUTPUT_NAME main)
+elseif (ENABLE_STDIO_REDIRECT)
 	add_executable(stratagus WIN32 src/stratagus/main.cpp)
 else ()
 	add_executable(stratagus src/stratagus/main.cpp)
@@ -1180,12 +1185,15 @@ if(BUILD_TESTING)
 	doctest_discover_tests(stratagus_tests)
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-	set_target_properties(stratagus PROPERTIES OUTPUT_NAME stratagus-dbg)
-endif()
+# On Android the output name must stay "main" so SDLActivity can dlopen libmain.so.
+if(NOT ANDROID)
+	if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+		set_target_properties(stratagus PROPERTIES OUTPUT_NAME stratagus-dbg)
+	endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Profile")
-	set_target_properties(stratagus PROPERTIES OUTPUT_NAME stratagus-prof)
+	if(CMAKE_BUILD_TYPE STREQUAL "Profile")
+		set_target_properties(stratagus PROPERTIES OUTPUT_NAME stratagus-prof)
+	endif()
 endif()
 
 if(WIN32 AND MINGW AND ENABLE_STATIC)
