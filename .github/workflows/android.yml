@@ -58,6 +58,23 @@ jobs:
           done < <(find third-party -name zlib.map)
           test "$found" = 1 || echo "no zlib.map found (layout changed?)"
 
+      # Build only the static libpng. The vendored libpng otherwise also links a
+      # shared libpng16.so with -Wl,--version-script=libpng.vers, a script the NDK's
+      # lld cannot locate, failing the Android build. Only the static libpng.a is
+      # consumed (third-party PNG_LIBRARY), so flip PNG_SHARED's default to OFF.
+      # The submodule (Wargus/dependencies) is upstream and not ours to change, so
+      # patch its checkout at build time, mirroring the zlib workaround above.
+      - name: Disable shared libpng on Android
+        run: |
+          set -x
+          found=0
+          while IFS= read -r f; do
+            sed -i -E 's/(option\(PNG_SHARED[^)]*) ON\)/\1 OFF)/' "$f"
+            grep -n 'option(PNG_SHARED' "$f"
+            found=1
+          done < <(find third-party -path '*/libpng/CMakeLists.txt')
+          test "$found" = 1 || echo "no libpng CMakeLists found (layout changed?)"
+
       # --- Stage A: host tolua++ (code-generation bootstrap for cross-compile) ---
       - name: Build host tolua++
         run: |
