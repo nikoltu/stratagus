@@ -1,0 +1,19 @@
+# Gradle / Android Studio
+.gradle/
+build/
+app/build/
+app/.cxx/
+.idea/
+*.iml
+captures/
+
+# Machine-specific SDK path
+local.properties
+
+# Prebuilt native libraries staged for packaging (built by CMake/NDK or fetched
+# from CI). Never committed — large binaries, and rebuilt per target.
+app/src/main/jniLibs/
+
+# SDL2 Android Java glue is copied from third-party/SDL at build time (into
+# build/generated), never vendored here.
+app/src/main/java/org/libsdl/

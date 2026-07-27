@@ -1,0 +1,70 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Location of the prebuilt native library (libmain.so) to package. Override with
+//   -PstratagusNativeDir=/abs/path/to/dir/containing/arm64-v8a
+// Default: app/src/main/jniLibs (staged there by the copyNativeLibs task or by hand).
+def nativeLibsDir = project.hasProperty('stratagusNativeDir') ?
+        project.property('stratagusNativeDir') : "${projectDir}/src/main/jniLibs"
+
+// SDL2's Android Java glue is sourced from the SDL version we build against
+// (third-party/SDL), not vendored in our tree. Copy it into a generated source
+// dir at build time; it is never committed.
+def sdlJavaSrc = "${rootDir}/../third-party/SDL/android-project/app/src/main/java"
+def sdlJavaGen = layout.buildDirectory.dir("generated/sdl_java").get().asFile
+
+tasks.register('copySdlJava', Copy) {
+    from sdlJavaSrc
+    into sdlJavaGen
+    include 'org/libsdl/app/**'
+}
+
+android {
+    namespace 'net.wargushd.game'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'net.wargushd.game'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += sdlJavaGen
+            jniLibs.srcDirs = [nativeLibsDir]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    // libmain.so is a Release build with debug info; keep it as-is (do not strip
+    // during packaging, and do not fail on the large payload).
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name == 'preBuild') {
+        task.dependsOn 'copySdlJava'
+    }
+}
