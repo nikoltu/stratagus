@@ -1148,6 +1148,14 @@ endif ()
 target_link_libraries(stratagus_lib PUBLIC ${stratagus_LIBS} ${CMAKE_DL_LIBS} guisan_lib)
 target_link_libraries(stratagus PUBLIC stratagus_lib)
 
+if(ANDROID)
+	# SDL2 is consumed as a static library, so the NDK system libraries it depends
+	# on are not pulled in transitively. Link them explicitly into libmain.so:
+	# android (looper/sensor/native-window), log (__android_log_print), OpenSLES
+	# (audio), and GLES/EGL (video), plus dl for SDL's dlopen paths.
+	target_link_libraries(stratagus PUBLIC android log dl GLESv1_CM GLESv2 EGL OpenSLES)
+endif()
+
 target_include_directories(stratagus_lib SYSTEM PRIVATE third-party/mdns third-party/spiritless_po/include)
 
 if(WITH_OPENMP AND OpenMP_CXX_FOUND)
