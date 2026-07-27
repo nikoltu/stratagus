@@ -35,8 +35,57 @@
 #include <cstdio>
 #include <cstdlib>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <pthread.h>
+#include <string>
+#include <unistd.h>
+
+// Android has no console, so anything the engine writes to stdout/stderr is lost.
+// Redirect both to logcat (tag "WargusHD") by piping them through a reader thread
+// that forwards each line via __android_log_write. This is the only window into
+// the engine's own diagnostics on device.
+static int androidStdioPipe[2];
+
+static void *androidStdioReader(void *)
+{
+	std::string line;
+	char c;
+	while (read(androidStdioPipe[0], &c, 1) == 1) {
+		if (c == '\n') {
+			__android_log_write(ANDROID_LOG_INFO, "WargusHD", line.c_str());
+			line.clear();
+		} else if (c != '\r') {
+			line.push_back(c);
+		}
+	}
+	if (!line.empty()) {
+		__android_log_write(ANDROID_LOG_INFO, "WargusHD", line.c_str());
+	}
+	return nullptr;
+}
+
+static void redirectStdioToLogcat()
+{
+	setvbuf(stdout, nullptr, _IONBF, 0);
+	setvbuf(stderr, nullptr, _IONBF, 0);
+	if (pipe(androidStdioPipe) != 0) {
+		return;
+	}
+	dup2(androidStdioPipe[1], STDOUT_FILENO);
+	dup2(androidStdioPipe[1], STDERR_FILENO);
+	pthread_t thread;
+	if (pthread_create(&thread, nullptr, androidStdioReader, nullptr) == 0) {
+		pthread_detach(thread);
+	}
+}
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef __ANDROID__
+	redirectStdioToLogcat();
+#endif
 	if (std::getenv("STRATAGUS_UNBUFFERED_STDIO")) {
 		setvbuf(stdout, nullptr, _IONBF, 0);
 		setvbuf(stderr, nullptr, _IONBF, 0);
