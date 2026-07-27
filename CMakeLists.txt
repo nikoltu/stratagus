@@ -1351,14 +1351,8 @@ endif()
 	install(FILES doc/stratagus.6 DESTINATION ${MANDIR})
 if(ENABLE_DOC)
 	install(FILES
-		doc/development.html
-		doc/faq.html
 		doc/gpl.html
 		doc/guichan-copyright.txt
-		doc/changelog.html
-		doc/index.html
-		doc/install.html
-		doc/media.html
 		doc/README-SDL.txt
 		DESTINATION share/doc/stratagus
 	)
