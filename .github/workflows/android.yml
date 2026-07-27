@@ -41,6 +41,23 @@ jobs:
           test -d "$ANDROID_NDK_LATEST_HOME"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
+      # Neutralize zlib's version script for the Android build. The vendored
+      # zlib (bundled under SDL_image) links libz.so with -Wl,--version-script
+      # zlib.map plus the NDK's --no-undefined-version --fatal-warnings; zlib.map
+      # references gz_intmax, which is not emitted, so lld fails the link. The
+      # nested ExternalProject does not inherit outer linker flags, so replace the
+      # map with a permissive one (export everything, no per-symbol assignments).
+      - name: Work around zlib version script on Android
+        run: |
+          set -x
+          found=0
+          while IFS= read -r m; do
+            printf 'ZLIB_1.2 {\n  global:\n    *;\n};\n' > "$m"
+            echo "patched: $m"
+            found=1
+          done < <(find third-party -name zlib.map)
+          test "$found" = 1 || echo "no zlib.map found (layout changed?)"
+
       # --- Stage A: host tolua++ (code-generation bootstrap for cross-compile) ---
       - name: Build host tolua++
         run: |
