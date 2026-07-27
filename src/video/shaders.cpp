@@ -45,28 +45,28 @@
 #include <regex>
 
 // Avoiding the use of GLEW or some extensions handler
-PFNGLCREATESHADERPROC glCreateShader;
-PFNGLSHADERSOURCEPROC glShaderSource;
-PFNGLCOMPILESHADERPROC glCompileShader;
-PFNGLGETSHADERIVPROC glGetShaderiv;
-PFNGLGETSHADERINFOLOGPROC glGetShaderInfoLog;
-PFNGLDELETESHADERPROC glDeleteShader;
-PFNGLATTACHSHADERPROC glAttachShader;
-PFNGLCREATEPROGRAMPROC glCreateProgram;
-PFNGLLINKPROGRAMPROC glLinkProgram;
-PFNGLVALIDATEPROGRAMPROC glValidateProgram;
-PFNGLGETPROGRAMIVPROC glGetProgramiv;
-PFNGLGETPROGRAMINFOLOGPROC glGetProgramInfoLog;
-PFNGLUSEPROGRAMPROC glUseProgram;
+static PFNGLCREATESHADERPROC glCreateShader;
+static PFNGLSHADERSOURCEPROC glShaderSource;
+static PFNGLCOMPILESHADERPROC glCompileShader;
+static PFNGLGETSHADERIVPROC glGetShaderiv;
+static PFNGLGETSHADERINFOLOGPROC glGetShaderInfoLog;
+static PFNGLDELETESHADERPROC glDeleteShader;
+static PFNGLATTACHSHADERPROC glAttachShader;
+static PFNGLCREATEPROGRAMPROC glCreateProgram;
+static PFNGLLINKPROGRAMPROC glLinkProgram;
+static PFNGLVALIDATEPROGRAMPROC glValidateProgram;
+static PFNGLGETPROGRAMIVPROC glGetProgramiv;
+static PFNGLGETPROGRAMINFOLOGPROC glGetProgramInfoLog;
+static PFNGLUSEPROGRAMPROC glUseProgram;
 
-PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation;
-PFNGLUNIFORM1IPROC glUniform1i;
-PFNGLUNIFORM1FPROC glUniform1f;
-PFNGLUNIFORM2FPROC glUniform2f;
-PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv;
+static PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation;
+static PFNGLUNIFORM1IPROC glUniform1i;
+static PFNGLUNIFORM1FPROC glUniform1f;
+static PFNGLUNIFORM2FPROC glUniform2f;
+static PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv;
 
-PFNGLGETATTRIBLOCATIONPROC glGetAttribLocation;
-PFNGLVERTEXATTRIB4FPROC glVertexAttrib4f;
+static PFNGLGETATTRIBLOCATIONPROC glGetAttribLocation;
+static PFNGLVERTEXATTRIB4FPROC glVertexAttrib4f;
 
 #ifdef WIN32
 #define CCONV __stdcall
@@ -74,16 +74,16 @@ PFNGLVERTEXATTRIB4FPROC glVertexAttrib4f;
 #define CCONV
 #endif
 
-void (CCONV *lazyGlBegin)(GLenum);
-void (CCONV *lazyGlEnd)(void);
-void (CCONV *lazyGlTexCoord2f)(GLfloat, GLfloat);
-void (CCONV *lazyGlVertex2f)(GLfloat, GLfloat);
-void (CCONV *lazyGlGetIntegerv)(GLenum, GLint*);
-void (CCONV *lazyGlGetFloatv)(GLenum, GLfloat*);
-void (CCONV *lazyGlViewport)(GLint, GLint, GLsizei, GLsizei);
-void (CCONV *lazyGlMatrixMode)(GLenum);
-void (CCONV *lazyGlLoadIdentity)(void);
-void (CCONV *lazyGlOrtho)(GLdouble, GLdouble, GLdouble, GLdouble, GLdouble, GLdouble);
+static void (CCONV *lazyGlBegin)(GLenum);
+static void (CCONV *lazyGlEnd)(void);
+static void (CCONV *lazyGlTexCoord2f)(GLfloat, GLfloat);
+static void (CCONV *lazyGlVertex2f)(GLfloat, GLfloat);
+static void (CCONV *lazyGlGetIntegerv)(GLenum, GLint*);
+static void (CCONV *lazyGlGetFloatv)(GLenum, GLfloat*);
+static void (CCONV *lazyGlViewport)(GLint, GLint, GLsizei, GLsizei);
+static void (CCONV *lazyGlMatrixMode)(GLenum);
+static void (CCONV *lazyGlLoadIdentity)(void);
+static void (CCONV *lazyGlOrtho)(GLdouble, GLdouble, GLdouble, GLdouble, GLdouble, GLdouble);
 
 static const int MAX_SHADERS = 128;
 static GLuint shaderPrograms[MAX_SHADERS + 1] = { (GLuint) 0 };
