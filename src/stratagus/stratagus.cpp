@@ -697,6 +697,20 @@ static LONG WINAPI CreateDumpFile(EXCEPTION_POINTERS *ExceptionInfo)
 **  @param argc  Number of arguments.
 **  @param argv  Vector of arguments.
 */
+[[noreturn]] static void CrashExit()
+{
+#ifdef __ANDROID__
+	// Skip static destructors: on Android their teardown trips a FORTIFY abort
+	// (pthread_mutex_lock on a destroyed mutex -> SIGABRT), which the OS classifies
+	// as a crash. A few such crashes make Android wipe the app's data. A plain
+	// _Exit is a clean, signal-free termination that avoids that.
+	fflush(nullptr);
+	std::_Exit(1);
+#else
+	exit(1);
+#endif
+}
+
 int stratagusMain(int argc, char **argv)
 try {
 	for (int i = 0; i < argc; i++) {
@@ -715,6 +729,15 @@ try {
 	//  Setup some defaults.
 #ifndef MAC_BUNDLE
 	StratagusLibPath = ".";
+#ifdef __ANDROID__
+	// Android has no meaningful working directory. Load game data from the app's
+	// private internal storage (/data/user/0/<package>/files/data). Internal storage
+	// is fully owned by the app, avoiding the scoped-storage/FUSE ownership pitfalls
+	// of /sdcard/Android/data when files are staged by another user (e.g. adb).
+	if (const char *androidInternal = SDL_AndroidGetInternalStoragePath()) {
+		StratagusLibPath = std::string(androidInternal) + "/data";
+	}
+#endif
 #else
 	freopen("/tmp/stdout.txt", "w", stdout);
 	freopen("/tmp/stderr.txt", "w", stderr);
@@ -805,7 +828,7 @@ try {
 		        "and tell us what caused this bug to occur.\n"
 		        " === exception state traceback === \n");
 	ErrorPrint("%s", e.what());
-	exit(1);
+	CrashExit();
 }
 catch (const gcn::Exception &ex) {
 	ErrorPrint("Stratagus crashed in Guichan!\n"
@@ -818,7 +841,7 @@ catch (const gcn::Exception &ex) {
 	           ex.getLine(),
 	           ex.getFunction().c_str(),
 	           ex.getMessage().c_str());
-	exit(1);
+	CrashExit();
 }
 catch (...) {
 	ErrorPrint("Stratagus crashed!\n"
@@ -826,6 +849,6 @@ catch (...) {
 	           "https://github.com/Wargus/stratagus/issues\n"
 	           "and tell us what caused this bug to occur.\n"
 	           " === exception state traceback === \n");
-	exit(1);
+	CrashExit();
 }
 //@}
