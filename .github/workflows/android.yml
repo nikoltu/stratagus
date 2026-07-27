@@ -75,6 +75,24 @@ jobs:
           done < <(find third-party -path '*/libpng/CMakeLists.txt')
           test "$found" = 1 || echo "no libpng CMakeLists found (layout changed?)"
 
+      # Don't let SDL promote -Wdeclaration-after-statement to an error on Android.
+      # SDL unconditionally adds -Werror=declaration-after-statement as a style gate,
+      # but its Android-only core (SDL_android.c), never compiled by the desktop CI,
+      # violates it. Upstream's own Android build uses ndk-build and never exercises
+      # this CMake path, so relax the promotion to a plain warning for our build.
+      - name: Relax SDL declaration-after-statement on Android
+        run: |
+          set -x
+          found=0
+          while IFS= read -r f; do
+            if grep -q '"-Werror=declaration-after-statement"' "$f"; then
+              sed -i 's/"-Werror=declaration-after-statement"/"-Wno-error=declaration-after-statement"/g' "$f"
+              echo "patched: $f"
+              found=1
+            fi
+          done < <(find third-party -name CMakeLists.txt -path '*SDL*')
+          test "$found" = 1 || echo "no SDL -Werror=declaration-after-statement found (layout changed?)"
+
       # --- Stage A: host tolua++ (code-generation bootstrap for cross-compile) ---
       - name: Build host tolua++
         run: |
