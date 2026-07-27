@@ -52,17 +52,17 @@ jobs:
             -DBUILD_VENDORED_SDL=ON \
             -DDOWNLOAD_FREEPATS=OFF \
             -DBUILD_TESTING=OFF
-          # tolua++ is built as part of the vendored "lua" ExternalProject.
-          cmake --build build-host --target lua -j"$(nproc)" \
-            || cmake --build build-host -j"$(nproc)"
-          TOLUA="$(find build-host -type f \( -name 'tolua++' -o -name 'tolua++.bin' \) -perm -u+x 2>/dev/null | head -1)"
+          # tolua++ is built as part of the vendored "lua" ExternalProject; the
+          # generated executable is named "toluapp" (in lua/src/lua-build/).
+          cmake --build build-host --target lua -j"$(nproc)"
+          TOLUA="$(find build-host -type f -name 'toluapp' -perm -u+x 2>/dev/null | head -1)"
           if [ -z "$TOLUA" ]; then
-            echo "tolua++ not found after 'lua' target; doing a full host build."
+            echo "toluapp not found after 'lua' target; doing a full host build."
             cmake --build build-host -j"$(nproc)"
-            TOLUA="$(find build-host -type f -name 'tolua++*' -perm -u+x 2>/dev/null | grep -vE '\.(o|a|so|cmake)$' | head -1)"
+            TOLUA="$(find build-host -type f \( -name 'toluapp' -o -name 'tolua++' \) -perm -u+x 2>/dev/null | head -1)"
           fi
           if [ -z "$TOLUA" ]; then
-            echo "::error::host tolua++ not found"; find build-host -iname '*tolua*'; exit 1
+            echo "::error::host toluapp not found"; find build-host -iname '*tolua*' -type f; exit 1
           fi
           TOLUA="$(readlink -f "$TOLUA")"
           echo "Host tolua++: $TOLUA"
