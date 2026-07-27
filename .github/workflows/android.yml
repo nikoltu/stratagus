@@ -4,6 +4,11 @@ name: Android
 #   Stage 1a (this job): prove the engine + vendored dependencies cross-compile
 #     for arm64-v8a with the NDK toolchain, producing libmain.so.
 #   Stage 1b (later): wrap in a Gradle/SDLActivity project to produce an APK.
+#
+# Cross-compiling needs a HOST tolua++ (a build-time code generator that turns
+# the .pkg bindings into tolua.cpp); an arm64 tolua++ can't run on the x86 runner.
+# genversion is already handled by CMake when cross-compiling (it writes
+# version-generated.h at configure time instead of running the tool).
 on:
   workflow_dispatch:
   push:
@@ -34,6 +39,37 @@ jobs:
           test -d "$ANDROID_NDK_LATEST_HOME"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
+      # --- Stage A: host tolua++ (code-generation bootstrap for cross-compile) ---
+      - name: Build host tolua++
+        run: |
+          set -x
+          cmake -B build-host -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_VENDORED_LUA=ON \
+            -DBUILD_VENDORED_MEDIA_LIBS=ON \
+            -DBUILD_VENDORED_SDL=ON \
+            -DDOWNLOAD_FREEPATS=OFF \
+            -DBUILD_TESTING=OFF
+          echo "=== candidate tolua targets ==="
+          ninja -C build-host -t targets all | grep -iE 'tolua' || true
+          built=0
+          for t in tolua++ toluapp tolua_app tolua; do
+            if cmake --build build-host --target "$t" -j"$(nproc)"; then built=1; break; fi
+          done
+          if [ "$built" != "1" ]; then
+            echo "No named tolua target built; doing a full host build to obtain it."
+            cmake --build build-host -j"$(nproc)"
+          fi
+          TOLUA="$(find build-host -type f -name 'tolua*' -perm -u+x 2>/dev/null \
+                   | grep -vE '\.(o|a|so|cmake|dir|txt|stamp)$' | head -1)"
+          if [ -z "$TOLUA" ]; then
+            echo "::error::host tolua++ not found"; find build-host -iname '*tolua*'; exit 1
+          fi
+          TOLUA="$(readlink -f "$TOLUA")"
+          echo "Host tolua++: $TOLUA"
+          echo "HOST_TOLUA=$TOLUA" >> "$GITHUB_ENV"
+
+      # --- Stage B: cross-compile the engine for arm64-v8a ---
       - name: Configure (arm64-v8a, android-24)
         run: |
           cmake -B build-android -G Ninja \
@@ -41,8 +77,12 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_VENDORED_LUA=ON \
+            -DBUILD_VENDORED_MEDIA_LIBS=ON \
             -DBUILD_VENDORED_SDL=ON \
-            -DBUILD_TESTING=OFF
+            -DDOWNLOAD_FREEPATS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DSTRATAGUS_HOST_TOLUAPP="$HOST_TOLUA"
 
       - name: Build engine (.so)
         run: cmake --build build-android -j"$(nproc)"
