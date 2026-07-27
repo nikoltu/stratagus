@@ -149,6 +149,7 @@ jobs:
             -DBUILD_VENDORED_SDL=ON \
             -DDOWNLOAD_FREEPATS=OFF \
             -DBUILD_TESTING=OFF \
+            -DWITH_OPENMP=OFF \
             -DSTRATAGUS_HOST_TOLUAPP="$HOST_TOLUA"
 
       - name: Build engine (.so)
