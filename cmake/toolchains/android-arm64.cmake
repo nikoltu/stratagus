@@ -31,8 +31,10 @@ string(APPEND CMAKE_MODULE_LINKER_FLAGS_INIT " -Wl,--undefined-version")
 
 # Disable _FORTIFY_SOURCE for the Android build. The NDK enables =2 by default,
 # whose runtime checks abort the process on benign out-of-bounds reads in the old
-# vendored C code (Lua 5.1's GC trips __strchr_chk during InitLua). Appended after
-# the NDK toolchain so this definition wins, and it flows to every sub-build via
-# the toolchain file.
-string(APPEND CMAKE_C_FLAGS_INIT " -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0")
-string(APPEND CMAKE_CXX_FLAGS_INIT " -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0")
+# vendored C code (Lua 5.1's GC trips __strchr_chk during InitLua). The NDK's
+# legacy toolchain (the default) puts -D_FORTIFY_SOURCE=2 directly into
+# CMAKE_C_FLAGS, not the *_INIT seeds, so append our override to CMAKE_C_FLAGS
+# itself, after the NDK include, so =0 is the last definition on the command line.
+# This flows to every sub-build, which re-processes this toolchain file.
+string(APPEND CMAKE_C_FLAGS " -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0")
+string(APPEND CMAKE_CXX_FLAGS " -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0")
