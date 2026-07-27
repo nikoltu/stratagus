@@ -84,7 +84,11 @@ jobs:
             -DSTRATAGUS_HOST_TOLUAPP="$HOST_TOLUA"
 
       - name: Build engine (.so)
-        run: cmake --build build-android -j"$(nproc)"
+        run: |
+          cmake --build build-android -j"$(nproc)" || {
+            echo "=== Parallel build failed; re-running sequentially (verbose) to surface the exact failing target ==="
+            cmake --build build-android -j1 --verbose
+          }
 
       - name: Collect native libraries
         if: always()
