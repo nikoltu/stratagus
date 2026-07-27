@@ -40,6 +40,10 @@
 #include <shlobj.h>
 #endif
 
+#ifdef __ANDROID__
+#include <SDL.h>
+#endif
+
 /* static */ Parameters Parameters::Instance;
 
 
@@ -53,7 +57,15 @@ void Parameters::SetDefaultValues()
 
 void Parameters::SetDefaultUserDirectory(bool noPortable)
 {
-#ifdef USE_GAME_DIR
+#ifdef __ANDROID__
+	// Android has no HOME/APPDATA/XDG environment; without this the user
+	// directory stays empty and create_directories("") throws at startup.
+	// Use the app's private internal storage (always writable).
+	(void)noPortable;
+	if (const char *androidPath = SDL_AndroidGetInternalStoragePath()) {
+		userDirectory = fs::path(androidPath) / "stratagus";
+	}
+#elif defined(USE_GAME_DIR)
 	userDirectory = StratagusLibPath;
 #elif USE_WIN32
 	if (!noPortable) {
