@@ -93,6 +93,24 @@ jobs:
           done < <(find third-party -name CMakeLists.txt -path '*SDL*')
           test "$found" = 1 || echo "no SDL -Werror=declaration-after-statement found (layout changed?)"
 
+      # Replace ALooper_pollAll with ALooper_pollOnce in SDL's Android sensor code.
+      # The NDK (r29) marks ALooper_pollAll unavailable — a hard error, not a
+      # suppressible warning — but the vendored SDL still calls it. The two share
+      # an identical signature and return value; ALooper_pollOnce is the NDK's
+      # documented replacement, so the single call site swaps cleanly.
+      - name: Replace removed ALooper_pollAll in SDL on Android
+        run: |
+          set -x
+          found=0
+          while IFS= read -r f; do
+            if grep -q 'ALooper_pollAll' "$f"; then
+              sed -i 's/ALooper_pollAll/ALooper_pollOnce/g' "$f"
+              echo "patched: $f"
+              found=1
+            fi
+          done < <(find third-party -path '*SDL*' -name '*.c')
+          test "$found" = 1 || echo "no ALooper_pollAll found (SDL updated?)"
+
       # --- Stage A: host tolua++ (code-generation bootstrap for cross-compile) ---
       - name: Build host tolua++
         run: |
