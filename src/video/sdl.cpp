@@ -340,7 +340,13 @@ void InitVideoSdl()
 		}
 
 		SDL_CUSTOM_KEY_UP = SDL_RegisterEvents(1);
+#ifndef __ANDROID__
 		SDL_StartTextInput();
+#else
+		// On Android, SDL_StartTextInput pops up the soft keyboard, which covers the
+		// whole game. Keep it off; open it explicitly only when a text field is focused.
+		SDL_StopTextInput();
+#endif
 
 		// Clean up on exit
 		atexit(CleanUpVideoSdl);
