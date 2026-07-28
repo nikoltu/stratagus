@@ -470,8 +470,9 @@ void InitVideoSdl()
 	// Render at the device's OWN native full-screen resolution — fully adaptive per device
 	// (S8U, S7+, …), no invented fixed logical size, no letterbox: the logical framebuffer
 	// exactly matches the screen so the whole display is filled 1:1. The UI is authored to
-	// scale/anchor to this size. (If a device proves too slow at its full native res, an
-	// integer-fraction cap can be added later, still derived from the native size.)
+	// scale/anchor to this size. (A whole-framebuffer downscale gives a zoomed map but also
+	// doubles the fixed-pixel menu art off-screen, so in-game zoom must be a map-viewport-only
+	// scale, not a global logical-size cap.)
 	{
 		int outW = 0, outH = 0;
 		SDL_GetRendererOutputSize(TheRenderer, &outW, &outH);
@@ -642,8 +643,11 @@ static bool         TouchDragging  = false;     // left button held for a drag
 /// unscaled here to stay identical to a real mouse event.
 static void TouchToPixel(float nx, float ny, int &px, int &py)
 {
-	px = static_cast<int>(nx * Video.WindowWidth + 0.5f);
-	py = static_cast<int>(ny * Video.WindowHeight + 0.5f);
+	// Map the normalised finger position onto the LOGICAL framebuffer (Video.Width/
+	// Height), which is what the engine and menu widgets use — this stays correct when
+	// the logical size is a fraction of the window (see the zoom cap in InitVideoSdl).
+	px = static_cast<int>(nx * Video.Width + 0.5f);
+	py = static_cast<int>(ny * Video.Height + 0.5f);
 }
 
 // Re-emit the gesture as ordinary SDL mouse events. Feeding the queue (rather
