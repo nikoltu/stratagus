@@ -379,6 +379,24 @@ void InitVideoSdl()
 		flags |= SDL_WINDOW_RESIZABLE;
 	}
 
+#ifdef __ANDROID__
+	// Render at the device's own aspect ratio instead of a 4:3 640x480 logical size
+	// (which letterboxes and squishes the widescreen HD art). Scale the logical size so
+	// the shorter axis is ~960px: crisp/HD, correct aspect, UI still a usable size.
+	if (!Video.Width || !Video.Height) {
+		SDL_Rect bounds;
+		if (SDL_GetDisplayBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0) {
+			const int targetShort = 960;
+			if (bounds.w >= bounds.h) {
+				Video.Height = targetShort;
+				Video.Width = static_cast<int>(static_cast<long long>(bounds.w) * targetShort / bounds.h);
+			} else {
+				Video.Width = targetShort;
+				Video.Height = static_cast<int>(static_cast<long long>(bounds.h) * targetShort / bounds.w);
+			}
+		}
+	}
+#endif
 	if (!Video.Width || !Video.Height) {
 		Video.Width = 640;
 		Video.Height = 480;
@@ -439,6 +457,23 @@ void InitVideoSdl()
 		}
 	}
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
+#ifdef __ANDROID__
+	// Render at the device's OWN native full-screen resolution — fully adaptive per device
+	// (S8U, S7+, …), no invented fixed logical size, no letterbox: the logical framebuffer
+	// exactly matches the screen so the whole display is filled 1:1. The UI is authored to
+	// scale/anchor to this size. (If a device proves too slow at its full native res, an
+	// integer-fraction cap can be added later, still derived from the native size.)
+	{
+		int outW = 0, outH = 0;
+		SDL_GetRendererOutputSize(TheRenderer, &outW, &outH);
+		if (outW > 0 && outH > 0) {
+			Video.Width = outW;
+			Video.Height = outH;
+			Video.WindowWidth = outW;
+			Video.WindowHeight = outH;
+		}
+	}
+#endif
 	Video.ResizeScreen(Video.Width, Video.Height);
 
 // #ifdef USE_WIN32
