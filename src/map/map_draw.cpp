@@ -47,6 +47,7 @@
 #include "video.h"
 #include "editor.h"
 
+#include <cmath>
 #include <cstdlib>
 
 bool CViewport::ShowGrid = false;
@@ -73,6 +74,16 @@ void CViewport::Restrict(int &screenPosX, int &screenPosY) const
 PixelSize CViewport::GetPixelSize() const
 {
 	return this->BottomRightPos - this->TopLeftPos;
+}
+
+PixelSize CViewport::GetRenderPixelSize() const
+{
+	const PixelSize size = this->GetPixelSize();
+	if (this->Zoom == 1.0f) {
+		return size;
+	}
+	return PixelSize(static_cast<int>(std::lround(size.x / this->Zoom)),
+	                 static_cast<int>(std::lround(size.y / this->Zoom)));
 }
 
 void CViewport::SetClipping() const
@@ -123,7 +134,14 @@ bool CViewport::IsInsideMapArea(const PixelPos &screenPixelPos) const
 // Convert viewport coordinates into map pixel coordinates
 PixelPos CViewport::ScreenToMapPixelPos(const PixelPos &screenPixelPos) const
 {
-	const PixelDiff relPos = screenPixelPos - this->TopLeftPos + this->Offset;
+	// The on-screen distance from the viewport corner is Zoom times the map
+	// distance, so divide it out to recover map-pixel coordinates.
+	PixelDiff relPos = screenPixelPos - this->TopLeftPos;
+	if (this->Zoom != 1.0f) {
+		relPos.x = static_cast<int>(std::lround(relPos.x / this->Zoom));
+		relPos.y = static_cast<int>(std::lround(relPos.y / this->Zoom));
+	}
+	relPos += this->Offset;
 	const PixelPos mapPixelPos = relPos + Map.TilePosToMapPixelPos_TopLeft(this->MapPos);
 
 	return mapPixelPos;
@@ -132,9 +150,12 @@ PixelPos CViewport::ScreenToMapPixelPos(const PixelPos &screenPixelPos) const
 // Convert map pixel coordinates into viewport coordinates
 PixelPos CViewport::MapToScreenPixelPos(const PixelPos &mapPixelPos) const
 {
-	const PixelDiff relPos = mapPixelPos - Map.TilePosToMapPixelPos_TopLeft(this->MapPos);
-
-	return this->TopLeftPos + relPos - this->Offset;
+	PixelDiff relPos = mapPixelPos - Map.TilePosToMapPixelPos_TopLeft(this->MapPos) - this->Offset;
+	if (this->Zoom != 1.0f) {
+		relPos.x = static_cast<int>(std::lround(relPos.x * this->Zoom));
+		relPos.y = static_cast<int>(std::lround(relPos.y * this->Zoom));
+	}
+	return this->TopLeftPos + relPos;
 }
 
 /// convert screen coordinate into tilepos
@@ -159,7 +180,13 @@ PixelPos CViewport::TilePosToScreen_Center(const Vec2i &tilePos) const
 {
 	const PixelPos topLeft = TilePosToScreen_TopLeft(tilePos);
 
-	return topLeft + PixelTileSize / 2;
+	// Half a tile expressed in on-screen pixels grows with the zoom factor.
+	PixelDiff halfTile = PixelTileSize / 2;
+	if (this->Zoom != 1.0f) {
+		halfTile.x = static_cast<int>(std::lround(halfTile.x * this->Zoom));
+		halfTile.y = static_cast<int>(std::lround(halfTile.y * this->Zoom));
+	}
+	return topLeft + halfTile;
 }
 
 /**
@@ -176,7 +203,10 @@ void CViewport::Set(const PixelPos &mapPos)
 	x = std::max(x, -UI.MapArea.ScrollPaddingLeft);
 	y = std::max(y, -UI.MapArea.ScrollPaddingTop);
 
-	const PixelSize pixelSize = this->GetPixelSize();
+	// The amount of the world actually shown is the on-screen size divided by
+	// the zoom factor, so all scroll limits and the tiles-in-view derivation are
+	// computed from the render size rather than the raw on-screen size.
+	const PixelSize pixelSize = this->GetRenderPixelSize();
 	x = std::min(x, Map.Info.MapWidth * PixelTileSize.x - (pixelSize.x) - 1 + UI.MapArea.ScrollPaddingRight);
 	y = std::min(y, Map.Info.MapHeight * PixelTileSize.y - (pixelSize.y) - 1 + UI.MapArea.ScrollPaddingBottom);
 
@@ -220,7 +250,7 @@ void CViewport::Set(const Vec2i &tilePos, const PixelDiff &offset)
 */
 void CViewport::Center(const PixelPos &mapPixelPos)
 {
-	this->Set(mapPixelPos - this->GetPixelSize() / 2);
+	this->Set(mapPixelPos - this->GetRenderPixelSize() / 2);
 }
 
 /**
@@ -423,6 +453,40 @@ static void ShowUnitName(const CViewport &vp, PixelPos pos, CUnit *unit, bool hi
 */
 void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr */)
 {
+	// When zoomed, the world is rendered into a smaller offscreen surface and
+	// then upscaled into the on-screen rectangle. The viewport is temporarily
+	// repositioned to that surface's origin with Zoom reset to 1, so every draw
+	// call below (tiles, units, missiles, fog) targets the offscreen at native
+	// scale without any per-call change.
+	const bool zoomed = (this->Zoom != 1.0f);
+	SDL_Surface *savedScreen = nullptr;
+	PixelPos savedTopLeft;
+	PixelPos savedBottomRight;
+	float savedZoom = this->Zoom;
+	PixelSize renderSize;
+	SDL_Rect dstRect;
+
+	if (zoomed) {
+		const PixelSize realSize = this->GetPixelSize();
+		renderSize = this->GetRenderPixelSize();
+		this->AdjustMapRenderSurface(renderSize);
+
+		dstRect.x = this->TopLeftPos.x;
+		dstRect.y = this->TopLeftPos.y;
+		dstRect.w = realSize.x;
+		dstRect.h = realSize.y;
+
+		savedTopLeft = this->TopLeftPos;
+		savedBottomRight = this->BottomRightPos;
+		this->TopLeftPos = PixelPos(0, 0);
+		this->BottomRightPos = PixelPos(renderSize.x, renderSize.y);
+		this->Zoom = 1.0f;
+
+		savedScreen = TheScreen;
+		TheScreen = this->MapRenderSurface;
+		SDL_FillRect(this->MapRenderSurface, nullptr, 0);
+	}
+
 	PushClipping();
 	this->SetClipping();
 
@@ -534,6 +598,27 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 		}
 	}
 
+	if (zoomed) {
+		// Map content is complete in the offscreen surface: restore the real
+		// screen and viewport placement, then upscale the offscreen into the
+		// on-screen rectangle. Overlays below (order lines, unit-name popup,
+		// border) are drawn afterwards so they stay at native resolution.
+		PopClipping();
+		TheScreen = savedScreen;
+		this->TopLeftPos = savedTopLeft;
+		this->BottomRightPos = savedBottomRight;
+		this->Zoom = savedZoom;
+
+		SDL_Rect srcRect;
+		srcRect.x = 0;
+		srcRect.y = 0;
+		srcRect.w = renderSize.x;
+		srcRect.h = renderSize.y;
+		SDL_BlitScaled(this->MapRenderSurface, &srcRect, TheScreen, &dstRect);
+
+		PushClipping();
+		this->SetClipping();
+	}
 
 	//
 	// Draw orders of selected units.
@@ -583,6 +668,36 @@ void CViewport::DrawBorder() const
 
 	const PixelSize pixelSize = this->GetPixelSize();
 	Video.DrawRectangle(color, this->TopLeftPos.x, this->TopLeftPos.y, pixelSize.x + 1, pixelSize.y + 1);
+}
+
+/**
+**  Allocate (or reallocate on size change) the offscreen surface the world is
+**  rendered into when the viewport is zoomed. Sized to the largest render size
+**  it has been asked for, so a shared surface also covers split-screen layouts.
+*/
+void CViewport::AdjustMapRenderSurface(const PixelSize &renderSize)
+{
+	if (this->MapRenderSurface
+		&& this->MapRenderSurface->w >= renderSize.x
+		&& this->MapRenderSurface->h >= renderSize.y) {
+		return;
+	}
+
+	const int w = this->MapRenderSurface ? std::max(this->MapRenderSurface->w, renderSize.x) : renderSize.x;
+	const int h = this->MapRenderSurface ? std::max(this->MapRenderSurface->h, renderSize.y) : renderSize.y;
+
+	this->CleanMapRenderSurface();
+	this->MapRenderSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, w, h, 32,
+	                                              RMASK, GMASK, BMASK, AMASK);
+	SDL_SetSurfaceBlendMode(this->MapRenderSurface, SDL_BLENDMODE_NONE);
+}
+
+void CViewport::CleanMapRenderSurface()
+{
+	if (this->MapRenderSurface) {
+		SDL_FreeSurface(this->MapRenderSurface);
+		this->MapRenderSurface = nullptr;
+	}
 }
 
 //@}

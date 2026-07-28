@@ -447,6 +447,7 @@ void CViewport::Clean()
 	if (this->FogSurface) {
 		CleanFog();
 	}
+	this->CleanMapRenderSurface();
 }
 
 void CViewport::CleanFog()

@@ -394,6 +394,17 @@ CViewport *GetViewport(const PixelPos &screenPos)
 **  @param new_vps  The array of the new viewports
 **  @param num_vps  The number of elements in the new_vps[] array.
 */
+#ifdef __ANDROID__
+// Magnification applied to the in-game map viewports on touch devices, where the
+// native framebuffer is very high resolution and the default tile count is far
+// too wide to be playable. Only the play area is scaled; the HUD, menus, fonts
+// and cursors stay at native resolution. Tune this to trade tiles-in-view for
+// on-screen tile size (2.0 ~= 23 tiles across on a ~2960 px framebuffer).
+static constexpr float MapViewportZoom = 2.0f;
+#else
+static constexpr float MapViewportZoom = 1.0f;
+#endif
+
 static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int num_vps)
 {
 	//  Compute location of the viewport using oldviewport
@@ -417,6 +428,9 @@ static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int nu
 
 		vp.TopLeftPos = new_vps[i].TopLeftPos;
 		vp.BottomRightPos = new_vps[i].BottomRightPos;
+		// Set the zoom before Set() so the tiles-in-view and scroll limits are
+		// derived from the zoomed-down render size.
+		vp.Zoom = MapViewportZoom;
 		vp.Set(new_vps[i].MapPos, new_vps[i].Offset);
 	}
 	UI.NumViewports = num_vps;

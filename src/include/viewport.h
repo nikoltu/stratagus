@@ -129,11 +129,19 @@ public:
 	}
 
 	PixelSize GetPixelSize() const;
+	/// On-screen size of the viewport divided by the zoom factor. This is the
+	/// size, in native pixels, the world is rendered into before it is scaled up
+	/// to the on-screen rectangle. Equal to GetPixelSize() when Zoom == 1.
+	PixelSize GetRenderPixelSize() const;
 	const PixelPos &GetTopLeftPos() const { return TopLeftPos;}
 	const PixelPos &GetBottomRightPos() const { return BottomRightPos;}
 private:
 	/// Set the current map view to x,y(upper,left corner)
 	void Set(const PixelPos &mapPixelPos);
+	/// Adjust the offscreen map-render surface to the given render size
+	void AdjustMapRenderSurface(const PixelSize &renderSize);
+	/// Free the offscreen map-render surface
+	void CleanMapRenderSurface();
 	/// Draw the map grid for debug purposes
 	void DrawMapGridInViewport() const;
 	/** Draw the map background.
@@ -162,9 +170,17 @@ public:
 	int MapWidth = 0;             /// Width in map tiles
 	int MapHeight = 0;            /// Height in map tiles
 
+	/// Magnification of the map inside this viewport. 1.0 renders the world
+	/// directly to the screen (default, unchanged behaviour). Values > 1 render
+	/// the world into a smaller offscreen surface that is then upscaled into the
+	/// on-screen rectangle, so the play area appears larger while the surrounding
+	/// HUD, menus, fonts and cursors stay at native resolution.
+	float Zoom = 1.0f;
+
 	CUnit *Unit = nullptr;        /// Bound to this unit
 private:
 	SDL_Surface *FogSurface { nullptr }; /// Texture for fog of war. Viewport sized.
+	SDL_Surface *MapRenderSurface { nullptr }; /// Offscreen map render target when Zoom != 1.
 
 	static bool ShowGrid;
 	static bool ShowAStarPassability;
