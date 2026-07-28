@@ -916,8 +916,33 @@ static int CclDefineTileset(lua_State *l)
 	//  Load and prepare the tileset
 
 	ShowLoadProgress(_("Tileset '%s'"), Map.Tileset.ImageFile.c_str());
-	Map.TileGraphic = CGraphic::New(Map.Tileset.ImageFile, Map.Tileset.getPixelTileSize().x, Map.Tileset.getPixelTileSize().y);
+	const PixelSize tilePixelSize = Map.Tileset.getPixelTileSize();
+	Map.TileGraphic = CGraphic::New(Map.Tileset.ImageFile, tilePixelSize.x, tilePixelSize.y);
 	Map.TileGraphic->Load();
+	// The same image file can already be cached (GraphicHash) at a different frame
+	// size than the tileset's graphical tile size - most notably the fog-of-war
+	// graphic, which SetFogOfWarGraphics loads from this same image but frames at the
+	// global PixelTileSize. CGraphic::New returns the cached object and keeps that
+	// original frame size, so Map.TileGraphic would blit frames sized differently from
+	// the map-draw step (getPixelTileSize()), leaving a regular grid of gaps between
+	// tiles. Give the map its own graphic so the tile frame size always matches the
+	// tileset's graphical tile size, independent of load order.
+	if (Map.TileGraphic->Width != tilePixelSize.x || Map.TileGraphic->Height != tilePixelSize.y) {
+		Map.TileGraphic = CGraphic::ForceNew(Map.Tileset.ImageFile, tilePixelSize.x, tilePixelSize.y);
+		Map.TileGraphic->Load();
+	}
+	// Resolved tile-size diagnostics (visible on device via stderr/logcat).
+	fprintf(stderr,
+	        "Tileset '%s': global PixelTileSize=%dx%d tileset pixelTileSize=%dx%d "
+	        "multiplier=%d shift=%d tile-graphic frame=%dx%d frames=%d\n",
+	        Map.Tileset.Name.c_str(),
+	        PixelTileSize.x, PixelTileSize.y,
+	        tilePixelSize.x, tilePixelSize.y,
+	        Map.Tileset.getLogicalToGraphicalTileSizeMultiplier(),
+	        Map.Tileset.getLogicalToGraphicalTileSizeShift(),
+	        Map.TileGraphic->Width, Map.TileGraphic->Height,
+	        Map.TileGraphic->NumFrames);
+	fflush(stderr);
 	return 0;
 }
 
