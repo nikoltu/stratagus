@@ -1268,6 +1268,19 @@ static int CclSetFontCodePage(lua_State *l)
 	return 0;
 }
 
+extern CFont *ResourcesFont; /// mainscr.cpp: optional larger font for the resource line
+
+/**
+**  Set the font used for the resource line (gold/lumber/oil/supply/score).
+**  Pass a font name; nil restores the default game font.
+*/
+static int CclSetResourcesFont(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	ResourcesFont = lua_isnil(l, 1) ? nullptr : CFont::Get(LuaToString(l, 1));
+	return 0;
+}
+
 /**
 **  Register CCL features for UI.
 */
@@ -1275,6 +1288,7 @@ void UserInterfaceCclRegister()
 {
 	CursorCclRegister();
 	lua_register(Lua, "AddMessage", CclAddMessage);
+	lua_register(Lua, "SetResourcesFont", CclSetResourcesFont);
 
 	lua_register(Lua, "SetKeyScrollSpeed", CclSetKeyScrollSpeed);
 	lua_register(Lua, "GetKeyScrollSpeed", CclGetKeyScrollSpeed);

@@ -577,9 +577,12 @@ static void DrawUnitInfo(CUnit &unit)
 **
 **  @todo FIXME : make DrawResources more configurable (format, font).
 */
+CFont *ResourcesFont = nullptr;   /// optional larger font for the resource line (set from Lua)
+
 void DrawResources()
 {
-	CLabel label(GetGameFont());
+	CFont &resFont = ResourcesFont ? *ResourcesFont : GetGameFont();
+	CLabel label(resFont);
 
 	// Draw all icons of resource.
 	for (int i = 0; i < FreeWorkersCount; ++i) {
@@ -600,7 +603,7 @@ void DrawResources()
 
 				label.Draw(UI.Resources[i].TextX, UI.Resources[i].TextY + 3, tmp);
 			} else {
-				label.SetFont(resourceAmount > 99999 ? GetSmallFont() : GetGameFont());
+				label.SetFont(resourceAmount > 99999 ? GetSmallFont() : resFont);
 
 				label.Draw(UI.Resources[i].TextX, UI.Resources[i].TextY + (resourceAmount > 99999) * 3, resourceAmount);
 			}
@@ -609,7 +612,7 @@ void DrawResources()
 	if (UI.Resources[FoodCost].TextX != -1) {
 		char tmp[256];
 		snprintf(tmp, sizeof(tmp), "%d/%d", ThisPlayer->Demand, ThisPlayer->Supply);
-		label.SetFont(GetGameFont());
+		label.SetFont(resFont);
 		if (ThisPlayer->Supply < ThisPlayer->Demand) {
 			label.DrawReverse(UI.Resources[FoodCost].TextX, UI.Resources[FoodCost].TextY, tmp);
 		} else {
@@ -619,7 +622,7 @@ void DrawResources()
 	if (UI.Resources[ScoreCost].TextX != -1) {
 		const int score = ThisPlayer->Score;
 
-		label.SetFont(score > 99999 ? GetSmallFont() : GetGameFont());
+		label.SetFont(score > 99999 ? GetSmallFont() : resFont);
 		label.Draw(UI.Resources[ScoreCost].TextX, UI.Resources[ScoreCost].TextY + (score > 99999) * 3, score);
 	}
 	if (UI.Resources[FreeWorkersCount].TextX != -1) {
@@ -636,7 +639,7 @@ void DrawResources()
 			UI.Resources[FreeWorkersCount].G->DrawFrameClip(UI.Resources[FreeWorkersCount].IconFrame,
 											 UI.Resources[FreeWorkersCount].IconX, UI.Resources[FreeWorkersCount].IconY);
 		}
-		label.SetFont(GetGameFont());
+		label.SetFont(resFont);
 		label.Draw(
 			textX, UI.Resources[FreeWorkersCount].TextY, ThisPlayer->GetFreeWorkers().size());
 	}

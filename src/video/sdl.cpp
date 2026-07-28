@@ -49,6 +49,7 @@
 
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <sstream>
 #include <string>
@@ -331,6 +332,14 @@ void InitVideoSdl()
 	if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
 		// Fix tablet input in full-screen mode
 		SDL_setenv("SDL_MOUSE_RELATIVE", "0", 1);
+#ifdef __ANDROID__
+		// Drive the pointer entirely from raw touch/stylus events so the S-Pen and
+		// finger share one precise gesture pipeline (tap = left, hold >=0.3s = right,
+		// drag = box-select). SDL's automatic touch->mouse synthesis would otherwise
+		// fire a duplicate left-button stream underneath us, so switch it off.
+		SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+		SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+#endif
 		int res = SDL_Init(
 					  SDL_INIT_AUDIO | SDL_INIT_VIDEO |
 					  SDL_INIT_EVENTS | SDL_INIT_TIMER);
@@ -602,6 +611,125 @@ static bool isTextInput(int key) {
 	return key >= 32 && key <= 128 && !(KeyModifiers & (ModifierAlt | ModifierControl | ModifierSuper));
 }
 
+#ifdef __ANDROID__
+// ---------------------------------------------------------------------------
+// Touch / S-Pen gesture translation
+//
+// The S-Pen and finger are both delivered as SDL touch fingers. WC2 needs two
+// pointer buttons (left = select/UI, right = move/attack order) but a touch
+// screen has none, so we synthesise them from a single-finger gesture:
+//
+//   * quick tap (released < LONGPRESS, no drift)  -> LEFT click
+//   * hold in place >= 0.3 s, then release        -> RIGHT click (order/cancel)
+//   * drag beyond DRAG_PX                          -> LEFT press..release (box-select / scroll)
+//
+// Only the first finger drives the pointer; extra fingers are ignored so a
+// stray palm/second touch cannot hijack the gesture. SDL's own touch->mouse
+// synthesis is disabled (see InitVideoSdl) so this is the sole pointer source.
+// ---------------------------------------------------------------------------
+static const Uint32 TOUCH_LONGPRESS_MS = 300;   // hold this long -> right click
+static const int    TOUCH_DRAG_PX      = 24;    // drift past this -> drag (left)
+
+static bool         TouchActive    = false;
+static SDL_FingerID TouchFinger    = 0;
+static Uint32       TouchDownTicks = 0;
+static int          TouchDownX     = 0;
+static int          TouchDownY     = 0;
+static bool         TouchDragging  = false;     // left button held for a drag
+
+/// Map a normalised finger position to window pixels. The mouse-button/motion
+/// cases below apply the usual VerticalPixelSize correction, so leave the y
+/// unscaled here to stay identical to a real mouse event.
+static void TouchToPixel(float nx, float ny, int &px, int &py)
+{
+	px = static_cast<int>(nx * Video.WindowWidth + 0.5f);
+	py = static_cast<int>(ny * Video.WindowHeight + 0.5f);
+}
+
+// Re-emit the gesture as ordinary SDL mouse events. Feeding the queue (rather
+// than calling InputMouse* directly) is essential: it drives BOTH the in-game
+// input path AND the guichan menu widgets, exactly as SDL's own touch->mouse
+// synthesis used to - the difference is purely which button and when.
+static void PushMouseMotion(int x, int y)
+{
+	SDL_Event e;
+	SDL_zero(e);
+	e.type = SDL_MOUSEMOTION;
+	e.motion.x = x;
+	e.motion.y = y;
+	SDL_PushEvent(&e);
+}
+
+static void PushMouseButton(Uint32 type, Uint8 button, int x, int y)
+{
+	SDL_Event e;
+	SDL_zero(e);
+	e.type = type;
+	e.button.button = button;
+	e.button.state = (type == SDL_MOUSEBUTTONDOWN) ? SDL_PRESSED : SDL_RELEASED;
+	e.button.clicks = 1;
+	e.button.x = x;
+	e.button.y = y;
+	SDL_PushEvent(&e);
+}
+
+static void HandleFingerEvent(const SDL_Event &event)
+{
+	int px, py;
+	TouchToPixel(event.tfinger.x, event.tfinger.y, px, py);
+
+	switch (event.type) {
+		case SDL_FINGERDOWN:
+			if (TouchActive) {
+				break; // already tracking a finger; ignore the rest
+			}
+			TouchActive    = true;
+			TouchFinger    = event.tfinger.fingerId;
+			TouchDragging  = false;
+			TouchDownTicks = SDL_GetTicks();
+			TouchDownX     = px;
+			TouchDownY     = py;
+			// Park the cursor under the finger so hover/tooltips track it, but
+			// do not commit to a button yet - the gesture is still ambiguous.
+			PushMouseMotion(px, py);
+			break;
+
+		case SDL_FINGERMOTION:
+			if (!TouchActive || event.tfinger.fingerId != TouchFinger) {
+				break;
+			}
+			PushMouseMotion(px, py);
+			if (!TouchDragging &&
+				(std::abs(px - TouchDownX) > TOUCH_DRAG_PX ||
+				 std::abs(py - TouchDownY) > TOUCH_DRAG_PX)) {
+				// Enough drift: this is a drag. Start a left press from the
+				// origin so box-select / map-scroll behave like a held button.
+				TouchDragging = true;
+				PushMouseButton(SDL_MOUSEBUTTONDOWN, SDL_BUTTON_LEFT, px, py);
+			}
+			break;
+
+		case SDL_FINGERUP:
+			if (!TouchActive || event.tfinger.fingerId != TouchFinger) {
+				break;
+			}
+			PushMouseMotion(px, py);
+			if (TouchDragging) {
+				PushMouseButton(SDL_MOUSEBUTTONUP, SDL_BUTTON_LEFT, px, py);
+			} else {
+				const bool longPress =
+					(SDL_GetTicks() - TouchDownTicks) >= TOUCH_LONGPRESS_MS;
+				const Uint8 button = longPress ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
+				PushMouseButton(SDL_MOUSEBUTTONDOWN, button, px, py);
+				PushMouseButton(SDL_MOUSEBUTTONUP, button, px, py);
+			}
+			TouchActive   = false;
+			TouchDragging = false;
+			break;
+	}
+}
+#endif // __ANDROID__
+
 /**
 **  Handle interactive input event.
 **
@@ -613,6 +741,14 @@ static void SdlDoEvent(const EventCallback &callbacks, SDL_Event &event)
 	unsigned int keysym = 0;
 
 	switch (event.type) {
+#ifdef __ANDROID__
+		case SDL_FINGERDOWN:
+		case SDL_FINGERMOTION:
+		case SDL_FINGERUP:
+			HandleFingerEvent(event);
+			break;
+#endif
+
 		case SDL_MOUSEBUTTONDOWN:
 			event.button.y = static_cast<int>(std::floor(event.button.y / Video.VerticalPixelSize + 0.5));
 			InputMouseButtonPress(callbacks, SDL_GetTicks(), event.button.button);
