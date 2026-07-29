@@ -677,17 +677,22 @@ void CViewport::DrawBorder() const
 */
 void CViewport::AdjustMapRenderSurface(const PixelSize &renderSize)
 {
+	// The direct-pixel line/rectangle primitives (health/mana bars, selection
+	// corners, grid) index the target surface as x + y * Video.Width, so the
+	// offscreen surface MUST share that exact stride. Allocate it at the full
+	// framebuffer size and render only into the top-left renderSize sub-rectangle
+	// (which is then upscaled); a narrower surface would make those primitives
+	// write past the row and corrupt/segfault. renderSize never exceeds the
+	// framebuffer, so the sub-rectangle always fits.
+	(void)renderSize;
 	if (this->MapRenderSurface
-		&& this->MapRenderSurface->w >= renderSize.x
-		&& this->MapRenderSurface->h >= renderSize.y) {
+		&& this->MapRenderSurface->w == Video.Width
+		&& this->MapRenderSurface->h == Video.Height) {
 		return;
 	}
 
-	const int w = this->MapRenderSurface ? std::max(this->MapRenderSurface->w, renderSize.x) : renderSize.x;
-	const int h = this->MapRenderSurface ? std::max(this->MapRenderSurface->h, renderSize.y) : renderSize.y;
-
 	this->CleanMapRenderSurface();
-	this->MapRenderSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, w, h, 32,
+	this->MapRenderSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, Video.Width, Video.Height, 32,
 	                                              RMASK, GMASK, BMASK, AMASK);
 	SDL_SetSurfaceBlendMode(this->MapRenderSurface, SDL_BLENDMODE_NONE);
 }
