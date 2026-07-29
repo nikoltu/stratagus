@@ -442,6 +442,34 @@ static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int nu
 	UI.SelectedViewport = std::min(UI.Viewports + UI.NumViewports - 1, UI.SelectedViewport);
 }
 
+#ifdef __ANDROID__
+/**
+**  Apply a new map magnification to every in-game viewport and re-derive the
+**  dependent geometry (tiles-in-view, scroll clamp, fog and minimap box) so the
+**  change takes effect on the next frame. Only the map render scale is touched;
+**  the surrounding HUD, menus, fonts and cursors keep their native size because
+**  nothing here alters Video.Width/Height or any HUD metric. Used by the
+**  two-finger pinch-zoom gesture on touch devices.
+**
+**  @param zoom  Desired magnification, clamped to the supported [1.0, 4.0] range.
+*/
+void SetMapViewportsZoom(float zoom)
+{
+	if (zoom < 1.0f) {
+		zoom = 1.0f;
+	} else if (zoom > 4.0f) {
+		zoom = 4.0f;
+	}
+	for (unsigned int i = 0; i < UI.NumViewports; ++i) {
+		CViewport &vp = UI.Viewports[i];
+		// Set the zoom first so Set() re-derives the tiles-in-view and scroll
+		// limits from the new render size, then re-anchor on the current corner.
+		vp.Zoom = zoom;
+		vp.Set(vp.MapPos, vp.Offset);
+	}
+}
+#endif
+
 /**
 **  Takes a viewport which is supposed to have its CViewport::[XY]
 **  correctly filled-in and computes CViewport::End[XY] attributes

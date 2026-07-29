@@ -637,6 +637,48 @@ static Uint32       TouchDownTicks = 0;
 static int          TouchDownX     = 0;
 static int          TouchDownY     = 0;
 static bool         TouchDragging  = false;     // left button held for a drag
+static float        Finger1X       = 0.0f;      // last pixel pos of the primary finger
+static float        Finger1Y       = 0.0f;
+
+// ---------------------------------------------------------------------------
+// Two-finger camera controls.
+//
+// When a second finger lands both fingers together drive the map viewport
+// instead of the pointer:
+//
+//   * PAN   - the two-finger centroid drags the map (high sensitivity). This is
+//             the dominant gesture and works from the moment the pair is down.
+//   * PINCH - changing the finger separation steps the map zoom (deliberately
+//             low sensitivity so an ordinary pan does not trip it). A step is
+//             only taken once the fingers have settled, the separation has
+//             changed by a large fraction, and that change dominates the
+//             centroid drift since the last step.
+//
+// The single-finger pointer gesture is cancelled the instant the second finger
+// arrives, and neither finger of the pair may start a new pointer gesture: a
+// fresh all-fingers-up is required before single-finger handling resumes.
+// ---------------------------------------------------------------------------
+static const Uint32 TWO_FINGER_SETTLE_MS   = 90;    // ignore pinch until fingers settle
+static const float  PINCH_STEP_RATIO       = 0.35f; // separation must change >=35% to step zoom
+// Discrete zoom stops. Stepping between fixed values avoids the jitter a
+// continuous mapping would produce from small finger tremors.
+static const float  ZoomSteps[]            = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
+static const int    NumZoomSteps           = static_cast<int>(sizeof(ZoomSteps) / sizeof(ZoomSteps[0]));
+
+static bool         TwoFingerActive  = false;   // both fingers driving the camera
+static bool         SuppressGestures = false;   // block new single-finger gestures until all up
+static int          TouchFingerCount = 0;       // fingers currently down
+static SDL_FingerID Finger2          = 0;
+static float        Finger2X         = 0.0f;
+static float        Finger2Y         = 0.0f;
+static Uint32       TwoFingerStartTicks = 0;
+static float        PinchRefDist     = 0.0f;    // separation at the last accepted zoom step
+static float        CentroidRefX     = 0.0f;    // centroid at the last accepted zoom step
+static float        CentroidRefY     = 0.0f;
+static float        LastCentroidX    = 0.0f;    // centroid on the previous motion frame
+static float        LastCentroidY    = 0.0f;
+static double       PanAccumX        = 0.0;     // fractional map-pixel pan carry
+static double       PanAccumY        = 0.0;
 
 /// Map a normalised finger position to window pixels. The mouse-button/motion
 /// cases below apply the usual VerticalPixelSize correction, so leave the y
@@ -677,31 +719,219 @@ static void PushMouseButton(Uint32 type, Uint8 button, int x, int y)
 	SDL_PushEvent(&e);
 }
 
+/// The map viewport the camera gestures act on. Prefer the selected viewport,
+/// falling back to the first one; null when no in-game viewport exists (e.g. in
+/// a menu), in which case the gestures simply suppress the pointer.
+static CViewport *ActiveGameViewport()
+{
+	if (UI.SelectedViewport) {
+		return UI.SelectedViewport;
+	}
+	if (UI.NumViewports > 0) {
+		return &UI.Viewports[0];
+	}
+	return nullptr;
+}
+
+/// Next larger discrete zoom stop above z (returns the top stop if already there).
+static float NextZoomStep(float z)
+{
+	for (int i = 0; i < NumZoomSteps; ++i) {
+		if (ZoomSteps[i] > z + 0.01f) {
+			return ZoomSteps[i];
+		}
+	}
+	return ZoomSteps[NumZoomSteps - 1];
+}
+
+/// Next smaller discrete zoom stop below z (returns the bottom stop if already there).
+static float PrevZoomStep(float z)
+{
+	for (int i = NumZoomSteps - 1; i >= 0; --i) {
+		if (ZoomSteps[i] < z - 0.01f) {
+			return ZoomSteps[i];
+		}
+	}
+	return ZoomSteps[0];
+}
+
+/// Set the game viewport top-left to the given map-pixel corner using the public
+/// Set() overload (tile (0,0) top-left is map pixel (0,0), so the offset is the
+/// absolute map-pixel corner). Set() applies the engine's scroll clamp.
+static void SetViewportMapCorner(CViewport *vp, int mapPixelX, int mapPixelY)
+{
+	vp->Set(Vec2i(0, 0), PixelDiff(mapPixelX, mapPixelY));
+}
+
+/// Current map-pixel coordinate of the viewport's top-left corner.
+static PixelPos ViewportMapCorner(const CViewport *vp)
+{
+	// ScreenToMapPixelPos of the on-screen top-left yields exactly the corner.
+	return vp->ScreenToMapPixelPos(vp->GetTopLeftPos());
+}
+
+/// Begin two-finger mode: cancel any pending single-finger gesture and seed the
+/// pan/pinch reference state from the current finger geometry.
+static void BeginTwoFinger(SDL_FingerID secondId, float f2x, float f2y)
+{
+	// Cancel the pending single-finger gesture cleanly. If a left-drag was
+	// already injected, release it here so nothing is left held down. If the
+	// gesture was still tentative (no button injected), just drop it - no tap
+	// or right-click must fire for these fingers.
+	if (TouchDragging) {
+		PushMouseButton(SDL_MOUSEBUTTONUP, SDL_BUTTON_LEFT,
+		                static_cast<int>(Finger1X + 0.5f),
+		                static_cast<int>(Finger1Y + 0.5f));
+	}
+	TouchDragging = false;
+
+	TwoFingerActive     = true;
+	Finger2             = secondId;
+	Finger2X            = f2x;
+	Finger2Y            = f2y;
+	TwoFingerStartTicks = SDL_GetTicks();
+
+	const float cx = (Finger1X + Finger2X) * 0.5f;
+	const float cy = (Finger1Y + Finger2Y) * 0.5f;
+	LastCentroidX = CentroidRefX = cx;
+	LastCentroidY = CentroidRefY = cy;
+	PinchRefDist  = std::hypot(Finger1X - Finger2X, Finger1Y - Finger2Y);
+	PanAccumX = PanAccumY = 0.0;
+}
+
+/// Process a motion frame while two fingers are down: pan by the centroid delta
+/// and, when the separation change dominates, step the zoom.
+static void UpdateTwoFinger()
+{
+	const float cx = (Finger1X + Finger2X) * 0.5f;
+	const float cy = (Finger1Y + Finger2Y) * 0.5f;
+	const float dist = std::hypot(Finger1X - Finger2X, Finger1Y - Finger2Y);
+
+	CViewport *vp = ActiveGameViewport();
+
+	// --- Pinch zoom (low sensitivity, discrete steps) ----------------------
+	const bool settled = (SDL_GetTicks() - TwoFingerStartTicks) >= TWO_FINGER_SETTLE_MS;
+	const float distChange    = std::fabs(dist - PinchRefDist);
+	const float centroidDrift = std::hypot(cx - CentroidRefX, cy - CentroidRefY);
+	bool zoomed = false;
+
+	if (vp && settled && PinchRefDist > 1.0f
+		&& distChange >= PINCH_STEP_RATIO * PinchRefDist
+		&& distChange >= centroidDrift) {
+		const float curZoom = vp->Zoom;
+		const float newZoom = (dist > PinchRefDist) ? NextZoomStep(curZoom)
+		                                            : PrevZoomStep(curZoom);
+		if (newZoom != curZoom) {
+			// Keep the map point under the centroid fixed across the zoom
+			// change: read it before the scale changes, then re-anchor.
+			const PixelPos anchor =
+				vp->ScreenToMapPixelPos(PixelPos(static_cast<int>(cx + 0.5f),
+				                                 static_cast<int>(cy + 0.5f)));
+			SetMapViewportsZoom(newZoom);
+			const float z = (vp->Zoom > 0.0f) ? vp->Zoom : 1.0f;
+			const int cornerX = static_cast<int>(std::lround(
+				anchor.x - (cx - vp->GetTopLeftPos().x) / z));
+			const int cornerY = static_cast<int>(std::lround(
+				anchor.y - (cy - vp->GetTopLeftPos().y) / z));
+			SetViewportMapCorner(vp, cornerX, cornerY);
+			zoomed = true;
+		}
+		// Reset the references after any accepted step so the next step needs a
+		// fresh large separation change - this is what makes zoom discrete.
+		PinchRefDist = dist;
+		CentroidRefX = cx;
+		CentroidRefY = cy;
+	}
+
+	// --- Pan (high sensitivity) --------------------------------------------
+	// Skip on the frame a zoom step was applied - that frame already re-centred
+	// the view on the centroid, so also folding in a pan would double-count.
+	if (vp && !zoomed) {
+		const float z = (vp->Zoom > 0.0f) ? vp->Zoom : 1.0f;
+		// Map follows the fingers: a rightward/downward finger drag reveals the
+		// content to the upper-left, i.e. the map corner moves the opposite way.
+		// Divide the on-screen delta by the zoom because the map is upscaled.
+		PanAccumX += -static_cast<double>(cx - LastCentroidX) / z;
+		PanAccumY += -static_cast<double>(cy - LastCentroidY) / z;
+		const int mdx = static_cast<int>(PanAccumX);
+		const int mdy = static_cast<int>(PanAccumY);
+		if (mdx != 0 || mdy != 0) {
+			PanAccumX -= mdx;
+			PanAccumY -= mdy;
+			const PixelPos corner = ViewportMapCorner(vp);
+			SetViewportMapCorner(vp, corner.x + mdx, corner.y + mdy);
+		}
+	}
+
+	LastCentroidX = cx;
+	LastCentroidY = cy;
+}
+
+/// Leave two-finger mode when either finger of the pair lifts. The remaining
+/// finger must not start a new pointer gesture, so drop pointer tracking and
+/// keep single-finger handling suppressed until every finger is up.
+static void EndTwoFinger()
+{
+	TwoFingerActive  = false;
+	TouchActive      = false;
+	TouchDragging    = false;
+	SuppressGestures = true;
+}
+
 static void HandleFingerEvent(const SDL_Event &event)
 {
 	int px, py;
 	TouchToPixel(event.tfinger.x, event.tfinger.y, px, py);
+	const float fx = event.tfinger.x * Video.Width;
+	const float fy = event.tfinger.y * Video.Height;
 
 	switch (event.type) {
 		case SDL_FINGERDOWN:
-			if (TouchActive) {
-				break; // already tracking a finger; ignore the rest
+			++TouchFingerCount;
+			if (TwoFingerActive) {
+				break; // already have our pair; extra fingers are ignored
 			}
+			if (TouchActive) {
+				// Second finger: hand control to the camera gestures.
+				BeginTwoFinger(event.tfinger.fingerId, fx, fy);
+				break;
+			}
+			if (SuppressGestures) {
+				break; // leftover finger after a camera gesture; wait for all-up
+			}
+			// First finger of a fresh gesture.
 			TouchActive    = true;
 			TouchFinger    = event.tfinger.fingerId;
 			TouchDragging  = false;
 			TouchDownTicks = SDL_GetTicks();
 			TouchDownX     = px;
 			TouchDownY     = py;
+			Finger1X       = fx;
+			Finger1Y       = fy;
 			// Park the cursor under the finger so hover/tooltips track it, but
 			// do not commit to a button yet - the gesture is still ambiguous.
 			PushMouseMotion(px, py);
 			break;
 
 		case SDL_FINGERMOTION:
+			if (TwoFingerActive) {
+				if (event.tfinger.fingerId == TouchFinger) {
+					Finger1X = fx;
+					Finger1Y = fy;
+				} else if (event.tfinger.fingerId == Finger2) {
+					Finger2X = fx;
+					Finger2Y = fy;
+				} else {
+					break; // motion from an ignored extra finger
+				}
+				UpdateTwoFinger();
+				break;
+			}
 			if (!TouchActive || event.tfinger.fingerId != TouchFinger) {
 				break;
 			}
+			Finger1X = fx;
+			Finger1Y = fy;
 			PushMouseMotion(px, py);
 			if (!TouchDragging &&
 				(std::abs(px - TouchDownX) > TOUCH_DRAG_PX ||
@@ -714,7 +944,22 @@ static void HandleFingerEvent(const SDL_Event &event)
 			break;
 
 		case SDL_FINGERUP:
+			if (TouchFingerCount > 0) {
+				--TouchFingerCount;
+			}
+			if (TwoFingerActive
+				&& (event.tfinger.fingerId == TouchFinger || event.tfinger.fingerId == Finger2)) {
+				EndTwoFinger();
+				if (TouchFingerCount == 0) {
+					SuppressGestures = false;
+				}
+				break;
+			}
 			if (!TouchActive || event.tfinger.fingerId != TouchFinger) {
+				if (TouchFingerCount == 0) {
+					// All fingers up: allow single-finger gestures again.
+					SuppressGestures = false;
+				}
 				break;
 			}
 			PushMouseMotion(px, py);
@@ -729,6 +974,9 @@ static void HandleFingerEvent(const SDL_Event &event)
 			}
 			TouchActive   = false;
 			TouchDragging = false;
+			if (TouchFingerCount == 0) {
+				SuppressGestures = false;
+			}
 			break;
 	}
 }

@@ -567,6 +567,10 @@ extern void CycleViewportMode(int);
 extern void SetViewportMode(ViewportModeType mode);
 extern void SetNewViewportMode(ViewportModeType mode);
 extern void CheckViewportMode();
+#ifdef __ANDROID__
+/// Set the magnification of all in-game map viewports and re-derive geometry
+extern void SetMapViewportsZoom(float zoom);
+#endif
 
 /// Check if mouse scrolling is enabled
 extern bool GetMouseScroll();
