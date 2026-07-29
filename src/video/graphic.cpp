@@ -778,9 +778,17 @@ void CGraphic::Flip()
 	SDL_Surface *s = SurfaceFlip = SDL_ConvertSurface(mSurface, mSurface->format, 0);
 	Uint32 ckey;
 	if (!SDL_GetColorKey(mSurface, &ckey)) {
+		// Colour-keyed (classic paletted) source: keep the key + opaque blit.
 		SDL_SetColorKey(SurfaceFlip, SDL_TRUE, ckey);
+		SDL_SetSurfaceBlendMode(SurfaceFlip, SDL_BLENDMODE_NONE);
+	} else {
+		// No colour key: an RGBA (HD) source relies on per-pixel alpha. Mirror the source's
+		// blend mode so the flipped frame's transparent margin stays transparent; a forced
+		// NONE here blits that margin as opaque black (a black box behind left-facing units).
+		SDL_BlendMode bm = SDL_BLENDMODE_BLEND;
+		SDL_GetSurfaceBlendMode(mSurface, &bm);
+		SDL_SetSurfaceBlendMode(SurfaceFlip, bm);
 	}
-	SDL_SetSurfaceBlendMode(SurfaceFlip, SDL_BLENDMODE_NONE);
 	if (SurfaceFlip->format->BytesPerPixel == 1) {
 		VideoPaletteListAdd(SurfaceFlip);
 	}
