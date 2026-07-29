@@ -623,10 +623,12 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 	//
 	// Draw orders of selected units.
 	// Drawn here so that they are shown even when the unit is out of the screen.
+	// While a unit is selected its order path (the move/attack line to the target)
+	// is drawn every frame, so a touch move order shows a clear, persistent line to
+	// the destination for the whole move instead of a brief flash. The timed/Shift
+	// path still applies to non-selected feedback.
 	//
-	if (!Preference.ShowOrders) {
-	} else if (Preference.ShowOrders < 0
-			   || (ShowOrdersCount >= GameCycle) || (KeyModifiers & ModifierShift)) {
+	if (Preference.ShowOrders) {
 		for (const CUnit *unit : Selected) {
 			ShowOrder(*unit);
 		}
