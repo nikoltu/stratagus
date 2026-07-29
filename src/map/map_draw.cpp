@@ -316,7 +316,13 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 		canShortcut = false;
 	} else {
 		graphicTileOffset = 1;
-		canShortcut = (GameSettings.RevealMap == MapRevealModes::cHidden || FogOfWar->GetType() == FogOfWarTypes::cTiledLegacy)
+		// The shortcut skips painting terrain under non-visible tiles, relying on the fog pass
+		// to cover them. When rendering into the zoomed offscreen surface (freshly cleared to
+		// black each frame) there is no backing content, so a skipped tile the fog does not
+		// fully cover leaks through as a black patch around units. Only take the shortcut when
+		// drawing straight to the screen.
+		canShortcut = (TheScreen != this->MapRenderSurface)
+					  && (GameSettings.RevealMap == MapRevealModes::cHidden || FogOfWar->GetType() == FogOfWarTypes::cTiledLegacy)
 					  && FogOfWar->GetType() != FogOfWarTypes::cEnhanced
 					  && !ReplayRevealMap;
 	}
@@ -345,7 +351,7 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 			dx -= dv.rem;
 		}
 		while (dx <= ex && (sx - sy < mapW)) {
-			if (sx - sy < 0 || (canShortcut && !FogOfWar->GetVisibilityForTile(Vec2i(sx % mapW, sx / mapH)))) {
+			if (sx - sy < 0 || (canShortcut && !FogOfWar->GetVisibilityForTile(Vec2i(sx % mapW, sx / mapW)))) {
 				if constexpr(graphicalTileIsLogicalTile) {
 					++sx;
 				} else {
