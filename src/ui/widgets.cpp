@@ -1814,6 +1814,9 @@ ListBoxWidget::ListBoxWidget(unsigned int width, unsigned int height)
 	setDimension(gcn::Rectangle(0, 0, width, height));
 	setContent(&listbox);
 	setBackgroundColor(gcn::Color(128, 128, 128));
+	// Vertical name lists never scroll sideways; suppress the stray horizontal scrollbar that
+	// ShowAuto pops up when a single item is wider than the box (WargusHD Remastered lists).
+	setHorizontalScrollPolicy(gcn::ScrollArea::ShowNever);
 }
 
 /**
