@@ -68,6 +68,9 @@ static void (*VideoDoDrawTransPixel)(Uint32 color, int x, int y, unsigned char a
 */
 static void VideoDoDrawPixel16(Uint32 color, int x, int y)
 {
+	if (x < 0 || y < 0 || x >= Video.Width || y >= Video.Height) {
+		return;
+	}
 	((Uint16 *)TheScreen->pixels)[x + y * Video.Width] = color;
 }
 
@@ -86,6 +89,11 @@ void VideoDrawPixel16(Uint32 color, int x, int y)
 */
 static void VideoDoDrawPixel32(Uint32 color, int x, int y)
 {
+	// Defence in depth: every caller is expected to clip, but a stray out-of-range
+	// coordinate here is a raw heap write. Drop it rather than corrupt memory.
+	if (x < 0 || y < 0 || x >= Video.Width || y >= Video.Height) {
+		return;
+	}
 	((Uint32 *)TheScreen->pixels)[x + y * Video.Width] = color;
 }
 
@@ -104,6 +112,9 @@ void VideoDrawPixel32(Uint32 color, int x, int y)
 */
 static void VideoDoDrawTransPixel16(Uint32 color, int x, int y, unsigned char alpha)
 {
+	if (x < 0 || y < 0 || x >= Video.Width || y >= Video.Height) {
+		return;
+	}
 	// Loses precision for speed
 	alpha = (255 - alpha) >> 3;
 
@@ -130,6 +141,9 @@ void VideoDrawTransPixel16(Uint32 color, int x, int y, unsigned char alpha)
 */
 static void VideoDoDrawTransPixel32(Uint32 color, int x, int y, unsigned char alpha)
 {
+	if (x < 0 || y < 0 || x >= Video.Width || y >= Video.Height) {
+		return;
+	}
 	alpha = 255 - alpha;
 
 	Uint32 *p = &((Uint32 *)TheScreen->pixels)[x + y * Video.Width];

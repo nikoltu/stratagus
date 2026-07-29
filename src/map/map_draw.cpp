@@ -479,12 +479,17 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 		savedTopLeft = this->TopLeftPos;
 		savedBottomRight = this->BottomRightPos;
 		this->TopLeftPos = PixelPos(0, 0);
-		this->BottomRightPos = PixelPos(renderSize.x, renderSize.y);
+		// BottomRightPos is the inclusive last pixel everywhere else in the engine, so the
+		// rendered region is exactly the renderSize sub-rect (no one-past-the-edge column/row).
+		this->BottomRightPos = PixelPos(renderSize.x - 1, renderSize.y - 1);
 		this->Zoom = 1.0f;
 
 		savedScreen = TheScreen;
 		TheScreen = this->MapRenderSurface;
-		SDL_FillRect(this->MapRenderSurface, nullptr, 0);
+		// Only the renderSize sub-rect is drawn and upscaled; clearing the whole
+		// framebuffer-sized surface each frame is wasted bandwidth (~4x at Zoom 2).
+		SDL_Rect clearRect = { 0, 0, renderSize.x, renderSize.y };
+		SDL_FillRect(this->MapRenderSurface, &clearRect, 0);
 	}
 
 	PushClipping();
@@ -614,7 +619,9 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 		srcRect.y = 0;
 		srcRect.w = renderSize.x;
 		srcRect.h = renderSize.y;
-		SDL_BlitScaled(this->MapRenderSurface, &srcRect, TheScreen, &dstRect);
+		// Both surfaces share the same 32bpp no-alpha layout, so this same-format stretch
+		// takes SDL's fast path instead of the per-pixel converting SDL_BlitScaled.
+		SDL_SoftStretch(this->MapRenderSurface, &srcRect, TheScreen, &dstRect);
 
 		PushClipping();
 		this->SetClipping();
@@ -694,8 +701,12 @@ void CViewport::AdjustMapRenderSurface(const PixelSize &renderSize)
 	}
 
 	this->CleanMapRenderSurface();
+	// Match TheScreen's pixel layout exactly (no alpha mask). A mismatched alpha mask forces
+	// the per-frame upscale onto SDL's slow per-pixel converting blit; the same 32bpp no-alpha
+	// layout lets it take the fast same-format stretch. Stride stays Video.Width so the
+	// direct-pixel primitives that index x + y * Video.Width remain in bounds.
 	this->MapRenderSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, Video.Width, Video.Height, 32,
-	                                              RMASK, GMASK, BMASK, AMASK);
+	                                              RMASK, GMASK, BMASK, 0);
 	SDL_SetSurfaceBlendMode(this->MapRenderSurface, SDL_BLENDMODE_NONE);
 }
 
