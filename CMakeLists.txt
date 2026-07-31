@@ -85,6 +85,7 @@ endif()
 
 include_directories(
 	src/include
+	src/debug
 	${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -175,6 +176,11 @@ set(game_SRCS
 	src/game/trigger.cpp
 )
 source_group(game FILES ${game_SRCS})
+
+set(debug_SRCS
+	src/debug/debug_bridge.cpp
+)
+source_group(debug FILES ${debug_SRCS})
 
 set(map_SRCS
 	src/map/fov.cpp
@@ -376,6 +382,7 @@ set(stratagus_SRCS
 	${action_SRCS}
 	${animation_SRCS}
 	${ai_SRCS}
+	${debug_SRCS}
 	${editor_SRCS}
 	${game_SRCS}
 	${map_SRCS}

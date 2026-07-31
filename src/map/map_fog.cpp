@@ -33,6 +33,7 @@
 /*----------------------------------------------------------------------------
 --  Includes
 ----------------------------------------------------------------------------*/
+#include <cmath>
 #include <queue>
 
 #include "stratagus.h"
@@ -397,23 +398,82 @@ void CViewport::DrawMapFogOfWar()
 
 	FogOfWar->Draw(*this);
 
-	/// TODO: switch to hardware rendering
-	const bool isSoftwareRender {true}; // FIXME: remove this
-	if (isSoftwareRender && FogOfWar->GetType() != FogOfWarTypes::cTiledLegacy) {
-		SDL_Rect screenRect;
-		screenRect.x = this->TopLeftPos.x;
-		screenRect.y = this->TopLeftPos.y;
-		screenRect.w = this->BottomRightPos.x - this->TopLeftPos.x + 1;
-		screenRect.h = this->BottomRightPos.y - this->TopLeftPos.y + 1;
+	const bool nonLegacy = FogOfWar->GetType() != FogOfWarTypes::cTiledLegacy;
 
-		SDL_Rect fogRect;
-		fogRect.x = this->Offset.x;
-		fogRect.y = this->Offset.y;
-		fogRect.w = screenRect.w;
-		fogRect.h = screenRect.h;
+	// On-screen destination = the whole viewport rectangle in window pixels.
+	SDL_Rect screenRect;
+	screenRect.x = this->TopLeftPos.x;
+	screenRect.y = this->TopLeftPos.y;
+	screenRect.w = this->BottomRightPos.x - this->TopLeftPos.x + 1;
+	screenRect.h = this->BottomRightPos.y - this->TopLeftPos.y + 1;
 
-		/// Alpha blending of the fog texture into the screen
-		BlitSurfaceAlphaBlending_32bpp(this->FogSurface, &fogRect, TheScreen, &screenRect);
+	// Source sub-region of the fog surface: the logical (native == full / Zoom) map area starting
+	// at the scroll Offset. This is exactly the region the CPU blit sampled below. At Zoom==1 it is
+	// the full on-screen size; when zoomed it is the smaller native region that must be scaled up to
+	// the zoomed world underneath.
+	const PixelSize logical = this->GetRenderPixelSize(); // == full / Zoom
+	SDL_Rect fogRect;
+	fogRect.x = this->Offset.x;
+	fogRect.y = this->Offset.y;
+	fogRect.w = logical.x;
+	fogRect.h = logical.y;
+
+	// GPU-pipeline (Phase 2): when the world for this viewport was drawn straight to the GPU
+	// backbuffer (the on-screen render), composite the fog on the GPU too. The editor/zoom offscreen
+	// and the crisp path both redirect TheScreen to this->MapRenderSurface before drawing fog, so the
+	// `TheScreen != MapRenderSurface` test selects exactly the backbuffer path and keeps the CPU blit
+	// for those. Upload the small per-viewport fog surface (map-tile resolution, cheap) to a streaming
+	// texture and RenderCopy it scaled over the viewport rect with alpha blending. This lands on the
+	// backbuffer AFTER the tiles/units and BEFORE the CPU HUD overlay (composited in
+	// RealizeVideoMemory), so fog covers the world but the HUD stays on top. The fog surface already
+	// carries the fog tint in RGB and coverage in alpha, so plain BLEND is correct (no colour-mod
+	// needed). Linear scaling smooths the low-res fog gradient at zoom.
+	const bool gpuFog = nonLegacy && this->FogSurface && TheRenderer
+	                    && TheScreen != this->MapRenderSurface;
+	if (gpuFog) {
+		if (!this->FogTexture || this->FogTextureWidth != this->FogSurface->w
+			|| this->FogTextureHeight != this->FogSurface->h) {
+			if (this->FogTexture) {
+				SDL_DestroyTexture(this->FogTexture);
+				this->FogTexture = nullptr;
+			}
+			this->FogTexture = SDL_CreateTexture(TheRenderer, SDL_PIXELFORMAT_ARGB8888,
+												 SDL_TEXTUREACCESS_STREAMING,
+												 this->FogSurface->w, this->FogSurface->h);
+			if (this->FogTexture) {
+				this->FogTextureWidth = this->FogSurface->w;
+				this->FogTextureHeight = this->FogSurface->h;
+				SDL_SetTextureBlendMode(this->FogTexture, SDL_BLENDMODE_BLEND);
+				SDL_SetTextureScaleMode(this->FogTexture, SDL_ScaleModeLinear);
+			}
+		}
+		if (this->FogTexture) {
+			SDL_UpdateTexture(this->FogTexture, nullptr, this->FogSurface->pixels,
+							  this->FogSurface->pitch);
+			SDL_RenderCopy(TheRenderer, this->FogTexture, &fogRect, &screenRect);
+			return;
+		}
+		// Texture creation failed: fall through to the CPU blit below.
+	}
+
+	/// CPU fallback: editor/zoom offscreen, crisp path, or GPU texture-creation failure.
+	const bool isSoftwareRender {true};
+	if (isSoftwareRender && nonLegacy) {
+		// Zoomed viewport (crisp path OR the offscreen render): sample the logical (full / Zoom)
+		// sub-region of the fog and scale-blend it up so it lines up with the zoomed world, using
+		// SDL's own alpha blit (scale + blend). Byte-identical classic path when not zoomed (the
+		// offscreen render resets Zoom to 1.0 before calling here, so that path is unaffected).
+		if (this->Zoom != 1.0f) {
+			SDL_SetSurfaceBlendMode(this->FogSurface, SDL_BLENDMODE_BLEND);
+			SDL_BlitScaled(this->FogSurface, &fogRect, TheScreen, &screenRect);
+			SDL_SetSurfaceBlendMode(this->FogSurface, SDL_BLENDMODE_NONE);
+			return;
+		}
+
+		// Non-zoomed CPU path: byte-identical to the classic code — sample the full on-screen
+		// viewport region (GetPixelSize omits the inclusive +1 pixel that screenRect carries).
+		SDL_Rect nativeFogRect = { this->Offset.x, this->Offset.y, screenRect.w, screenRect.h };
+		BlitSurfaceAlphaBlending_32bpp(this->FogSurface, &nativeFogRect, TheScreen, &screenRect);
 	}
 }
 
@@ -454,6 +514,14 @@ void CViewport::CleanFog()
 {
 	SDL_FreeSurface(this->FogSurface);
 	this->FogSurface = nullptr;
+	// GPU-pipeline (Phase 2): release the streaming fog texture too. It is lazily recreated on the
+	// next GPU fog draw (sized to the fresh FogSurface).
+	if (this->FogTexture) {
+		SDL_DestroyTexture(this->FogTexture);
+		this->FogTexture = nullptr;
+	}
+	this->FogTextureWidth = 0;
+	this->FogTextureHeight = 0;
 }
 
 

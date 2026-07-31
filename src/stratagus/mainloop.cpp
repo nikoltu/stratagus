@@ -184,9 +184,17 @@ void DrawMapArea(const fieldHighlightChecker highlightChecker = nullptr)
 */
 void UpdateDisplay()
 {
+	// GPU-pipeline hybrid (Phase 0): open the frame BEFORE any world drawing. This targets and
+	// clears the GPU backbuffer to opaque black; the GPU world layers (tiles/units) are then
+	// drawn on top of that clear during DrawMapArea, and the CPU overlay (TheScreen) is copied
+	// over them in RealizeVideoMemory. Idempotent per frame.
+	BeginFrame();
+
 	if (GameRunning || Editor.Running == EditorEditing) {
-		// to prevent empty spaces in the UI
-		Video.FillRectangleClip(ColorBlack, 0, 0, Video.Width, Video.Height);
+		// Clear the CPU overlay to fully TRANSPARENT (was opaque black). The GPU world shows
+		// through wherever the overlay is untouched; only opaque CPU layers (HUD/fog/cursor)
+		// occlude it. 0 == transparent in ARGB8888. (Prevents empty spaces in the UI.)
+		SDL_FillRect(TheScreen, nullptr, 0);
 		DrawMapArea();
 		// TODO: for e.g. environmental effects, we want to push to the renderer here with appropriate shaders set,
 		// then do the rest.
@@ -249,77 +257,97 @@ static void InitGameCallbacks()
 	GameCallbacks.NetworkEvent = NetworkEvent;
 }
 
-static void GameLogicLoop()
+// Real-time accumulator (ms) toward the next logic cycle. Drives both the fixed-timestep
+// logic pacing (SingleGameLoop) and the render-side movement interpolation fraction, so the
+// simulation runs a stable CYCLES_PER_SECOND regardless of render frame rate.
+static double LogicAccumulatorMs = 0.0;
+
+/// Fraction (0..1) of a game-cycle's real-time duration elapsed toward the next cycle.
+/// Used only by the draw path to interpolate unit positions between cycles.
+double GetGameCycleFraction()
+{
+	if (GamePaused) {
+		return 0.0;
+	}
+	const double period = 1000.0 / (double)CYCLES_PER_SECOND;
+	const double f = LogicAccumulatorMs / period;
+	return f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);
+}
+
+// Advance the simulation by exactly one cycle. The caller (SingleGameLoop) decides WHEN and
+// HOW MANY TIMES to run it via the fixed-timestep accumulator, so this no longer gates on
+// GamePaused / NetworkInSync / SkipGameCycle itself.
+static void RunOneGameCycle()
 {
 	// Can't find a better place.
 	// FIXME: We need find better place!
 	SaveGameLoading = false;
 
-	//
-	// Game logic part
-	//
-	if (!GamePaused && NetworkInSync && SkipGameCycle < 1) {
-		SinglePlayerReplayEachCycle();
-		++GameCycle;
-		MultiPlayerReplayEachCycle();
-		NetworkCommands(); // Get network commands
-		TriggersEachCycle();// handle triggers
-		UnitActions();      // handle units
-		MissileActions();   // handle missiles
-		PlayersEachCycle(); // handle players
-		UpdateTimer();      // update game timer
+	SinglePlayerReplayEachCycle();
+	++GameCycle;
+	MultiPlayerReplayEachCycle();
+	NetworkCommands(); // Get network commands
+	TriggersEachCycle();// handle triggers
+	UnitActions();      // handle units
+	MissileActions();   // handle missiles
+	PlayersEachCycle(); // handle players
+	UpdateTimer();      // update game timer
 
 
-		//
-		// Work todo each second.
-		// Split into different frames, to reduce cpu time.
-		// Increment mana of magic units.
-		// Update mini-map.
-		// Update map fog of war.
-		// Call AI.
-		// Check game goals.
-		// Check rescue of units.
-		//
-		switch (GameCycle % CYCLES_PER_SECOND) {
-			case 0: // At cycle 0, start all ai players...
-				if (GameCycle == 0) {
-					for (int player = 0; player < NumPlayers; ++player) {
-						PlayersEachSecond(player);
-					}
-				}
-				break;
-			case 1:
-				break;
-			case 2:
-				break;
-			case 3: // minimap update
-				UI.Minimap.UpdateCache = true;
-				break;
-			case 4:
-				break;
-			case 5: // forest grow
-				Map.RegenerateForest();
-				break;
-			case 6: // overtaking units
-				RescueUnits();
-				break;
-			default: {
-				// FIXME: assume that NumPlayers < (CYCLES_PER_SECOND - 7)
-				int player = (GameCycle % CYCLES_PER_SECOND) - 7;
-				Assert(player >= 0);
-				if (player < NumPlayers) {
+	//
+	// Work todo each second.
+	// Split into different frames, to reduce cpu time.
+	// Increment mana of magic units.
+	// Update mini-map.
+	// Update map fog of war.
+	// Call AI.
+	// Check game goals.
+	// Check rescue of units.
+	//
+	switch (GameCycle % CYCLES_PER_SECOND) {
+		case 0: // At cycle 0, start all ai players...
+			if (GameCycle == 0) {
+				for (int player = 0; player < NumPlayers; ++player) {
 					PlayersEachSecond(player);
 				}
 			}
-		}
-
-		if (Preference.AutosaveMinutes != 0 && !IsNetworkGame() && !IsReplayGame() && GameCycle > 0 && (GameCycle % (CYCLES_PER_SECOND * 60 * Preference.AutosaveMinutes)) == 0) { // autosave every X minutes (default is 5), if the option is enabled
-		//Wyrmgus end
-			UI.StatusLine.Set(_("Autosave"));
-			SaveGame("autosave.sav");
+			break;
+		case 1:
+			break;
+		case 2:
+			break;
+		case 3: // minimap update
+			UI.Minimap.UpdateCache = true;
+			break;
+		case 4:
+			break;
+		case 5: // forest grow
+			Map.RegenerateForest();
+			break;
+		case 6: // overtaking units
+			RescueUnits();
+			break;
+		default: {
+			// FIXME: assume that NumPlayers < (CYCLES_PER_SECOND - 7)
+			int player = (GameCycle % CYCLES_PER_SECOND) - 7;
+			Assert(player >= 0);
+			if (player < NumPlayers) {
+				PlayersEachSecond(player);
+			}
 		}
 	}
 
+	if (Preference.AutosaveMinutes != 0 && !IsNetworkGame() && !IsReplayGame() && GameCycle > 0 && (GameCycle % (CYCLES_PER_SECOND * 60 * Preference.AutosaveMinutes)) == 0) { // autosave every X minutes (default is 5), if the option is enabled
+	//Wyrmgus end
+		UI.StatusLine.Set(_("Autosave"));
+		SaveGame("autosave.sav");
+	}
+}
+
+// Per-rendered-frame housekeeping plus input/frame pacing. Runs once per rendered frame,
+// independent of how many logic cycles advanced this frame.
+static void PerFrameHousekeeping()
+{
 	UpdateMessages();     // update messages
 	ParticleManager.update(); // handle particles
 
@@ -371,9 +399,44 @@ static void DisplayLoop()
 
 static void SingleGameLoop()
 {
+	const double period = 1000.0 / (double)CYCLES_PER_SECOND;
+	long lastTicks = (long)SDL_GetTicks();
 	while (GameRunning) {
-		DisplayLoop();
-		GameLogicLoop();
+		// Replay fast-forward / seek: advance cycles at max speed with no time throttle.
+		// DisplayLoop and WaitEventsOneFrame are internally gated to every 256th cycle here.
+		if (FastForwardCycle > GameCycle && !GamePaused && NetworkInSync) {
+			RunOneGameCycle();
+			DisplayLoop();
+			PerFrameHousekeeping();
+			lastTicks = (long)SDL_GetTicks();
+			LogicAccumulatorMs = 0.0;
+			continue;
+		}
+
+		const long now = (long)SDL_GetTicks();
+		double delta = (double)(now - lastTicks);
+		lastTicks = now;
+		if (delta < 0.0) delta = 0.0;
+		if (delta > 250.0) delta = 250.0;   // clamp after a stall to avoid a spiral of death
+
+		if (!GamePaused && NetworkInSync) {
+			LogicAccumulatorMs += delta;
+			int guard = 0;
+			// Run as many fixed-size logic cycles as real time has accrued (catch-up),
+			// bounded so a long stall can't lock the loop. The remainder in the accumulator
+			// is the interpolation fraction the draw path reads via GetGameCycleFraction().
+			while (LogicAccumulatorMs >= period && guard < 10) {
+				RunOneGameCycle();
+				LogicAccumulatorMs -= period;
+				++guard;
+				if (FastForwardCycle > GameCycle) { break; }
+			}
+		} else {
+			LogicAccumulatorMs = 0.0;   // paused / out of sync: no interpolation drift
+		}
+
+		DisplayLoop();            // renders with GetGameCycleFraction() = accumulator/period
+		PerFrameHousekeeping();   // input + frame pacing (WaitEventsOneFrame)
 	}
 }
 

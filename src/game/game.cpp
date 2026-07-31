@@ -138,7 +138,9 @@ void StartMap(const std::string &filename, bool clean)
 
 	CreateGame(filename, &Map);
 
-	UI.StatusLine.Set(NameLine);
+	// Start with a clean status line in-game; the engine version/copyright (NameLine)
+	// belongs on the title/menu, not stamped across the HUD footer during play.
+	UI.StatusLine.Set("");
 	SetMessage("%s", _("Do it! Do it now!"));
 
 	//  Play the game.

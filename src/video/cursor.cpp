@@ -224,13 +224,16 @@ static void DrawVisibleRectangleCursor(PixelPos corner1, PixelPos corner2)
 }
 
 /**
-**  Draw cursor for selecting building position.
+**  Draw cursor for selecting building position into the current TheScreen.
+**
+**  Factored out of DrawBuildingCursor() so CViewport::Draw can render the
+**  placement preview inside the zoom offscreen. Drawing it there lets the
+**  preview sprite and the build grid upscale identically to the real building
+**  (at Zoom != 1 a native-scale draw after the upscale would be 1/Zoom sized
+**  and misaligned). The caller supplies the viewport and the target tile.
 */
-static void DrawBuildingCursor()
+void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 {
-	// Align to grid
-	const CViewport &vp = *UI.MouseViewport;
-	const Vec2i mpos = vp.ScreenToTilePos(CursorScreenPos);
 	const PixelPos screenPos = vp.TilePosToScreen_TopLeft(mpos);
 
 	//
@@ -303,6 +306,16 @@ static void DrawBuildingCursor()
 	PopClipping();
 }
 
+/**
+**  Draw cursor for selecting building position.
+*/
+static void DrawBuildingCursor()
+{
+	const CViewport &vp = *UI.MouseViewport;
+	const Vec2i mpos = vp.ScreenToTilePos(CursorScreenPos);
+	DrawBuildingCursorViewport(vp, mpos);
+}
+
 
 /**
 **  Draw the cursor.
@@ -327,10 +340,18 @@ void DrawCursor()
 		const PixelPos cursorStartScreenPos = UI.MouseViewport->MapToScreenPixelPos(CursorStartMapPos);
 
 		DrawVisibleRectangleCursor(cursorStartScreenPos, CursorScreenPos);
-	} else if (CursorBuilding && CursorOn == ECursorOn::Map) {
-		// Selecting position for building
+	} else if (CursorBuilding && CursorOn == ECursorOn::Map && (!UI.MouseViewport || UI.MouseViewport->Zoom == 1.0f)) {
+		// Selecting position for building.
+		// When zoomed, CViewport::Draw renders the preview inside the zoom
+		// offscreen so it upscales correctly; drawing here too would double it.
 		DrawBuildingCursor();
 	}
+
+#ifdef __ANDROID__
+	// Touchscreen build: no pointer arrow. The selection-rectangle and building-placement
+	// cursors above ARE kept (they are gameplay feedback); only the mouse arrow is suppressed.
+	return;
+#endif
 
 	//  Cursor may not exist if we are loading a game or something.
 	//  Only draw it if it exists

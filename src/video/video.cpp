@@ -280,11 +280,17 @@ bool CVideo::ResizeScreen(int w, int h)
 	if (TheScreen) {
 		SDL_FreeSurface(TheScreen);
 	}
+	// GPU-pipeline hybrid overlay (Phase 0): TheScreen is now a *translucent overlay* that is
+	// composited ON TOP of the GPU world layers each frame, so it must carry a real alpha
+	// channel (ARGB8888). Previously AMASK was dropped (opaque surface) because TheScreen was
+	// blitted opaquely over a black clear; now every frame clears it to fully transparent and
+	// only the CPU layers (HUD/fog/cursor/menus) write opaque pixels, letting the GPU tiles &
+	// units show through everywhere the overlay is untouched.
 	TheScreen = SDL_CreateRGBSurface(0, w, h, 32,
 									 RMASK,
 									 GMASK,
 									 BMASK,
-									 0); // AMASK);
+									 AMASK);
 	Assert(SDL_MUSTLOCK(TheScreen) == 0);
 
 	if (Gui) {
@@ -301,6 +307,9 @@ bool CVideo::ResizeScreen(int w, int h)
 	                               SDL_PIXELFORMAT_ARGB8888,
 	                               SDL_TEXTUREACCESS_STREAMING,
 	                               w, h);
+	// The overlay texture is alpha-blended over the GPU world layers (Phase 0). Without an
+	// explicit BLEND mode SDL would copy it opaquely and hide everything underneath.
+	SDL_SetTextureBlendMode(TheTexture, SDL_BLENDMODE_BLEND);
 
 	SetClipping(0, 0, w - 1, h - 1);
 

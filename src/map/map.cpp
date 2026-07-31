@@ -352,6 +352,9 @@ void CMap::Clean(const bool isHardClean /* = false*/)
 	this->Tileset.clear();
 	this->TileModelsFileName.clear();
 	this->TileGraphic = nullptr;
+	// Drop any lazily-loaded crisp-zoom HD tile graphic so the next map re-derives it.
+	this->HDTileGraphic = nullptr;
+	this->HDTileGraphicTried = false;
 
 	FlagRevealMap = MapRevealModes::cHidden;
 	ReplayRevealMap = false;

@@ -366,14 +366,26 @@ public:
 	void draw(gcn::Graphics *graphics) override;
 	void drawFrame(gcn::Graphics *graphics) override;
 	void mousePressed(gcn::MouseEvent &) override;
-	void logic() override { adjustSize(); }
+	void mouseDragged(gcn::MouseEvent &) override;  // finger drag-to-scroll on list content
+	void mouseReleased(gcn::MouseEvent &) override; // tap selects / drag suppresses select
+	void logic() override;                          // adjustSize() + momentum fling
 
 	void setItemImage(std::shared_ptr<CGraphic> image) { itemImage = image; }
 	void adjustSize();
 	void setSelected(int selected);
 
 private:
+	int rowHeight() const;
+
 	std::shared_ptr<CGraphic> itemImage = nullptr;
+	// Finger drag-to-scroll state. Inert for mouse users (a click still selects); a press
+	// that moves more than a few pixels scrolls the parent ScrollArea instead of selecting.
+	bool mDragScrolling = false; /// a left press is in progress on the list content
+	bool mDidDrag = false;       /// the press moved past the threshold -> suppress the tap select
+	int mDragStartY = 0;         /// press Y in scroll-invariant viewport space
+	int mDragLastY = 0;          /// last drag Y in scroll-invariant viewport space
+	float mDragVelY = 0.f;       /// last drag delta; seeds the momentum fling
+	bool mFling = false;         /// momentum fling active (decays each logic() tick)
 };
 
 class ListBoxWidget : public gcn::ScrollArea
@@ -525,7 +537,7 @@ public:
 	void setSize(int width, int height);
 	std::string getSelectedItem();
 	int setSelectedItem(lua_State *lua, lua_Object *lo);
-	void adjustHeight();
+	void adjustHeight() override;
 	void setFont(gcn::Font *font);
 
 private:
@@ -533,6 +545,10 @@ private:
 	std::shared_ptr<CGraphic> DownNormalImage;
 	std::shared_ptr<CGraphic> DownPressedImage;
 	std::unique_ptr<ImageListBox> mImageListBox;
+	// Explicit closed-field height set via setSize(). Kept separate so re-listing (which calls
+	// adjustHeight) can restore the intended tall beveled-button height instead of collapsing
+	// to font height.
+	int mFieldHeight = 0;
 };
 
 class StatBoxWidget : public gcn::Widget

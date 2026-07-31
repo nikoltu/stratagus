@@ -121,6 +121,7 @@
 
 class CGraphic;
 class CUnitType;
+class CViewport;
 enum class ButtonCmd;
 
 /*----------------------------------------------------------------------------
@@ -201,6 +202,8 @@ extern CCursor *CursorByIdent(std::string_view ident);
 
 /// Draw any cursor
 extern void DrawCursor();
+/// Draw the building-placement preview for a viewport into the current TheScreen
+extern void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos);
 /// Hide the cursor
 extern void HideCursor();
 /// Animate the cursor

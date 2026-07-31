@@ -42,6 +42,7 @@
 #include "ui.h"
 
 #include <SDL_image.h>
+#include <cmath>
 #include <map>
 #include <set>
 #include <string>
@@ -53,6 +54,55 @@
 
 static int HashCount;
 static std::map<fs::path, std::shared_ptr<CGraphic>> GraphicHash;
+
+// See declarations in video.h. Both default to the "classic" values so that, with the
+// crisp-zoom feature off, every render path below behaves exactly as before.
+bool EnableCrispZoom = false;
+float CrispZoomDrawScale = 1.0f;
+
+// GPU-pipeline (Phase 1). See video.h. Off by default => every draw path stays on the CPU
+// compositor until the on-screen world render explicitly turns it on for tiles/units.
+bool GpuWorldDrawActive = false;
+
+// GPU-pipeline (Phase 1). See video.h. 1.0 => the classic native (Zoom==1) draw; set to the real
+// viewport zoom around the in-game world GPU render so tile/unit destination rects scale up.
+float GpuWorldDrawZoom = 1.0f;
+
+// Upload an RGBA (paletteless) surface to a nearest-filtered, alpha-blended GPU texture. Returns
+// nullptr for paletted surfaces (kept on the CPU path for colour-cycling / palette remap) or on
+// failure. Nearest scaling matches the pixel-art look and the Zoom==1 world (Phase 1 only draws
+// through the GPU at native scale).
+static SDL_Texture *UploadSurfaceToTexture(SDL_Surface *surface)
+{
+	if (!surface || !TheRenderer) {
+		return nullptr;
+	}
+	if (surface->format->palette != nullptr) {
+		// 8-bit paletted: keep on CPU so palette colour-cycling and player-colour remap work.
+		return nullptr;
+	}
+	SDL_Texture *tex = SDL_CreateTextureFromSurface(TheRenderer, surface);
+	if (!tex) {
+		return nullptr;
+	}
+	SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
+	SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+	return tex;
+}
+
+// Shared crisp-zoom helper: blit srcRect from src, scaled up by CrispZoomDrawScale, to
+// destination top-left (x,y). Clipping is delegated to dst->clip_rect (the crisp render path
+// constrains it to the painted viewport region). Only ever reached while CrispZoomDrawScale
+// != 1.0f, i.e. exclusively on the crisp-zoom path.
+static void CrispBlitScaled(SDL_Surface *src, SDL_Rect srcRect, int x, int y, SDL_Surface *dst)
+{
+	SDL_Rect drect;
+	drect.x = x;
+	drect.y = y;
+	drect.w = static_cast<int>(std::lround(srcRect.w * CrispZoomDrawScale));
+	drect.h = static_cast<int>(std::lround(srcRect.h * CrispZoomDrawScale));
+	SDL_BlitScaled(src, &srcRect, dst, &drect);
+}
 
 static void WarnInvalidGraphicFrame(const CGraphic &graphic, unsigned frame, bool flipped)
 {
@@ -108,6 +158,15 @@ void CGraphic::DrawSub(int gx, int gy, int w, int h, int x, int y,
 	Assert(surface);
 
 	SDL_Rect srect = {Sint16(gx), Sint16(gy), Uint16(w), Uint16(h)};
+	// Crisp-zoom: scale the sprite up to on-screen size. (x,y) already carries the
+	// on-screen ·Zoom position from the Zoom-aware viewport transform, so only the size is
+	// scaled here. Any alpha mod set by the DrawSubTrans wrappers is honoured by
+	// SDL_BlitScaled. Guard is a no-op (scale == 1) unless the crisp path is active.
+	if (CrispZoomDrawScale != 1.0f) {
+		CrispBlitScaled(mSurface, srect, x, y, surface);
+		return;
+	}
+
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
 
 	SDL_BlitSurface(mSurface, &srect, surface, &drect);
@@ -170,6 +229,15 @@ void CGraphic::DrawSubClip(int gx, int gy, int w, int h, int x, int y,
 						   SDL_Surface *surface /*= TheScreen*/) const
 {
 	Assert(surface);
+
+	// Crisp-zoom: bypass the native CLIP_RECTANGLE (clipping is delegated to the target
+	// surface clip_rect) and blit the frame scaled up to on-screen size at the already
+	// ·Zoom-positioned (x,y). No-op unless the crisp path is active.
+	if (CrispZoomDrawScale != 1.0f) {
+		SDL_Rect srect = {Sint16(gx), Sint16(gy), Uint16(w), Uint16(h)};
+		CrispBlitScaled(mSurface, srect, x, y, surface);
+		return;
+	}
 
 	int oldx = x;
 	int oldy = y;
@@ -289,8 +357,74 @@ void CGraphic::DrawFrameClip(unsigned frame, int x, int y,
 		WarnInvalidGraphicFrame(*this, frame, false);
 		return;
 	}
+	// GPU-pipeline (Phase 1): during the on-screen world render, route tiles/shadows straight to
+	// the backbuffer texture. Requires an RGBA GPU copy and the default screen target; otherwise
+	// (paletted graphic, or drawing into an offscreen surface such as the zoomed MapRenderSurface)
+	// fall through to the CPU compositor exactly as before.
+	if (GpuWorldDrawActive && mTexture && surface == TheScreen) {
+		DrawFrameClipTex(frame, x, y);
+		return;
+	}
 	DrawSubClip(frame_map[frame].x, frame_map[frame].y,
 				Width, Height, x, y, surface);
+}
+
+/**
+**  GPU-pipeline (Phase 1): RenderCopy a single frame to the backbuffer. The viewport clip
+**  rectangle is expected to be active on the renderer (set by CViewport::Draw), so partial
+**  clipping at viewport edges is handled by SDL_RenderSetClipRect. Vertical-pixel-size scaling
+**  is applied by the renderer's logical size, same as the overlay copy.
+*/
+void CGraphic::DrawFrameClipTex(unsigned frame, int x, int y) const
+{
+	if (!mTexture || frame >= frame_map.size()) {
+		return;
+	}
+	// SRC is always the native sprite frame; only the DST size scales by the world zoom so the GPU
+	// upscales the HD art in place (crisp at integer zoom, no CPU offscreen). At GpuWorldDrawZoom==1
+	// this is byte-identical to the native path.
+	const int dw = (GpuWorldDrawZoom == 1.0f) ? Width : (int)std::lround(Width * GpuWorldDrawZoom);
+	const int dh = (GpuWorldDrawZoom == 1.0f) ? Height : (int)std::lround(Height * GpuWorldDrawZoom);
+	SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+	SDL_Rect dst = {x, y, dw, dh};
+	SDL_RenderCopy(TheRenderer, mTexture, &src, &dst);
+}
+
+/**
+**  GPU-pipeline (Phase 1): as DrawFrameClipTex but mirrored horizontally, drawn from the SAME
+**  base texture via SDL_RenderCopyEx (no separate flip sheet needed). frame indexes frame_map
+**  (the un-flipped layout); RenderCopyEx flips the pixels of that source rect.
+*/
+void CGraphic::DrawFrameClipTexX(unsigned frame, int x, int y) const
+{
+	if (!mTexture || frame >= frame_map.size()) {
+		return;
+	}
+	const int dw = (GpuWorldDrawZoom == 1.0f) ? Width : (int)std::lround(Width * GpuWorldDrawZoom);
+	const int dh = (GpuWorldDrawZoom == 1.0f) ? Height : (int)std::lround(Height * GpuWorldDrawZoom);
+	SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+	SDL_Rect dst = {x, y, dw, dh};
+	SDL_RenderCopyEx(TheRenderer, mTexture, &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+}
+
+/**
+**  Crisp-zoom: draw a frame scaled to an explicit destination size via SDL_BlitScaled.
+**  Used by the terrain pass of the crisp render path to magnify a (possibly higher-res)
+**  tile to its on-screen size. Clipping is delegated to surface->clip_rect, which the
+**  crisp path constrains to the painted viewport region. This routine is never called
+**  when EnableCrispZoom is off.
+*/
+void CGraphic::DrawFrameClipScaled(unsigned frame, int x, int y, int w, int h,
+								   SDL_Surface *surface /*= TheScreen*/) const
+{
+	if (frame >= frame_map.size()) {
+		WarnInvalidGraphicFrame(*this, frame, false);
+		return;
+	}
+	SDL_Rect srect = {Sint16(frame_map[frame].x), Sint16(frame_map[frame].y),
+					  Uint16(Width), Uint16(Height)};
+	SDL_Rect drect = {Sint16(x), Sint16(y), Uint16(w), Uint16(h)};
+	SDL_BlitScaled(mSurface, &srect, surface, &drect);
 }
 
 void CGraphic::DrawFrameTrans(unsigned frame, int x, int y, int alpha,
@@ -337,12 +471,195 @@ void CGraphic::DrawFrameClipCustomMod(unsigned frame, int x, int y,
 **  @param y       y coordinate on the target surface
 **	@param surface target surface
 */
+/**
+**  Load the sibling <file>_team.png grey player-colour mask, if present, and (when the sprite
+**  is flipped) a horizontally-mirrored copy aligned with SurfaceFlip. Absence leaves TeamMask
+**  null so the classic 8-bit palette remap path is used instead.
+*/
+void CPlayerColorGraphic::LoadTeamMask(const std::string &baseFile)
+{
+	std::string maskFile = baseFile;
+	const auto dot = maskFile.rfind(".png");
+	if (dot == std::string::npos) {
+		return;
+	}
+	maskFile.insert(dot, "_team");
+	const fs::path name = LibraryFileName(maskFile);
+	if (name.empty()) {
+		return;
+	}
+	auto fp = std::make_unique<CFile>();
+	if (fp->open(name.string().c_str(), CL_OPEN_READ) == -1) {
+		return;
+	}
+	TeamMask = IMG_Load_RW(CFile::to_SDL_RWops(std::move(fp)), 1);
+	if (TeamMask && SurfaceFlip) {
+		TeamMaskFlip = SDL_ConvertSurface(TeamMask, TeamMask->format, 0);
+		SDL_LockSurface(TeamMask);
+		SDL_LockSurface(TeamMaskFlip);
+		const int w = TeamMask->w;
+		const int h = TeamMask->h;
+		const int sp = TeamMask->pitch / 4;
+		const int dp = TeamMaskFlip->pitch / 4;
+		for (int yy = 0; yy < h; ++yy) {
+			for (int xx = 0; xx < w; ++xx) {
+				((Uint32 *)TeamMaskFlip->pixels)[xx + yy * dp] =
+					((Uint32 *)TeamMask->pixels)[(w - 1 - xx) + yy * sp];
+			}
+		}
+		SDL_UnlockSurface(TeamMaskFlip);
+		SDL_UnlockSurface(TeamMask);
+	}
+
+	// GPU-pipeline (Phase 1): upload the grey mask once. At draw time SetTextureColorMod tints it
+	// to the player's colour and it is RenderCopy'd (BLEND) over the base frame. The flipped case
+	// reuses this same texture via RenderCopyEx horizontal flip, so no TeamMaskFlip texture is
+	// needed. Skipped for paletted masks (kept on the CPU path).
+	if (TeamMask && !mTextureTeam) {
+		mTextureTeam = UploadSurfaceToTexture(TeamMask);
+	}
+}
+
+/**
+**  Build (and cache) a whole-sheet copy of the base surface with the player's colour composited
+**  into the team region, keyed by colour index. The grey mask value indexes the player's colour
+**  ramp, reproducing the shaded team colour that the palette remap gave classic sprites.
+*/
+SDL_Surface *CPlayerColorGraphic::GetColorVariant(int colorIndex, bool flip)
+{
+	std::map<int, SDL_Surface *> &cache = flip ? ColorVariantsFlip : ColorVariants;
+	auto it = cache.find(colorIndex);
+	if (it != cache.end()) {
+		return it->second;
+	}
+	SDL_Surface *base = flip ? SurfaceFlip : mSurface;
+	SDL_Surface *mask = flip ? TeamMaskFlip : TeamMask;
+	if (!base || !mask) {
+		return base;
+	}
+	SDL_Surface *v = SDL_ConvertSurface(base, base->format, 0);
+	if (colorIndex >= 0 && colorIndex < (int)PlayerColorsRGB.size() && !PlayerColorsRGB[colorIndex].empty()) {
+		const std::vector<CColor> &ramp = PlayerColorsRGB[colorIndex];
+		SDL_LockSurface(v);
+		SDL_LockSurface(mask);
+		const int w = v->w;
+		const int h = v->h;
+		const int vp = v->pitch / 4;
+		const int mp = mask->pitch / 4;
+		for (int yy = 0; yy < h; ++yy) {
+			for (int xx = 0; xx < w; ++xx) {
+				Uint8 mr, mg, mb, ma;
+				SDL_GetRGBA(((Uint32 *)mask->pixels)[xx + yy * mp], mask->format, &mr, &mg, &mb, &ma);
+				if (ma > 0 && mr > 0) {
+					// Team-colour composite: out.rgb = pure player colour * (maskGray/255),
+					// keeping the base alpha. The mask grey (mr) carries the shading, so the
+					// canonical/brightest ramp entry scaled by it reproduces a vivid, correctly
+					// shaded player colour. (The old quantized ramp index inverted the brightness
+					// -> bright mask pixels hit the darkest shade -> a muddy grey "highlight".)
+					const CColor &c = ramp[0];
+					Uint8 br, bg, bb, ba;
+					SDL_GetRGBA(((Uint32 *)v->pixels)[xx + yy * vp], v->format, &br, &bg, &bb, &ba);
+					const Uint8 rr = (Uint8)(c.R * mr / 255);
+					const Uint8 gg = (Uint8)(c.G * mr / 255);
+					const Uint8 bl = (Uint8)(c.B * mr / 255);
+					((Uint32 *)v->pixels)[xx + yy * vp] = SDL_MapRGBA(v->format, rr, gg, bl, ba);
+				}
+			}
+		}
+		SDL_UnlockSurface(mask);
+		SDL_UnlockSurface(v);
+	}
+	SDL_SetSurfaceBlendMode(v, SDL_BLENDMODE_BLEND);
+	cache[colorIndex] = v;
+	return v;
+}
+
+/**
+**  GPU-pipeline (Phase 1): draw a player-coloured frame with NO CPU baking. RenderCopy the base
+**  frame, then (if a team-mask texture exists) tint the grey mask to the player's colour via
+**  SetTextureColorMod and RenderCopy the same frame of the mask on top (BLEND). This reproduces
+**  the baked look of GetColorVariant() at zero per-player CPU cost. flip => mirror both copies.
+*/
+void CPlayerColorGraphic::DrawPlayerColorFrameClipTex(int colorIndex, unsigned frame,
+													  int x, int y, bool flip /*= false*/)
+{
+	if (!mTexture || frame >= frame_map.size()) {
+		return;
+	}
+	// Base frame.
+	if (flip) {
+		DrawFrameClipTexX(frame, x, y);
+	} else {
+		DrawFrameClipTex(frame, x, y);
+	}
+	if (!mTextureTeam) {
+		return;
+	}
+	// Team-colour pass: tint the grey mask to the player's canonical colour (ramp[0], matching
+	// GetColorVariant) and blend it over the base frame. mr in the mask carries the shading.
+	Uint8 r = 255, g = 255, b = 255;
+	if (colorIndex >= 0 && colorIndex < (int)PlayerColorsRGB.size()
+		&& !PlayerColorsRGB[colorIndex].empty()) {
+		const CColor &c = PlayerColorsRGB[colorIndex][0];
+		r = c.R;
+		g = c.G;
+		b = c.B;
+	}
+	// Mask must scale exactly like the base frame (drawn just above) so the tint overlays it 1:1.
+	const int dw = (GpuWorldDrawZoom == 1.0f) ? Width : (int)std::lround(Width * GpuWorldDrawZoom);
+	const int dh = (GpuWorldDrawZoom == 1.0f) ? Height : (int)std::lround(Height * GpuWorldDrawZoom);
+	SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+	SDL_Rect dst = {x, y, dw, dh};
+	SDL_SetTextureColorMod(mTextureTeam, r, g, b);
+	if (flip) {
+		SDL_RenderCopyEx(TheRenderer, mTextureTeam, &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+	} else {
+		SDL_RenderCopy(TheRenderer, mTextureTeam, &src, &dst);
+	}
+	// Reset so a later plain RenderCopy of this mask texture is not left tinted.
+	SDL_SetTextureColorMod(mTextureTeam, 255, 255, 255);
+}
+
 void CPlayerColorGraphic::DrawPlayerColorFrameClip(int colorIndex, unsigned frame,
 												   int x, int y,
 												   SDL_Surface *surface /*= TheScreen*/)
 {
-	GraphicPlayerPixels(colorIndex, *this);
-	DrawFrameClip(frame, x, y, surface);
+	// GPU-pipeline (Phase 1): HD (RGBA) sprites take the GPU path; if a team mask texture exists it
+	// is tinted+blended for the player colour, otherwise just the base frame is drawn (which
+	// matches the CPU fallback below, where GraphicPlayerPixels is a no-op on paletteless sprites).
+	// Classic 8-bit paletted sprites (mTexture == nullptr) keep the CPU palette-remap path so
+	// player colours still render; off-screen targets also fall back.
+	if (GpuWorldDrawActive && mTexture && surface == TheScreen) {
+		DrawPlayerColorFrameClipTex(colorIndex, frame, x, y, false);
+		return;
+	}
+	if (mSurface && mSurface->format->palette == nullptr && TeamMask) {
+		SDL_Surface *saved = mSurface;
+		mSurface = GetColorVariant(colorIndex, false);
+		DrawFrameClip(frame, x, y, surface);
+		mSurface = saved;
+	} else {
+		GraphicPlayerPixels(colorIndex, *this);
+		DrawFrameClip(frame, x, y, surface);
+	}
+}
+
+/**
+**  Crisp-zoom player-colour variant of DrawFrameClipScaled. Only used on the crisp path.
+*/
+void CPlayerColorGraphic::DrawPlayerColorFrameClipScaled(int colorIndex, unsigned frame,
+														 int x, int y, int w, int h,
+														 SDL_Surface *surface /*= TheScreen*/)
+{
+	if (mSurface && mSurface->format->palette == nullptr && TeamMask) {
+		SDL_Surface *saved = mSurface;
+		mSurface = GetColorVariant(colorIndex, false);
+		DrawFrameClipScaled(frame, x, y, w, h, surface);
+		mSurface = saved;
+	} else {
+		GraphicPlayerPixels(colorIndex, *this);
+		DrawFrameClipScaled(frame, x, y, w, h, surface);
+	}
 }
 
 /**
@@ -373,11 +690,24 @@ void CGraphic::DrawFrameX(unsigned frame, int x, int y,
 void CGraphic::DrawFrameClipX(unsigned frame, int x, int y,
 							  SDL_Surface *surface /*= TheScreen*/) const
 {
+	// GPU-pipeline (Phase 1): mirror the base frame via RenderCopyEx (no SurfaceFlip needed).
+	// frameFlip_map[f] points at "base frame f, mirrored", so the base rect frame_map[f] flipped
+	// is pixel-identical. See DrawFrameClip for the guard rationale.
+	if (GpuWorldDrawActive && mTexture && surface == TheScreen && frame < frame_map.size()) {
+		DrawFrameClipTexX(frame, x, y);
+		return;
+	}
 	if (frame >= frameFlip_map.size()) {
 		WarnInvalidGraphicFrame(*this, frame, true);
 		return;
 	}
 	SDL_Rect srect = {frameFlip_map[frame].x, frameFlip_map[frame].y, Uint16(Width), Uint16(Height)};
+
+	// Crisp-zoom: scale the (flipped) frame up to on-screen size at the ·Zoom position.
+	if (CrispZoomDrawScale != 1.0f) {
+		CrispBlitScaled(SurfaceFlip, srect, x, y, surface);
+		return;
+	}
 
 	const int oldx = x;
 	const int oldy = y;
@@ -416,6 +746,16 @@ void CGraphic::DrawFrameClipTransX(unsigned frame, int x, int y, int alpha,
 	}
 	SDL_Rect srect = {frameFlip_map[frame].x, frameFlip_map[frame].y, Uint16(Width), Uint16(Height)};
 
+	// Crisp-zoom: scale the (flipped, alpha) frame up to on-screen size at the ·Zoom position.
+	if (CrispZoomDrawScale != 1.0f) {
+		Uint8 saved = 0xff;
+		SDL_GetSurfaceAlphaMod(SurfaceFlip, &saved);
+		SDL_SetSurfaceAlphaMod(SurfaceFlip, alpha);
+		CrispBlitScaled(SurfaceFlip, srect, x, y, surface);
+		SDL_SetSurfaceAlphaMod(SurfaceFlip, saved);
+		return;
+	}
+
 	int oldx = x;
 	int oldy = y;
 	CLIP_RECTANGLE(x, y, srect.w, srect.h);
@@ -444,8 +784,23 @@ void CPlayerColorGraphic::DrawPlayerColorFrameClipX(int colorIndex, unsigned fra
 													int x, int y,
 													SDL_Surface *surface /*= TheScreen*/)
 {
-	GraphicPlayerPixels(colorIndex, *this);
-	DrawFrameClipX(frame, x, y, surface);
+	// GPU-pipeline (Phase 1): mirrored HD player-colour draw via RenderCopyEx from the base (+
+	// optional mask) texture (frame indexes the un-flipped layout; see DrawFrameClipX). CPU
+	// fallback for paletted sprites / off-screen targets.
+	if (GpuWorldDrawActive && mTexture && surface == TheScreen
+		&& frame < frame_map.size()) {
+		DrawPlayerColorFrameClipTex(colorIndex, frame, x, y, true);
+		return;
+	}
+	if (SurfaceFlip && SurfaceFlip->format->palette == nullptr && TeamMaskFlip) {
+		SDL_Surface *saved = SurfaceFlip;
+		SurfaceFlip = GetColorVariant(colorIndex, true);
+		DrawFrameClipX(frame, x, y, surface);
+		SurfaceFlip = saved;
+	} else {
+		GraphicPlayerPixels(colorIndex, *this);
+		DrawFrameClipX(frame, x, y, surface);
+	}
 }
 
 /*----------------------------------------------------------------------------
@@ -732,6 +1087,14 @@ void CGraphic::Load(bool grayscale)
 	}
 
 	GenFramesMap();
+
+	// GPU-pipeline (Phase 1): upload an RGBA copy once so tiles/units can be RenderCopy'd off the
+	// CPU compositor. mSurface is intentionally NOT freed here: CPU-read consumers (screenshots,
+	// the debug colour bridge) and the non-GPU / zoomed CPU draw paths still need it. Paletted
+	// graphics return nullptr and stay fully on the CPU path.
+	if (!mTexture) {
+		mTexture = UploadSurfaceToTexture(mSurface);
+	}
 }
 
 /**
@@ -762,8 +1125,24 @@ static void FreeSurface(SDL_Surface **surface)
 */
 CGraphic::~CGraphic()
 {
+	// GPU-pipeline (Phase 1): release this graphic's GPU copy. (The CPlayerColorGraphic team-mask
+	// texture is released in ~CPlayerColorGraphic; shared_ptr's type-erased deleter runs it.)
+	if (mTexture) {
+		SDL_DestroyTexture(mTexture);
+		mTexture = nullptr;
+	}
 	FreeSurface(&mSurface);
 	FreeSurface(&SurfaceFlip);
+}
+
+CPlayerColorGraphic::~CPlayerColorGraphic()
+{
+	// GPU-pipeline (Phase 1): release the team-mask GPU copy. The pre-existing TeamMask/
+	// ColorVariants CPU surfaces are left as-is (their lifetime already spans the program).
+	if (mTextureTeam) {
+		SDL_DestroyTexture(mTextureTeam);
+		mTextureTeam = nullptr;
+	}
 }
 
 /**
@@ -806,7 +1185,7 @@ void CGraphic::Flip()
 		case 3:
 			for (int i = 0; i < s->h; ++i) {
 				for (int j = 0; j < s->w; ++j) {
-					memcpy(&((char *)s->pixels)[j + i * s->pitch],
+					memcpy(&((char *)s->pixels)[j * 3 + i * s->pitch],
 						   &((char *)mSurface->pixels)[(s->w - j - 1) * 3 + i * mSurface->pitch], 3);
 				}
 			}
@@ -814,7 +1193,7 @@ void CGraphic::Flip()
 		case 4: {
 			for (int i = 0; i < s->h; ++i) {
 				for (int j = 0; j < s->w; ++j) {
-					memcpy(&((char *)s->pixels)[j + i * s->pitch],
+					memcpy(&((char *)s->pixels)[j * 4 + i * s->pitch],
 						   &((char *)mSurface->pixels)[(s->w - j - 1) * 4 + i * mSurface->pitch], 4);
 				}
 			}
@@ -1336,6 +1715,26 @@ void CGraphic::MakeShadow(PixelPos offset)
 void FreeGraphics()
 {
 	GraphicHash.clear();
+}
+
+// Debug bridge: expose the (file-scope) loaded-graphic registry read-only, so the
+// `assets` command can enumerate loaded sprites without touching GraphicHash directly.
+#include "debug_bridge.h"
+void DebugBridge_CollectGraphics(std::vector<DebugGraphicInfo> &out)
+{
+	out.reserve(GraphicHash.size());
+	for (const auto &kv : GraphicHash) {
+		const std::shared_ptr<CGraphic> &g = kv.second;
+		if (!g) {
+			continue;
+		}
+		DebugGraphicInfo info;
+		info.file = g->File.string();
+		info.width = g->Width;
+		info.height = g->Height;
+		info.numFrames = g->NumFrames;
+		out.push_back(std::move(info));
+	}
 }
 
 CFiller::bits_map::~bits_map()

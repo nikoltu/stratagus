@@ -37,6 +37,7 @@
 #include "stratagus.h"
 
 #include "game.h"
+#include "debug_bridge.h"
 #include "network.h"
 #include "online_service.h"
 #include "parameters.h"
@@ -477,10 +478,31 @@ void InitVideoSdl()
 		int outW = 0, outH = 0;
 		SDL_GetRendererOutputSize(TheRenderer, &outW, &outH);
 		if (outW > 0 && outH > 0) {
-			Video.Width = outW;
-			Video.Height = outH;
+			// The window / GPU present target is always the device's native size.
 			Video.WindowWidth = outW;
 			Video.WindowHeight = outH;
+			// Performance lever: the whole frame is CPU-software-composited at Video.Width x
+			// Video.Height every frame, which is the dominant cost at full HD (a busy in-game
+			// frame can miss the 33ms budget badly on weaker GPUs/CPUs, e.g. the S7+). Render the
+			// framebuffer at a fraction of native and let the GPU upscale it on SDL_RenderCopy;
+			// the UI stays proportional because it is all authored against Video.Width/Height.
+			// Scale is read from <internal>/render_scale.txt (0.30..1.00; default 1.0 = full HD)
+			// so it can be A/B tuned per device without a rebuild.
+			float renderScale = 1.0f;
+			if (const char *base = SDL_AndroidGetInternalStoragePath()) {
+				std::string sp = std::string(base) + "/render_scale.txt";
+				if (FILE *sf = fopen(sp.c_str(), "r")) {
+					float v = 0.0f;
+					if (fscanf(sf, "%f", &v) == 1 && v >= 0.30f && v <= 1.0f) {
+						renderScale = v;
+					}
+					fclose(sf);
+				}
+			}
+			Video.Width  = std::max(320, (int)lround(outW * (double)renderScale));
+			Video.Height = std::max(240, (int)lround(outH * (double)renderScale));
+			fprintf(stdout, "WargusHD: renderScale=%.2f -> framebuffer %dx%d, present %dx%d\n",
+			        renderScale, Video.Width, Video.Height, outW, outH);
 		}
 	}
 #endif
@@ -637,6 +659,7 @@ static Uint32       TouchDownTicks = 0;
 static int          TouchDownX     = 0;
 static int          TouchDownY     = 0;
 static bool         TouchDragging  = false;     // left button held for a drag
+static bool         TouchLongFired = false;     // the hold->right-click already fired mid-hold
 static float        Finger1X       = 0.0f;      // last pixel pos of the primary finger
 static float        Finger1Y       = 0.0f;
 
@@ -903,6 +926,7 @@ static void HandleFingerEvent(const SDL_Event &event)
 			TouchActive    = true;
 			TouchFinger    = event.tfinger.fingerId;
 			TouchDragging  = false;
+			TouchLongFired = false;
 			TouchDownTicks = SDL_GetTicks();
 			TouchDownX     = px;
 			TouchDownY     = py;
@@ -927,8 +951,8 @@ static void HandleFingerEvent(const SDL_Event &event)
 				UpdateTwoFinger();
 				break;
 			}
-			if (!TouchActive || event.tfinger.fingerId != TouchFinger) {
-				break;
+			if (!TouchActive || event.tfinger.fingerId != TouchFinger || TouchLongFired) {
+				break;   // after a mid-hold order fired, ignore drift until release
 			}
 			Finger1X = fx;
 			Finger1Y = fy;
@@ -965,20 +989,39 @@ static void HandleFingerEvent(const SDL_Event &event)
 			PushMouseMotion(px, py);
 			if (TouchDragging) {
 				PushMouseButton(SDL_MOUSEBUTTONUP, SDL_BUTTON_LEFT, px, py);
+			} else if (TouchLongFired) {
+				// The hold order already fired mid-hold (PollTouchLongPress); the lift
+				// just ends the gesture, no extra click.
 			} else {
-				const bool longPress =
-					(SDL_GetTicks() - TouchDownTicks) >= TOUCH_LONGPRESS_MS;
-				const Uint8 button = longPress ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
-				PushMouseButton(SDL_MOUSEBUTTONDOWN, button, px, py);
-				PushMouseButton(SDL_MOUSEBUTTONUP, button, px, py);
+				// Quick release before the hold threshold -> a tap = LEFT click (select).
+				PushMouseButton(SDL_MOUSEBUTTONDOWN, SDL_BUTTON_LEFT, px, py);
+				PushMouseButton(SDL_MOUSEBUTTONUP, SDL_BUTTON_LEFT, px, py);
 			}
-			TouchActive   = false;
-			TouchDragging = false;
+			TouchActive    = false;
+			TouchDragging  = false;
+			TouchLongFired = false;
 			if (TouchFingerCount == 0) {
 				SuppressGestures = false;
 			}
 			break;
 	}
+}
+
+// Called once per frame (WaitEventsOneFrame): a stationary press that crosses the hold
+// threshold fires its RIGHT click immediately, WHILE the finger is still down, instead of
+// waiting for release. A real drag trips TOUCH_DRAG_PX first and never reaches here.
+static void PollTouchLongPress()
+{
+	if (!TouchActive || TouchDragging || TwoFingerActive || TouchLongFired) {
+		return;
+	}
+	if (SDL_GetTicks() - TouchDownTicks < TOUCH_LONGPRESS_MS) {
+		return;
+	}
+	TouchLongFired = true;
+	PushMouseMotion(TouchDownX, TouchDownY);
+	PushMouseButton(SDL_MOUSEBUTTONDOWN, SDL_BUTTON_RIGHT, TouchDownX, TouchDownY);
+	PushMouseButton(SDL_MOUSEBUTTONUP, SDL_BUTTON_RIGHT, TouchDownX, TouchDownY);
 }
 #endif // __ANDROID__
 
@@ -1174,6 +1217,9 @@ void WaitEventsOneFrame()
 		return;
 	}
 
+	// Observe-only debug bridge: cheap throttled poll of the wdbg/ command channel.
+	DebugBridge_Poll();
+
 	Uint32 ticks = SDL_GetTicks();
 	if (ticks > NextFrameTicks) { // We are too slow :(
 		++SlowFrameCounter;
@@ -1182,6 +1228,9 @@ void WaitEventsOneFrame()
 	InputMouseTimeout(*GetCallbacks(), ticks);
 	InputKeyTimeout(*GetCallbacks(), ticks);
 	CursorAnimate(ticks);
+#ifdef __ANDROID__
+	PollTouchLongPress();   // fire a hold order mid-hold, not on release
+#endif
 
 	int interrupts = Parameters::Instance.benchmark;
 
@@ -1259,6 +1308,54 @@ static void RenderBenchmarkOverlay()
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
 }
 
+// GPU-pipeline hybrid frame loop (Phase 0).
+//
+// The old model let RealizeVideoMemory own the whole present: RenderClear -> RenderCopy(overlay)
+// -> RenderPresent. That is incompatible with drawing GPU world layers (tiles/units) directly to
+// the backbuffer during UpdateDisplay, because the RenderClear here would wipe them.
+//
+// New model splits it into three ordered stages within a single frame:
+//   BeginFrame()  = target the backbuffer + clear it to opaque black. MUST run before any GPU
+//                   world draw, i.e. at the top of UpdateDisplay / EditorUpdateDisplay.
+//   <GPU world draws happen during UpdateDisplay's DrawMapArea>
+//   RealizeVideoMemory() = upload TheScreen -> TheTexture and RenderCopy it as the translucent
+//                   overlay ON TOP of the GPU layers (no clear, no present).
+//   EndFrame()    = present.
+//
+// BeginFrame is idempotent per frame (frameBegun guard): callers that reach RealizeVideoMemory
+// WITHOUT a preceding UpdateDisplay (title screen, some menu/UI paths) get a lazy clear from the
+// BeginFrame() call inside RealizeVideoMemory instead. EndFrame always clears the guard so the
+// next frame re-clears.
+static bool frameBegun = false;
+
+void BeginFrame()
+{
+	if (dummyRenderer || !TheRenderer) {
+		return;
+	}
+	if (frameBegun) {
+		return;
+	}
+	frameBegun = true;
+	SDL_SetRenderTarget(TheRenderer, nullptr);
+	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
+	SDL_RenderClear(TheRenderer);
+}
+
+void EndFrame()
+{
+	if (dummyRenderer || !TheRenderer) {
+		return;
+	}
+	// WargusHD: don't present into the window surface while backgrounded/unfocused. On
+	// Android the surface can be mid-teardown then, which races HWUI and trips a FORTIFY
+	// abort (pthread_mutex_lock on a destroyed mutex). The next visible frame presents.
+	if (IsSDLWindowVisible) {
+		SDL_RenderPresent(TheRenderer);
+	}
+	frameBegun = false;
+}
+
 void RealizeVideoMemory()
 {
 	++FrameCounter;
@@ -1268,11 +1365,16 @@ void RealizeVideoMemory()
 	if (Preference.FrameSkip && (FrameCounter & Preference.FrameSkip)) {
 		return;
 	}
+	// Lazy clear for present paths that never went through UpdateDisplay (title/menus). When
+	// UpdateDisplay already ran, this is a no-op and the GPU world layers drawn since are kept.
+	BeginFrame();
 	if (NumRects) {
 		//SDL_UpdateWindowSurfaceRects(TheWindow, Rects, NumRects);
 		SDL_UpdateTexture(TheTexture, nullptr, TheScreen->pixels, TheScreen->pitch);
 		if (!RenderWithShader(TheRenderer, TheWindow, TheTexture)) {
-			SDL_RenderClear(TheRenderer);
+			// No RenderClear here anymore: BeginFrame already cleared the backbuffer and the
+			// GPU world layers were drawn on top of that clear. This copy blends the CPU
+			// overlay (TheScreen, now alpha-capable) over them.
 			//for (int i = 0; i < NumRects; i++)
 			//    SDL_UpdateTexture(TheTexture, &Rects[i], TheScreen->pixels, TheScreen->pitch);
 			SDL_RenderCopy(TheRenderer, TheTexture, nullptr, nullptr);
@@ -1280,9 +1382,9 @@ void RealizeVideoMemory()
 		if (Parameters::Instance.benchmark) {
 			RenderBenchmarkOverlay();
 		}
-		SDL_RenderPresent(TheRenderer);
 		NumRects = 0;
 	}
+	EndFrame();
 	if (!Preference.HardwareCursor) {
 		HideCursor();
 	}

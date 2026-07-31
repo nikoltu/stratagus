@@ -258,6 +258,11 @@ public:
 	CTileset Tileset; /// tileset data
 	fs::path TileModelsFileName; /// lua filename that loads all tilemodels
 	std::shared_ptr<CGraphic> TileGraphic; /// graphic for all the tiles
+	/// Higher-resolution (2x, e.g. 128px/tile) sibling of TileGraphic, loaded lazily and
+	/// ONLY when EnableCrispZoom is on, to keep terrain crisp when the viewport is zoomed.
+	/// Null when the HD art is absent (crisp path then scales the 64px TileGraphic instead).
+	std::shared_ptr<CGraphic> HDTileGraphic;
+	bool HDTileGraphicTried = false; /// guards the one-shot lazy load attempt above
 	bool isMapInitialized = false ;
 
 	CMapInfo Info;             /// descriptive information

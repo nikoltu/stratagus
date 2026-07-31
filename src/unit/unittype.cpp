@@ -813,9 +813,19 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 {
 	PixelPos pos = screenPos;
 	// FIXME: move this calculation to high level.
-	pos.x -= (type.Width - type.TileWidth * PixelTileSize.x) / 2;
-	pos.y -= (type.Height - type.TileHeight * PixelTileSize.y) / 2;
-	pos += type.Offset;
+	// These are NATIVE-pixel offsets that centre the sprite over the unit's tile footprint. On the
+	// GPU-direct zoomed render (GpuWorldDrawZoom != 1) the sprite is drawn at Width*zoom and its
+	// anchor (screenPos) is already zoom-scaled, so the centring delta must scale by the same zoom
+	// or the sprite lands off its footprint. At GpuWorldDrawZoom==1 (native / offscreen / crisp
+	// paths) this is byte-identical to the classic integer offset.
+	int offX = -(type.Width - type.TileWidth * PixelTileSize.x) / 2 + type.Offset.x;
+	int offY = -(type.Height - type.TileHeight * PixelTileSize.y) / 2 + type.Offset.y;
+	if (GpuWorldDrawZoom != 1.0f) {
+		offX = static_cast<int>(std::lround(offX * GpuWorldDrawZoom));
+		offY = static_cast<int>(std::lround(offY * GpuWorldDrawZoom));
+	}
+	pos.x += offX;
+	pos.y += offY;
 
 	if (type.Flip) {
 		if (frame < 0) {
@@ -915,6 +925,7 @@ void LoadUnitTypeSprite(CUnitType &type)
 				if (type.Flip) {
 					resinfo->SpriteWhenLoaded->Flip();
 				}
+				resinfo->SpriteWhenLoaded->LoadTeamMask(resinfo->FileWhenLoaded);
 			}
 			if (!resinfo->FileWhenEmpty.empty()) {
 				resinfo->SpriteWhenEmpty = CPlayerColorGraphic::New(resinfo->FileWhenEmpty,
@@ -923,6 +934,7 @@ void LoadUnitTypeSprite(CUnitType &type)
 				if (type.Flip) {
 					resinfo->SpriteWhenEmpty->Flip();
 				}
+				resinfo->SpriteWhenEmpty->LoadTeamMask(resinfo->FileWhenEmpty);
 			}
 		}
 	}
@@ -933,6 +945,7 @@ void LoadUnitTypeSprite(CUnitType &type)
 		if (type.Flip) {
 			type.Sprite->Flip();
 		}
+		type.Sprite->LoadTeamMask(type.File);
 	}
 
 	if (!type.AltFile.empty()) {

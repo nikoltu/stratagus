@@ -742,6 +742,32 @@ static int CclSetFancyBuildings(lua_State *l)
 }
 
 /**
+**  Toggle the experimental "crisp-at-zoom" (A2) map render path. Defaults off; when on and a
+**  viewport is zoomed, terrain is rendered crisp at full on-screen size. Exposed for A/B
+**  testing from the console/preferences: SetCrispZoom(true|false).
+**
+**  @param l  Lua state.
+*/
+static int CclSetCrispZoom(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	EnableCrispZoom = LuaToBoolean(l, 1);
+	return 0;
+}
+
+/**
+**  Query the crisp-at-zoom flag. GetCrispZoom() -> bool.
+**
+**  @param l  Lua state.
+*/
+static int CclGetCrispZoom(lua_State *l)
+{
+	LuaCheckArgs(l, 0);
+	lua_pushboolean(l, EnableCrispZoom);
+	return 1;
+}
+
+/**
 **  Find a button style
 **
 **  @param style  Name of the style to find.
@@ -1321,6 +1347,8 @@ void UserInterfaceCclRegister()
 	lua_register(Lua, "RightButtonAttacks", CclRightButtonAttacks);
 	lua_register(Lua, "RightButtonMoves", CclRightButtonMoves);
 	lua_register(Lua, "SetFancyBuildings", CclSetFancyBuildings);
+	lua_register(Lua, "SetCrispZoom", CclSetCrispZoom);
+	lua_register(Lua, "GetCrispZoom", CclGetCrispZoom);
 
 	lua_register(Lua, "DefineButton", CclDefineButton);
 	lua_register(Lua, "ClearButtons", CclClearButtons);

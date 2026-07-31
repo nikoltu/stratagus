@@ -152,10 +152,50 @@ void CFont::drawString(
 		return;
 	}
 
+	// WargusHD: this guichan Label path draws every glyph with the font's default (white)
+	// CFontColor and ignores the widget's foreground colour, so the Remastered BLQ55 bitmap
+	// fonts (white glyphs) always rendered white -- unreadable on the light parchment panels.
+	// Honour the widget colour by colour-modulating the font surface for this draw only.
+	// Gate it so ONLY a deliberately-set colour tints: pure white (on-maroon buttons/lists)
+	// and the guichan default black (unset) are left as-is, so nothing regresses; parchment
+	// labels set rm_text_dark and come out dark. In-game HUD text uses CLabel directly (not
+	// this path) and is unaffected.
+	const gcn::Color fg = graphics->getColor();
+	SDL_Surface *fsurf = this->G ? this->G->getSurface() : nullptr;
+	const bool tint = fsurf
+		&& !(fg.r == 255 && fg.g == 255 && fg.b == 255)
+		&& !(fg.r == 0 && fg.g == 0 && fg.b == 0);
+	if (tint) {
+		// The Remastered BLQ55 fonts are 8-bit palettized; SDL has no palettized-source +
+		// colour-modulation blitter, so a modulated blit silently draws nothing (glyphs vanish).
+		// Convert this font to RGBA ONCE -- capturing its white glyphs via the default (white)
+		// text palette -- so the working RGBA + colour-mod path darkens them. Only fonts that
+		// receive a deliberate dark foreground (the parchment labels) are ever converted; classic
+		// palettized fonts keep their per-CFontColor palette recolouring untouched. Untinted draws
+		// of a converted font blit white (colour-mod defaults to 255), so on-maroon/HUD text is
+		// unchanged.
+		if (fsurf->format->palette) {
+			if (DefaultTextColor) {
+				SDL_SetPaletteColors(fsurf->format->palette, DefaultTextColor->Colors.data(),
+				                     0, (int)DefaultTextColor->Colors.size());
+			}
+			SDL_Surface *rgba = SDL_ConvertSurfaceFormat(fsurf, SDL_PIXELFORMAT_ARGB8888, 0);
+			if (rgba) {
+				this->G->setSurface(rgba);  // old 8-bit surface leaked once (small, one-time/font)
+				fsurf = rgba;
+			}
+		}
+		SDL_SetSurfaceColorMod(fsurf, fg.r, fg.g, fg.b);
+	}
+
 	PushClipping();
 	SetClipping(r.x, r.y, right, bottom);
 	CLabel(*this).DrawClip(x + r.xOffset, y + r.yOffset, txt, is_normal);
 	PopClipping();
+
+	if (tint) {
+		SDL_SetSurfaceColorMod(fsurf, 255, 255, 255);
+	}
 }
 
 /*----------------------------------------------------------------------------

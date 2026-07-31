@@ -2303,6 +2303,26 @@ PixelPos CUnit::GetMapPixelPosTopLeft() const
 	return pos;
 }
 
+extern double GetGameCycleFraction();
+
+PixelPos CUnit::GetInterpolatedMapPixelPosTopLeft() const
+{
+	const int curX = tilePos.x * PixelTileSize.x + IX;
+	const int curY = tilePos.y * PixelTileSize.y + IY;
+	const int dx = curX - LastPixelX;
+	const int dy = curY - LastPixelY;
+	// One cycle of ordinary movement shifts the absolute position only a few pixels (IX/IY are
+	// tile-relative but the absolute pos is continuous across tile steps). A jump larger than a
+	// tile means a teleport / initial placement / removal -> snap to the true position, don't
+	// slide across the map.
+	if (dx > PixelTileSize.x || dx < -PixelTileSize.x || dy > PixelTileSize.y || dy < -PixelTileSize.y) {
+		return PixelPos(curX, curY);
+	}
+	const double a = GetGameCycleFraction();
+	return PixelPos(LastPixelX + (int)(dx * a + (dx >= 0 ? 0.5 : -0.5)),
+	                LastPixelY + (int)(dy * a + (dy >= 0 ? 0.5 : -0.5)));
+}
+
 PixelPos CUnit::GetMapPixelPosCenter() const
 {
 	return GetMapPixelPosTopLeft() + Type->GetPixelSize() / 2;

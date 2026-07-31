@@ -777,6 +777,15 @@ void UnitActions()
 	std::vector<CUnit *> units(UnitManager->GetUnits());
 	BeginSyncDebugCycle(GameCycle, units.size());
 
+	// Snapshot each unit's current on-map pixel position as the "previous" cycle position
+	// BEFORE this cycle's actions move them, so the render path can smoothly interpolate the
+	// previous->current step by the elapsed cycle fraction (fixes jagged HD-tile movement).
+	for (CUnit *unit : units) {
+		unit->LastPixelX = unit->tilePos.x * PixelTileSize.x + unit->IX;
+		unit->LastPixelY = unit->tilePos.y * PixelTileSize.y + unit->IY;
+		unit->LastFrame = unit->Frame;
+	}
+
 	// Check for things that only happen every second
 	if (isASecondCycle) {
 		UnitActionsEachSecond(units);

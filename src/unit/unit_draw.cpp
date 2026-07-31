@@ -34,6 +34,7 @@
 --  Includes
 ----------------------------------------------------------------------------*/
 
+#include <cmath>
 #include <vector>
 
 #include "stratagus.h"
@@ -695,10 +696,18 @@ void DrawShadow(const CUnitType &type, int frame, const PixelPos &screenPos, cha
 		return;
 	}
 	PixelPos pos = screenPos;
-	pos.x -= (type.ShadowWidth - type.TileWidth * PixelTileSize.x) / 2;
-	pos.y -= (type.ShadowHeight - type.TileHeight * PixelTileSize.y) / 2;
-	pos += type.Offset + type.ShadowOffset;
-	pos.y -= 2 * zDisplacement;
+	// Native-pixel offsets placing the shadow under the sprite; scale by the world zoom on the
+	// GPU-direct zoomed render so the (also zoom-scaled) shadow lines up. No-op at zoom 1.
+	int offX = -(type.ShadowWidth - type.TileWidth * PixelTileSize.x) / 2
+	           + type.Offset.x + type.ShadowOffset.x;
+	int offY = -(type.ShadowHeight - type.TileHeight * PixelTileSize.y) / 2
+	           + type.Offset.y + type.ShadowOffset.y - 2 * zDisplacement;
+	if (GpuWorldDrawZoom != 1.0f) {
+		offX = static_cast<int>(std::lround(offX * GpuWorldDrawZoom));
+		offY = static_cast<int>(std::lround(offY * GpuWorldDrawZoom));
+	}
+	pos.x += offX;
+	pos.y += offY;
 
 	if (!type.ShadowSpriteFrame) {
 		// the shadow is a full unit shadow
@@ -908,6 +917,10 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 /**
 **  Draw unit on map.
 */
+// WargusHD temporary debug: overlay each unit's frame/direction/anim to diagnose the
+// HD sprite facing + movement. Toggled at file scope (flip to false to disable).
+bool DebugUnitFrames = false;
+
 void CUnit::Draw(const CViewport &vp) const
 {
 	int frame;
@@ -929,7 +942,7 @@ void CUnit::Draw(const CViewport &vp) const
 	UnitAction action = this->CurrentAction();
 	PixelPos screenPos;
 	if (ReplayRevealMap || IsVisible) {
-		screenPos = vp.MapToScreenPixelPos(this->GetMapPixelPosTopLeft());
+		screenPos = vp.MapToScreenPixelPos(this->GetInterpolatedMapPixelPosTopLeft());
 		type = this->Type;
 		frame = this->Frame;
 		state = (action == UnitAction::Built) | ((action == UnitAction::UpgradeTo) << 1);
@@ -973,6 +986,15 @@ void CUnit::Draw(const CViewport &vp) const
 		return;
 	}
 
+	// GPU-pipeline (Phase 1): draw this unit's shadow + player-coloured body through the GPU
+	// texture path when rendering to the on-screen backbuffer at Zoom==1. During the zoomed/crisp
+	// offscreen render TheScreen is swapped to vp.MapRenderSurface, so this evaluates false and the
+	// unit composites on the CPU exactly as before. The flag is consumed by CGraphic's Draw*Clip*
+	// dispatchers (HD RGBA sprites only; classic paletted sprites still take the CPU palette-remap
+	// path). Restored before returning so missiles/particles/decorations outside this scope are
+	// unaffected.
+	const bool prevGpuWorld = GpuWorldDrawActive;
+	GpuWorldDrawActive = (TheScreen != vp.GetMapRenderSurface());
 
 	if (state == 1 && constructed && cframe) {
 		DrawConstructionShadow(*type, *cframe, frame, screenPos);
@@ -997,7 +1019,16 @@ void CUnit::Draw(const CViewport &vp) const
 	auto sprite = type->Sprite;
 	if (type->BoolFlag[HARVESTER_INDEX].value && this->CurrentResource) {
 		const auto &resinfo = type->ResInfo[this->CurrentResource];
-		if (this->ResourcesHeld) {
+		// A terrain harvester (wood) accumulates ResourcesHeld step by step WHILE it is still
+		// chopping, so keying the carry sprite on ResourcesHeld > 0 flips to the carry-log poses
+		// after the very first swing and plays them over the rest of the chop. Only show the
+		// carry sprite once the load is full (i.e. actually hauling it home). Non-terrain
+		// harvesters (gold/mine) are only ever drawn while carrying, so their behaviour is
+		// unchanged by requiring a full load.
+		const bool carrying = resinfo->TerrainHarvester
+			? (this->ResourcesHeld >= resinfo->ResourceCapacity)
+			: (this->ResourcesHeld > 0);
+		if (carrying) {
 			if (resinfo->SpriteWhenLoaded) {
 				sprite = resinfo->SpriteWhenLoaded;
 			}
@@ -1031,6 +1062,23 @@ void CUnit::Draw(const CViewport &vp) const
 
 	// Unit's extras not fully supported.. need to be decorations themselves.
 	DrawInformations(*this, *type, screenPos);
+
+	if (DebugUnitFrames && (ReplayRevealMap || IsVisible)) {
+		const int nd = type->NumDirections > 0 ? type->NumDirections : 8;
+		const int nextdir = 256 / nd;
+		const int dirIdx = ((this->Direction + nextdir / 2) & 0xFF) / nextdir;
+		const bool mir = this->Frame < 0;
+		const int cell = mir ? (-this->Frame - 1) : this->Frame;
+		char buf[96];
+		snprintf(buf, sizeof(buf), "F%d D%d i%d%s c%d a%zu ix%d",
+		         this->Frame, this->Direction, dirIdx, mir ? "M" : "", cell,
+		         (size_t)this->Anim.Anim, (int)this->IX);
+		CLabel(GetSmallFont()).DrawClip(screenPos.x, screenPos.y - 10, buf);
+	}
+
+	// GPU-pipeline (Phase 1): restore so anything drawn after this unit (missiles, particles, fog,
+	// HUD) keeps compositing on the CPU overlay.
+	GpuWorldDrawActive = prevGpuWorld;
 }
 
 /**

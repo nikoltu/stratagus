@@ -151,7 +151,13 @@ private:
 	 * specialized variant of the method.
 	 */
 	template<bool graphicalTileIsLogicalTile>
-	void DrawMapBackgroundInViewport(const fieldHighlightChecker highlightChecker = nullptr) const;
+	void DrawMapBackgroundInViewport(const fieldHighlightChecker highlightChecker = nullptr,
+									 float drawZoom = 1.0f) const;
+	/// Crisp-zoom (A2) world render: draws terrain crisp at full on-screen size plus scaled
+	/// units/missiles/particles/fog into the offscreen, then copies it 1:1 to the screen.
+	/// Only invoked when EnableCrispZoom is on AND the viewport is zoomed.
+	void DrawCrispWorld(const fieldHighlightChecker highlightChecker,
+						bool drawBuildCursor, const Vec2i &buildCursorTile);
 	/// Draw the map fog of war
 	void DrawMapFogOfWar();
 	/// Adjust fog of war surface to viewport
@@ -178,8 +184,19 @@ public:
 	float Zoom = 1.0f;
 
 	CUnit *Unit = nullptr;        /// Bound to this unit
+
+	/// GPU-pipeline: the zoom offscreen surface (or null when Zoom==1). Used to gate the GPU
+	/// world-draw path — tiles/units draw on the GPU only when the render target is the real
+	/// screen, not this offscreen (zoom/crisp paths keep the CPU blit).
+	SDL_Surface *GetMapRenderSurface() const { return MapRenderSurface; }
 private:
 	SDL_Surface *FogSurface { nullptr }; /// Texture for fog of war. Viewport sized.
+	/// GPU-pipeline (Phase 2): streaming GPU texture holding the per-frame upload of FogSurface.
+	/// Used only on the on-screen GPU render path (fog composited on the backbuffer over the world,
+	/// under the CPU HUD overlay). Recreated when the fog surface size changes; null on the CPU path.
+	SDL_Texture *FogTexture { nullptr };
+	int FogTextureWidth { 0 };
+	int FogTextureHeight { 0 };
 	SDL_Surface *MapRenderSurface { nullptr }; /// Offscreen map render target when Zoom != 1.
 
 	static bool ShowGrid;

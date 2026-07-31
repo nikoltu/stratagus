@@ -35,6 +35,7 @@
 
 #include "font.h"
 #include "fow.h"
+#include "iolib.h"
 #include "map.h"
 #include "missile.h"
 #include "particle.h"
@@ -52,6 +53,40 @@
 
 bool CViewport::ShowGrid = false;
 bool CViewport::ShowAStarPassability = false;
+
+/**
+**  Crisp-zoom: lazily load the higher-resolution (2x) tile graphic the first time the crisp
+**  path needs it. The HD art is a sibling of the tileset image with an "_hd" suffix, at twice
+**  the graphical tile size (e.g. 128px/tile, 2048x3072 for the classic 1024x1536/64px sheet,
+**  same 16-tiles-per-row slot order so the frame index is identical). If the file is absent we
+**  leave Map.HDTileGraphic null and the crisp terrain draw scales the plain 64px TileGraphic
+**  instead, so nothing breaks when the art has not shipped yet. Attempted at most once per map.
+*/
+static void EnsureHDTileGraphic()
+{
+	if (Map.HDTileGraphicTried) {
+		return;
+	}
+	Map.HDTileGraphicTried = true;
+
+	std::string hdFile = Map.Tileset.ImageFile;
+	const auto dot = hdFile.rfind(".png");
+	if (dot == std::string::npos) {
+		return;
+	}
+	hdFile.insert(dot, "_hd");
+
+	// Same file-access guard used elsewhere before loading optional art.
+	if (!CanAccessFile(LibraryFileName(hdFile).c_str())) {
+		return;
+	}
+
+	const PixelSize gts = Map.Tileset.getPixelTileSize();
+	// ForceNew (not New) so we never collide with a cached graphic loaded at a different
+	// frame size, matching how Map.TileGraphic itself is created.
+	Map.HDTileGraphic = CGraphic::ForceNew(hdFile, gts.x * 2, gts.y * 2);
+	Map.HDTileGraphic->Load();
+}
 
 CViewport::~CViewport()
 {
@@ -293,10 +328,29 @@ void CViewport::DrawMapGridInViewport() const
 }
 
 template<bool graphicalTileIsLogicalTile>
-void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highlightChecker /* = nullptr */) const
+void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highlightChecker /* = nullptr */,
+											float drawZoom /* = 1.0f */) const
 {
+	// GPU-pipeline (Phase 1, zoomed direct render): when this viewport is zoomed and we are drawing
+	// straight to the backbuffer (not the CPU offscreen), the tile loop still steps by NATIVE tile
+	// size (logical geometry) but each tile is placed & scaled to its zoomed on-screen rect below.
+	// The loop's right/bottom bounds must then be the LOGICAL render extent, not the full on-screen
+	// (zoomed) extent, otherwise the native-stepping loop would iterate ~Zoom× too many columns/rows
+	// (the surplus fall off-screen and would only be discarded by the renderer clip). Capping to the
+	// render size makes the native tile count exactly fill the zoomed viewport.
+	const bool gpuZoomTiles = (TheScreen != this->MapRenderSurface) && (drawZoom == 1.0f)
+	                          && (this->Zoom != 1.0f);
 	int ex = this->BottomRightPos.x;
 	int ey = this->BottomRightPos.y;
+	if (gpuZoomTiles) {
+		const PixelSize rs = this->GetRenderPixelSize();
+		const PixelSize gts = Map.Tileset.getPixelTileSize();
+		// +1 tile of slack so the partial tile straddling the right/bottom edge is always drawn
+		// (its zoomed span then covers the last on-screen pixels); the overshoot is clipped by the
+		// renderer clip rect set in CViewport::Draw.
+		ex = this->TopLeftPos.x + rs.x + gts.x;
+		ey = this->TopLeftPos.y + rs.y + gts.y;
+	}
 	int sy = this->MapPos.y;
 	int dy = this->TopLeftPos.y - this->Offset.y;
 	const int mapW = Map.Info.MapWidth;
@@ -342,6 +396,18 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 	}
 	sy *= mapW;
 
+	// GPU-pipeline (Phase 1): route terrain tiles through the GPU texture path, but ONLY for the
+	// native on-screen render (Zoom==1, drawing straight to the backbuffer rather than the zoomed
+	// offscreen MapRenderSurface). Zoomed/crisp passes keep the CPU compositor. Each tile draw is
+	// dispatched inside CGraphic::DrawFrameClip (paletted tiles still fall back to the CPU path so
+	// palette colour-cycling animation keeps working).
+	const bool prevGpuWorld = GpuWorldDrawActive;
+	const float prevGpuZoom = GpuWorldDrawZoom;
+	GpuWorldDrawActive = (TheScreen != this->MapRenderSurface) && (drawZoom == 1.0f);
+	// Drive the destination-size scale of the GPU tile RenderCopy from this viewport's zoom (1.0 on
+	// the classic native path => no change). Positions below are pre-scaled to the zoomed screen.
+	GpuWorldDrawZoom = GpuWorldDrawActive ? this->Zoom : 1.0f;
+
 	while (dy <= ey && sy < map_max) {
 		int sx = this->MapPos.x + sy;
 		int dx = this->TopLeftPos.x - this->Offset.x;
@@ -367,7 +433,35 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 			} else {
 				tile = mf.playerInfo.SeenTile;
 			}
-			Map.TileGraphic->DrawFrameClip(tile, dx, dy);
+			if (drawZoom != 1.0f) {
+				// Crisp-zoom terrain: dx/dy are LOGICAL positions (this pass runs with
+				// origin 0 and Zoom-1 stepping, exactly like the classic path), so multiply
+				// by drawZoom to reach the on-screen position and scale each tile to its
+				// on-screen size. Deriving width/height from consecutive rounded tile edges
+				// makes adjacent tiles abut seamlessly (no 1px gaps from rounding position
+				// and size independently). Prefer the HD sheet; fall back to the 64px tiles.
+				CGraphic *const src = Map.HDTileGraphic ? Map.HDTileGraphic.get()
+													    : Map.TileGraphic.get();
+				const int sx0 = static_cast<int>(std::lround(dx * drawZoom));
+				const int sy0 = static_cast<int>(std::lround(dy * drawZoom));
+				const int sx1 = static_cast<int>(std::lround((dx + graphicTileSize.x) * drawZoom));
+				const int sy1 = static_cast<int>(std::lround((dy + graphicTileSize.y) * drawZoom));
+				src->DrawFrameClipScaled(tile, sx0, sy0, sx1 - sx0, sy1 - sy0);
+			} else if (gpuZoomTiles) {
+				// Zoomed GPU direct render: dx,dy are logical (native-stepped) screen positions.
+				// Convert each tile's logical offset from the viewport top-left to its zoomed screen
+				// top-left using consecutive rounded edges (so neighbouring tiles abut seamlessly at
+				// integer zoom). DrawFrameClip -> DrawFrameClipTex then scales the tile to
+				// PixelTileSize*Zoom via GpuWorldDrawZoom, filling the gap to the next tile.
+				const float z = this->Zoom;
+				const int zx = this->TopLeftPos.x
+				               + static_cast<int>(std::lround((dx - this->TopLeftPos.x) * z));
+				const int zy = this->TopLeftPos.y
+				               + static_cast<int>(std::lround((dy - this->TopLeftPos.y) * z));
+				Map.TileGraphic->DrawFrameClip(tile, zx, zy);
+			} else {
+				Map.TileGraphic->DrawFrameClip(tile, dx, dy);
+			}
 #ifdef DEBUG
 			// AStar passability overlay
 			if (CViewport::isPassabilityHighlighted() && Editor.Running == EditorNotRunning) {
@@ -405,6 +499,8 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 		}
 		dy += graphicTileSize.y;
 	}
+	GpuWorldDrawActive = prevGpuWorld;
+	GpuWorldDrawZoom = prevGpuZoom;
 	if (CViewport::isGridEnabled()) {
 		DrawMapGridInViewport();
 	}
@@ -465,6 +561,27 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 	// call below (tiles, units, missiles, fog) targets the offscreen at native
 	// scale without any per-call change.
 	const bool zoomed = (this->Zoom != 1.0f);
+	// Building-placement preview must scale with the world; when zoomed we render it inside the
+	// offscreen (below) so it upscales identically to the placed building. Capture the tile now,
+	// while the viewport still holds its real Zoom/origin.
+	const bool drawBuildCursor = (this == UI.MouseViewport && CursorBuilding
+	                              && CursorOn == ECursorOn::Map && zoomed);
+	Vec2i buildCursorTile(0, 0);
+	if (drawBuildCursor) {
+		buildCursorTile = this->ScreenToTilePos(CursorScreenPos);
+	}
+
+	// Crisp-at-zoom (A2) path. Only diverges from the classic pipeline when the runtime flag
+	// is on AND the viewport is actually zoomed; otherwise everything below is byte-for-byte
+	// the original code. The crisp world render is fully self-contained in DrawCrispWorld and
+	// leaves the viewport/clipping state exactly as the classic zoomed path does, so the
+	// shared overlay drawing further down is identical for both branches.
+	const bool crisp = EnableCrispZoom && zoomed;
+	if (crisp) {
+		EnsureHDTileGraphic();
+		this->DrawCrispWorld(highlightChecker, drawBuildCursor, buildCursorTile);
+	} else {
+
 	SDL_Surface *savedScreen = nullptr;
 	PixelPos savedTopLeft;
 	PixelPos savedBottomRight;
@@ -472,7 +589,16 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 	PixelSize renderSize;
 	SDL_Rect dstRect;
 
-	if (zoomed) {
+	// GPU-pipeline (Phase 1, zoomed direct render): for the normal in-game viewport we draw the
+	// zoomed world (tiles + unit sprites/shadows) straight to the backbuffer at ZOOMED size via the
+	// GPU, bypassing the CPU offscreen (MapRenderSurface) + SoftStretch entirely. That offscreen was
+	// what turned black once TheScreen became the translucent ARGB overlay. The offscreen path is
+	// kept ONLY as a fallback for the editor (heavy direct-pixel TheScreen consumer). At Zoom==1 the
+	// world already renders straight to the backbuffer, so gpuDirect only matters when zoomed.
+	const bool gpuDirect = zoomed && (Editor.Running == EditorNotRunning);
+	const bool useOffscreen = zoomed && !gpuDirect;
+
+	if (useOffscreen) {
 		const PixelSize realSize = this->GetPixelSize();
 		renderSize = this->GetRenderPixelSize();
 		this->AdjustMapRenderSurface(renderSize);
@@ -500,6 +626,31 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 
 	PushClipping();
 	this->SetClipping();
+
+	// GPU-pipeline (Phase 1): constrain the GPU world draws (tiles + unit sprites/shadows) to this
+	// viewport's on-screen rectangle. The CPU compositor uses PushClipping/CLIP_RECTANGLE above;
+	// the GPU RenderCopy path is unaffected by that and needs the renderer's own clip. Only set it
+	// for the native on-screen render (not the zoomed offscreen, where world draws stay on CPU).
+	// MUST be reset before RealizeVideoMemory copies the full-screen overlay, or that copy (and the
+	// benchmark bar) would be clipped to the last viewport. Applies whenever world draws hit the
+	// backbuffer directly: the classic Zoom==1 render AND the new zoomed GPU-direct render.
+	const bool worldToScreen = !useOffscreen;
+	if (worldToScreen) {
+		SDL_Rect vpClip = { this->TopLeftPos.x, this->TopLeftPos.y,
+							this->BottomRightPos.x - this->TopLeftPos.x + 1,
+							this->BottomRightPos.y - this->TopLeftPos.y + 1 };
+		SDL_RenderSetClipRect(TheRenderer, &vpClip);
+	}
+
+	// Scale the world GPU draws (tiles + unit sprites/shadows) to the on-screen zoom. On the
+	// classic Zoom==1 path this->Zoom is 1.0 so this is a no-op; on the GPU-direct zoomed path it
+	// makes every RenderCopy destination and every native sprite-centring offset scale up. Reset to
+	// 1.0 before the CPU-overlay draws (fog/HUD/cursor) below. DrawMapBackgroundInViewport manages
+	// its own copy of this around the tile pass; setting it here covers the unit/shadow draws.
+	const float savedGpuZoom = GpuWorldDrawZoom;
+	if (worldToScreen) {
+		GpuWorldDrawZoom = this->Zoom;
+	}
 
 	/* this may take while */
 	if (Map.Tileset.getLogicalToGraphicalTileSizeShift() > 0) {
@@ -595,6 +746,16 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 		ParticleManager.endDraw();
 	}
 
+	// GPU-pipeline (Phase 1): world GPU draws for this viewport are done; drop the renderer clip so
+	// the fog/HUD CPU overlay and the full-screen overlay copy in RealizeVideoMemory are not
+	// clipped to this viewport. (Fog/missiles/particles above already drew on the CPU overlay.)
+	if (worldToScreen) {
+		SDL_RenderSetClipRect(TheRenderer, nullptr);
+	}
+	// World GPU draws are done; the fog/HUD/cursor CPU overlay below composites at native scale
+	// (uploaded 1:1 over the whole screen), so drop the world zoom before it.
+	GpuWorldDrawZoom = savedGpuZoom;
+
 	/// Draw Fog of War
 	this->DrawMapFogOfWar();
 
@@ -609,7 +770,11 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 		}
 	}
 
-	if (zoomed) {
+	if (drawBuildCursor) {
+		DrawBuildingCursorViewport(*this, buildCursorTile);
+	}
+
+	if (useOffscreen) {
 		// Map content is complete in the offscreen surface: restore the real
 		// screen and viewport placement, then upscale the offscreen into the
 		// on-screen rectangle. Overlays below (order lines, unit-name popup,
@@ -625,13 +790,18 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 		srcRect.y = 0;
 		srcRect.w = renderSize.x;
 		srcRect.h = renderSize.y;
-		// Both surfaces share the same 32bpp no-alpha layout, so this same-format stretch
-		// takes SDL's fast path instead of the per-pixel converting SDL_BlitScaled.
-		SDL_SoftStretch(this->MapRenderSurface, &srcRect, TheScreen, &dstRect);
+		// Both surfaces share the same 32bpp no-alpha layout. Use the bilinear (Linear) upscale
+		// instead of nearest: it removes the blocky stair-step and the sub-pixel-scroll shimmer
+		// when the player pinch-zooms in. The HD art is 64px/tile, so this reads as smooth rather
+		// than razor-crisp (true crispness needs higher-res source art), but it is a clear, cheap
+		// win over nearest. Same-format keeps SDL's fast path.
+		SDL_SoftStretchLinear(this->MapRenderSurface, &srcRect, TheScreen, &dstRect);
 
 		PushClipping();
 		this->SetClipping();
 	}
+
+	} // end of classic (non-crisp) world render branch
 
 	//
 	// Draw orders of selected units.
@@ -664,6 +834,202 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 
 	DrawBorder();
 	PopClipping();
+}
+
+/**
+**  Crisp-at-zoom (A2) world render.
+**
+**  Renders the whole world into the offscreen surface at FULL on-screen size so the final
+**  copy back to the screen is 1:1 (no soft upscale):
+**   - Terrain is drawn crisp: the tile loop runs with logical geometry (origin 0, Zoom 1,
+**     the classic stepping) but each tile is placed & scaled to on-screen size from the HD
+**     tile sheet (or the 64px sheet scaled up when HD art is absent).
+**   - Units / missiles / particles are drawn with the REAL Zoom kept, so the Zoom-aware
+**     viewport transforms place them at on-screen ·Zoom positions; their sprite blits are
+**     scaled up to on-screen size by the CrispZoomDrawScale fast paths in CGraphic. This is
+**     "soft but correct" for now (higher-res unit art is a later phase). Direct-pixel
+**     decorations (health bars, selection boxes) are positioned correctly but not enlarged.
+**   - Fog is composited by the crisp branch inside DrawMapFogOfWar.
+**
+**  On return the viewport/screen/clipping state matches the classic zoomed path exactly (one
+**  clipping level left pushed for the shared overlays that Draw() renders afterwards).
+*/
+void CViewport::DrawCrispWorld(const fieldHighlightChecker highlightChecker,
+							   bool drawBuildCursor, const Vec2i &buildCursorTile)
+{
+	const float z = this->Zoom;
+	const PixelSize realSize = this->GetPixelSize();        // full on-screen viewport size
+	const PixelSize renderSize = this->GetRenderPixelSize(); // logical size (== realSize / z)
+
+	this->AdjustMapRenderSurface(renderSize);              // allocates the full-framebuffer offscreen
+
+	const PixelPos savedTopLeft = this->TopLeftPos;
+	const PixelPos savedBottomRight = this->BottomRightPos;
+	const float savedZoom = this->Zoom;
+	SDL_Surface *const savedScreen = TheScreen;
+
+	// Redirect all world drawing into the offscreen. We paint it at FULL on-screen size.
+	TheScreen = this->MapRenderSurface;
+
+	// Clear only the realSize sub-rect we actually paint & copy back.
+	SDL_Rect clearRect = { 0, 0, realSize.x, realSize.y };
+	SDL_FillRect(this->MapRenderSurface, &clearRect, 0);
+
+	// The scaled sprite/tile blits use SDL_BlitScaled, which clips to the destination
+	// surface's clip_rect (NOT the engine CLIP_RECTANGLE). Constrain it to the painted
+	// region so nothing spills outside this viewport (e.g. split-screen neighbours).
+	SDL_Rect savedClip;
+	SDL_GetClipRect(this->MapRenderSurface, &savedClip);
+	SDL_Rect crispClip = { 0, 0, realSize.x, realSize.y };
+	SDL_SetClipRect(this->MapRenderSurface, &crispClip);
+
+	// ---- Phase A: crisp terrain (logical geometry + scaled draw) ----
+	this->TopLeftPos = PixelPos(0, 0);
+	this->BottomRightPos = PixelPos(renderSize.x - 1, renderSize.y - 1);
+	this->Zoom = 1.0f;
+	PushClipping();
+	// Keep the engine clip permissive over the full painted region; the tiles clip via the
+	// surface clip_rect set above.
+	::SetClipping(0, 0, realSize.x - 1, realSize.y - 1);
+	if (Map.Tileset.getLogicalToGraphicalTileSizeShift() > 0) {
+		this->DrawMapBackgroundInViewport<false>(highlightChecker, z);
+	} else {
+		this->DrawMapBackgroundInViewport<true>(highlightChecker, z);
+	}
+	PopClipping();
+
+	// ---- Phase B: units / missiles / particles at REAL zoom ----
+	this->TopLeftPos = PixelPos(0, 0);
+	this->BottomRightPos = PixelPos(realSize.x - 1, realSize.y - 1);
+	this->Zoom = z; // Zoom-aware transforms now place sprites at on-screen ·z positions
+	PushClipping();
+	this->SetClipping();
+
+	CurrentViewport = this;
+	Missile *clickMissile = nullptr;
+
+	// Turn on the per-blit up-scale so unit/missile/particle sprites reach on-screen size.
+	CrispZoomDrawScale = z;
+	{
+		const std::vector<CUnit *> unittable = FindAndSortUnits(*this);
+		const std::vector<Missile *> missiletable = FindAndSortMissiles(*this);
+		const std::vector<CParticle *> particletable = ParticleManager.prepareToDraw(*this);
+
+		const size_t nunits = unittable.size();
+		const size_t nmissiles = missiletable.size();
+		const size_t nparticles = particletable.size();
+
+		size_t i = 0;
+		size_t j = 0;
+		size_t k = 0;
+
+		while ((i < nunits && j < nmissiles) || (i < nunits && k < nparticles)
+			   || (j < nmissiles && k < nparticles)) {
+			if (i == nunits) {
+				if (missiletable[j]->Type->DrawLevel < particletable[k]->getDrawLevel()) {
+					missiletable[j]->DrawMissile(*this);
+					if (clickMissile == nullptr && missiletable[j]->Type->Ident == ClickMissile) {
+						clickMissile = missiletable[j];
+					}
+					++j;
+				} else {
+					particletable[k]->draw();
+					++k;
+				}
+			} else if (j == nmissiles) {
+				if (unittable[i]->GetDrawLevel() < particletable[k]->getDrawLevel()) {
+					unittable[i]->Draw(*this);
+					++i;
+				} else {
+					particletable[k]->draw();
+					++k;
+				}
+			} else if (k == nparticles) {
+				if (unittable[i]->GetDrawLevel() < missiletable[j]->Type->DrawLevel) {
+					unittable[i]->Draw(*this);
+					++i;
+				} else {
+					missiletable[j]->DrawMissile(*this);
+					if (clickMissile == nullptr && missiletable[j]->Type->Ident == ClickMissile) {
+						clickMissile = missiletable[j];
+					}
+					++j;
+				}
+			} else {
+				if (unittable[i]->GetDrawLevel() <= missiletable[j]->Type->DrawLevel) {
+					if (unittable[i]->GetDrawLevel() < particletable[k]->getDrawLevel()) {
+						unittable[i]->Draw(*this);
+						++i;
+					} else {
+						particletable[k]->draw();
+						++k;
+					}
+				} else {
+					if (missiletable[j]->Type->DrawLevel < particletable[k]->getDrawLevel()) {
+						missiletable[j]->DrawMissile(*this);
+						if (clickMissile == nullptr && missiletable[j]->Type->Ident == ClickMissile) {
+							clickMissile = missiletable[j];
+						}
+						++j;
+					} else {
+						particletable[k]->draw();
+						++k;
+					}
+				}
+			}
+		}
+		for (; i < nunits; ++i) {
+			unittable[i]->Draw(*this);
+		}
+		for (; j < nmissiles; ++j) {
+			missiletable[j]->DrawMissile(*this);
+			if (clickMissile == nullptr && missiletable[j]->Type->Ident == ClickMissile) {
+				clickMissile = missiletable[j];
+			}
+		}
+		for (; k < nparticles; ++k) {
+			particletable[k]->draw();
+		}
+		ParticleManager.endDraw();
+	}
+	// Fog composites with real alpha over the terrain, not through the sprite fast path.
+	CrispZoomDrawScale = 1.0f;
+
+	/// Draw Fog of War (crisp branch inside handles the scaling)
+	this->DrawMapFogOfWar();
+
+	// Overlays that are part of the world (click missile above fog, building placement
+	// preview) are scaled like the rest of the world content.
+	CrispZoomDrawScale = z;
+	if (clickMissile != nullptr) {
+		Vec2i pos = Map.MapPixelPosToTilePos(clickMissile->position);
+		Map.Clamp(pos);
+		if (Map.Field(pos.x, pos.y)->playerInfo.TeamVisibilityState(*ThisPlayer) != 2) {
+			clickMissile->DrawMissile(*this);
+		}
+	}
+	if (drawBuildCursor) {
+		DrawBuildingCursorViewport(*this, buildCursorTile);
+	}
+	CrispZoomDrawScale = 1.0f;
+
+	PopClipping();
+
+	// Restore the real screen/viewport and copy the finished offscreen 1:1 to the screen.
+	TheScreen = savedScreen;
+	this->TopLeftPos = savedTopLeft;
+	this->BottomRightPos = savedBottomRight;
+	this->Zoom = savedZoom;
+	SDL_SetClipRect(this->MapRenderSurface, &savedClip);
+
+	SDL_Rect srcRect = { 0, 0, realSize.x, realSize.y };
+	SDL_Rect dstRect = { savedTopLeft.x, savedTopLeft.y, realSize.x, realSize.y };
+	// Offscreen is already on-screen size: exact 1:1 copy, no resampling.
+	SDL_BlitSurface(this->MapRenderSurface, &srcRect, TheScreen, &dstRect);
+
+	// Leave one clipping level pushed for the shared overlays drawn by Draw().
+	PushClipping();
+	this->SetClipping();
 }
 
 /**

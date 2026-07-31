@@ -43,6 +43,7 @@
 #include <SDL.h>
 #include <guisan.hpp>
 #include <guisan/sdl/sdlimage.hpp>
+#include <map>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -54,6 +55,25 @@ extern SDL_Window *TheWindow;
 extern SDL_Renderer *TheRenderer;
 extern SDL_Surface *TheScreen;
 extern SDL_Texture *TheTexture;
+
+// GPU-pipeline (Phase 1): when true, CGraphic::DrawFrameClip[X] / DrawPlayerColorFrameClip[X]
+// route to the GPU texture path (RenderCopy to the backbuffer) instead of a CPU blit into
+// TheScreen. Set ONLY around the on-screen world draws (map tile pass + unit sprite/shadow
+// draws) in the non-zoomed viewport render; false everywhere else (HUD, menus, icons, and the
+// zoomed offscreen render), so those keep compositing on the CPU overlay. The individual draw
+// functions additionally require mTexture != nullptr and surface == TheScreen before taking the
+// GPU path, so paletted graphics and off-screen targets always fall back to the CPU path.
+extern bool GpuWorldDrawActive;
+
+// GPU-pipeline (Phase 1, zoomed direct render): the magnification the world GPU draws are drawn at.
+// When the in-game viewport is zoomed (Android default 2.0), the tile/unit GPU path draws straight
+// to the backbuffer at the ZOOMED on-screen size instead of going through the CPU offscreen +
+// SoftStretch. The screen POSITION passed to the draw functions is already zoom-correct (tiles are
+// placed at their rounded zoomed screen rect; unit sprite anchors come from MapToScreenPixelPos and
+// their native centring offsets are scaled by this factor at the draw site), so here only the
+// DESTINATION SIZE is multiplied by this zoom. Defaults to 1.0 => identical to the classic Zoom==1
+// path (lround(W*1)==W), so nothing changes off the zoomed path.
+extern float GpuWorldDrawZoom;
 
 #define RSHIFT  16
 #define GSHIFT  8
@@ -125,6 +145,19 @@ public:
 				   SDL_Surface *surface = TheScreen) const;
 	void DrawFrameClip(unsigned frame, int x, int y,
 					   SDL_Surface *surface = TheScreen) const;
+
+	// GPU-pipeline (Phase 1): RenderCopy one frame straight to the backbuffer via mTexture,
+	// bypassing the CPU software compositor. DrawFrameClipTexX draws the same frame mirrored
+	// (SDL_RenderCopyEx horizontal flip) from the *same* base texture, so no separate flip
+	// sheet/texture is needed. Only valid when mTexture != nullptr (RGBA graphics only).
+	void DrawFrameClipTex(unsigned frame, int x, int y) const;
+	void DrawFrameClipTexX(unsigned frame, int x, int y) const;
+	// Crisp-zoom helper: blit a frame scaled to an explicit destination size (w,h) via
+	// SDL_BlitScaled. Used ONLY by the crisp-zoom terrain path; it relies on the target
+	// surface's clip_rect for clipping (not the engine CLIP_RECTANGLE), which the crisp
+	// render path sets up. Not used at all when EnableCrispZoom is off.
+	void DrawFrameClipScaled(unsigned frame, int x, int y, int w, int h,
+							 SDL_Surface *surface = TheScreen) const;
 	void DrawFrameTrans(unsigned frame, int x, int y, int alpha,
 						SDL_Surface *surface = TheScreen) const;
 	void DrawFrameClipTrans(unsigned frame, int x, int y, int alpha,
@@ -182,6 +215,11 @@ public:
 	fs::path File;         /// Filename
 	std::string HashFile;  /// Filename used in hash
 	SDL_Surface *SurfaceFlip = nullptr; /// Flipped surface
+	// GPU-pipeline (Phase 1): GPU copy of mSurface, uploaded once at the end of Load(). Created
+	// ONLY for paletteless (RGBA) surfaces: 8-bit paletted graphics stay on the CPU path so that
+	// palette colour-cycling (animated water/lava tiles) and the classic player-colour palette
+	// remap keep working. nullptr => this graphic is never drawn through the GPU path.
+	SDL_Texture *mTexture = nullptr;
 	std::vector<frame_pos_t> frame_map;
 	std::vector<frame_pos_t> frameFlip_map;
 	void GenFramesMap();
@@ -199,11 +237,34 @@ class CPlayerColorGraphic : public CGraphic
 {
 public:
 	CPlayerColorGraphic() = default;
+	~CPlayerColorGraphic();
+
+	// HD (RGBA, paletteless) player-colour support. The classic remap only works on 8-bit
+	// palettes; for HD sprites we ship the base with a NEUTRAL grey team region + a matching
+	// grey mask (<file>_team.png), and composite the player colour at runtime into a per-player
+	// cached surface. TeamMask == nullptr means the classic palette path is used instead.
+	SDL_Surface *TeamMask = nullptr;
+	SDL_Surface *TeamMaskFlip = nullptr;
+	std::map<int, SDL_Surface *> ColorVariants;
+	std::map<int, SDL_Surface *> ColorVariantsFlip;
+	void LoadTeamMask(const std::string &baseFile);
+	SDL_Surface *GetColorVariant(int colorIndex, bool flip);
+
+	// GPU-pipeline (Phase 1): GPU copy of the grey team-colour mask (TeamMask). The player colour
+	// is applied at draw time via SDL_SetTextureColorMod on this mask + a BLEND RenderCopy over
+	// the base frame, reproducing today's baked look with NO per-player CPU baking. nullptr =>
+	// this graphic has no HD team mask, so player-colour draws fall back to the CPU path.
+	SDL_Texture *mTextureTeam = nullptr;
+	void DrawPlayerColorFrameClipTex(int colorIndex, unsigned frame, int x, int y, bool flip = false);
 
 	void DrawPlayerColorFrameClipX(int colorIndex, unsigned frame, int x, int y,
 								   SDL_Surface *surface = TheScreen);
 	void DrawPlayerColorFrameClip(int colorIndex, unsigned frame, int x, int y,
 								  SDL_Surface *surface = TheScreen);
+	// Crisp-zoom helper (see CGraphic::DrawFrameClipScaled). Player-colour variant, scaled
+	// to an explicit destination size. Only used on the crisp-zoom path.
+	void DrawPlayerColorFrameClipScaled(int colorIndex, unsigned frame, int x, int y,
+										int w, int h, SDL_Surface *surface = TheScreen);
 
 	static std::shared_ptr<CPlayerColorGraphic> New(const std::string &file, int w = 0, int h = 0);
 	static std::shared_ptr<CPlayerColorGraphic> ForceNew(const std::string &file, int w = 0, int h = 0);
@@ -453,6 +514,12 @@ extern void InvalidateArea(int x, int y, int w, int h);
 /// clipping will be marked Clip. Set the system-wide clipping rectangle.
 extern void SetClipping(int left, int top, int right, int bottom);
 
+/// GPU-pipeline hybrid frame loop (Phase 0). BeginFrame targets+clears the backbuffer and MUST
+/// run before any GPU world draw (called at the top of UpdateDisplay/EditorUpdateDisplay, and
+/// lazily from RealizeVideoMemory for non-UpdateDisplay present paths). EndFrame presents.
+extern void BeginFrame();
+extern void EndFrame();
+
 /// Realize video memory.
 extern void RealizeVideoMemory();
 
@@ -492,6 +559,19 @@ extern void ToggleGrabMouse(int mode);
 
 extern EventCallback GameCallbacks;   /// Game callbacks
 extern EventCallback EditorCallbacks; /// Editor callbacks
+
+/// Runtime toggle for the experimental "crisp-at-zoom" (A2) map render path.
+/// DEFAULT false: when off, the zoom render path is byte-for-byte the classic one
+/// (render into a smaller offscreen, then bilinear upscale). When on AND a viewport is
+/// zoomed, terrain is rendered at full on-screen size from a higher-res tile graphic so
+/// it stays crisp. Toggleable from Lua via SetCrispZoom(bool) for A/B testing.
+extern bool EnableCrispZoom;
+/// Per-blit up-scale factor consulted by the CGraphic frame-blit fast paths. It is 1.0f
+/// everywhere except briefly during the crisp-zoom world render, where the crisp path sets
+/// it to the viewport Zoom so unit/missile/particle sprites are scaled up to on-screen size
+/// via SDL_BlitScaled. At 1.0f every blit takes exactly the classic code path (no behaviour
+/// change), which is what keeps EnableCrispZoom==false byte-identical.
+extern float CrispZoomDrawScale;
 
 extern Uint32 ColorBlack;
 extern Uint32 ColorDarkGreen;

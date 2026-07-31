@@ -253,6 +253,12 @@ int DoActionMove(CUnit &unit)
 
 	unit.pathFinderData->output.Cycles++;// reset have to be manually controlled by caller.
 	int move = UnitShowAnimationScaled(unit, &unit.Type->Animations->Move, Map.Field(unit.Offset)->getMoveCost());
+	// The per-cycle pixel step from the Move animation ("move N") is authored for the classic
+	// 32px logical tile. IX/IY span one tile = PixelTileSize (line above inits to -PixelTileSize),
+	// so on a larger (HD) tile the same step takes proportionally more cycles to cross a tile,
+	// making units move slower than intended. Scale the step to the tile size to keep real-time
+	// speed identical to the classic 32px behaviour (no-op when PixelTileSize == 32).
+	move = move * PixelTileSize.x / 32;
 
 	bool reached_next_tile = false;
 	if (posd.x) {

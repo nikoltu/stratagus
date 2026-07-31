@@ -48,6 +48,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Explicit so debuggerd reliably emits a native backtrace/tombstone for the
+            // in-game-menu HWUI SIGABRT (WargusHD diagnosis; libmain.so stays a Release build).
+            debuggable true
+            jniDebuggable true
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

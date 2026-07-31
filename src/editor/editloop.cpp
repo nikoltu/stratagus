@@ -990,6 +990,13 @@ static void ShowUnitInfo(const CUnit &unit)
 */
 void EditorUpdateDisplay()
 {
+	// GPU-pipeline hybrid (Phase 0): open the frame before any world drawing (see UpdateDisplay).
+	BeginFrame();
+	// Clear the CPU overlay to transparent: with HD (RGBA) tiles the map area now draws on the GPU
+	// and no longer overwrites TheScreen there, so stale overlay pixels would ghost over the GPU
+	// map without this clear. 0 == transparent in ARGB8888.
+	SDL_FillRect(TheScreen, nullptr, 0);
+
 	ColorCycle();
 
 	DrawMapArea(Editor.OverlayHighlighter); // draw the map area

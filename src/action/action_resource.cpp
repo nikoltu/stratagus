@@ -529,6 +529,8 @@ int COrder_Resource::StartGathering(CUnit &unit)
 		}
 #endif
 		UnitHeadingFromDeltaXY(unit, this->goalPos - unit.tilePos);
+		unit.Anim.Rotate = 0;   // stationary chopper: face the tree at once, no gradual turn
+		UnitUpdateHeading(unit);
 		if (resinfo.WaitAtResource) {
 			this->TimeToHarvest = std::max<int>(1, resinfo.WaitAtResource * SPEEDUP_FACTOR / unit.Player->SpeedResourcesHarvest[resinfo.ResourceId]);
 		} else {

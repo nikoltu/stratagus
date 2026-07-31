@@ -523,7 +523,7 @@ void ImageRadioButton::draw(gcn::Graphics *graphics) /* override */
 		width += width / 2;
 	}
 
-	graphics->drawText(getCaption(), width - 2, 0);
+	graphics->drawText(getCaption(), width - 2, (getHeight() - getFont()->getHeight()) / 2);
 
 	if (isFocused()) {
 		graphics->drawRectangle(gcn::Rectangle(width - 4, 0, getWidth() - width + 3, getHeight()));
@@ -616,7 +616,7 @@ void ImageCheckBox::draw(gcn::Graphics *graphics) /* override */
 		width += width / 2;
 	}
 
-	graphics->drawText(getCaption(), width - 2, 0);
+	graphics->drawText(getCaption(), width - 2, (getHeight() - getFont()->getHeight()) / 2);
 
 	if (isFocused()) {
 		graphics->drawRectangle(gcn::Rectangle(width - 4, 0, getWidth() - width + 3, getHeight()));
@@ -1690,10 +1690,11 @@ void ImageListBox::draw(gcn::Graphics *graphics) /* override */
 	*/
 	for (i = 0; i < mListModel->getNumberOfElements(); ++i) {
 		graphics->drawImage(img, 0, 0, 0, y, getWidth(), img->getHeight());
+		const int textY = y + (fontHeight - getFont()->getHeight()) / 2;
 		if (i == mSelected) {
-			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", 1, y + (fontHeight - getFont()->getHeight()) / 2);
+			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", getWidth() / 2, textY, gcn::Graphics::Center);
 		} else {
-			graphics->drawText(mListModel->getElementAt(i), 1, y + (fontHeight - getFont()->getHeight()) / 2);
+			graphics->drawText(mListModel->getElementAt(i), getWidth() / 2, textY, gcn::Graphics::Center);
 		}
 
 		y += fontHeight;
@@ -1733,18 +1734,86 @@ void ImageListBox::adjustSize()
 	}
 }
 
+int ImageListBox::rowHeight() const
+{
+	return itemImage ? std::max<int>(getFont()->getHeight(), itemImage->getHeight())
+	                 : getFont()->getHeight();
+}
+
+void ImageListBox::logic() /* override */
+{
+	adjustSize();
+	if (mFling) {
+		gcn::ScrollArea *scrollArea = dynamic_cast<gcn::ScrollArea *>(getParent());
+		if (scrollArea == nullptr) {
+			mFling = false;
+			return;
+		}
+		scrollArea->setVerticalScrollAmount(
+			scrollArea->getVerticalScrollAmount() - (int)mDragVelY);
+		mDragVelY *= 0.88f; // decay
+		const float v = mDragVelY < 0.f ? -mDragVelY : mDragVelY;
+		if (v < 1.f) {
+			mFling = false;
+			mDragVelY = 0.f;
+		}
+	}
+}
+
 void ImageListBox::mousePressed(gcn::MouseEvent &event) /* override */
 {
 	if (event.getButton() == gcn::MouseInput::Left) {
-		const auto itemHeight = itemImage
-		                          ? std::max<int>(getFont()->getHeight(), itemImage->getHeight())
-		                          : getFont()->getHeight();
-		setSelected(event.getY() / itemHeight);
-		distributeActionEvent();
+		// Begin a possible drag-to-scroll. The row selection is deferred to
+		// mouseReleased so a finger DRAG scrolls the list while a stationary
+		// tap/click still selects (see mouseDragged / mouseReleased).
+		// event.getY() is relative to this content widget, whose own Y moves as
+		// the list scrolls; adding getY() yields a scroll-invariant viewport Y.
+		mDragScrolling = true;
+		mDidDrag = false;
+		mFling = false;
+		mDragVelY = 0.f;
+		mDragStartY = event.getY() + getY();
+		mDragLastY = mDragStartY;
 	} else if (event.getButton() == gcn::MouseInput::Right) {
 		setSelected(-1);
 		distributeActionEvent();
 	}
+}
+
+void ImageListBox::mouseDragged(gcn::MouseEvent &event) /* override */
+{
+	gcn::ScrollArea *scrollArea = dynamic_cast<gcn::ScrollArea *>(getParent());
+	if (mDragScrolling && scrollArea != nullptr) {
+		const int y = event.getY() + getY(); // scroll-invariant viewport Y
+		const int dy = y - mDragLastY;
+		mDragLastY = y;
+		const int moved = (y - mDragStartY) < 0 ? (mDragStartY - y) : (y - mDragStartY);
+		if (moved > 6) {
+			mDidDrag = true; // enough travel: this gesture scrolls, not selects
+		}
+		if (dy != 0) {
+			mDragVelY = (float)dy;
+			scrollArea->setVerticalScrollAmount(scrollArea->getVerticalScrollAmount() - dy);
+		}
+	}
+	event.consume();
+}
+
+void ImageListBox::mouseReleased(gcn::MouseEvent &event) /* override */
+{
+	if (event.getButton() == gcn::MouseInput::Left && mDragScrolling) {
+		mDragScrolling = false;
+		if (!mDidDrag) {
+			// A tap/click, not a drag: select the row under the cursor.
+			setSelected(event.getY() / rowHeight());
+			distributeActionEvent();
+		} else {
+			// A real drag: hand the last velocity to a short momentum fling.
+			const float v = mDragVelY < 0.f ? -mDragVelY : mDragVelY;
+			mFling = v > 1.f;
+		}
+	}
+	event.consume();
 }
 
 static void scrollToRectangle(gcn::ScrollArea &scrollArea, const gcn::Rectangle &rectangle)
@@ -2365,6 +2434,7 @@ void ImageDropDownWidget::setList(lua_State *lua, lua_Object *lo)
 */
 void ImageDropDownWidget::setSize(int width, int height)
 {
+	mFieldHeight = height;   // remember the intended closed-field height (see adjustHeight)
 	DropDown::setSize(width, height);
 	this->mListBox->setSize(width, height);
 }
@@ -2396,8 +2466,12 @@ void ImageDropDownWidget::draw(gcn::Graphics *graphics) /* override */
 
 	if (mListBox->getListModel() && mListBox->getSelected() >= 0)
 	{
+		// Left-align the selected value with a small inset so it clears the button's beveled
+		// edge (Remastered dropdown fields are left-aligned with padding, unlike the centered
+		// list rows).
+		const int textPad = 20;
 		graphics->drawText(mListBox-> getListModel()->getElementAt(mListBox->getSelected()),
-		                   1,
+		                   textPad,
 		                   (h - getFont()->getHeight()) / 2);
 	}
 
@@ -2478,7 +2552,16 @@ void ImageDropDownWidget::adjustHeight()
 	Assert(mScrollArea && mScrollArea->getContent() != nullptr);
 
 	int listBoxHeight = mListBox->getHeight();
-	int h2 = mFoldedUpHeight ? mFoldedUpHeight : getFont()->getHeight();
+	// Keep the closed field at the height explicitly set via setSize() (mFieldHeight) instead of
+	// collapsing it to the font height. This override is now virtual, so the base DropDown code
+	// (setListModel/dropDown/foldUp) reaches it too; re-listing on a map change therefore keeps
+	// every dropdown its intended tall beveled-button height instead of shrinking to a thin bar.
+	// Falls back to the item image / font height only before any size has been set.
+	const int fieldH = mFieldHeight > 0
+	                   ? mFieldHeight
+	                   : (itemImage ? std::max<int>(getFont()->getHeight(), itemImage->getHeight())
+	                                : getFont()->getHeight());
+	int h2 = mFoldedUpHeight ? mFoldedUpHeight : fieldH;
 
 	setHeight(h2);
 

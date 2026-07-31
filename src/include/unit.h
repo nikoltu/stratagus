@@ -304,6 +304,11 @@ public:
 
 	PixelPos GetMapPixelPosTopLeft() const;
 	PixelPos GetMapPixelPosCenter() const;
+	/// Draw-only position, smoothly interpolated between the previous and current game
+	/// cycle by the fraction of a cycle elapsed. Removes the discrete 6px/cycle stepping
+	/// (and idle-frame freeze) that reads as jagged movement on HD tiles. Logic must keep
+	/// using GetMapPixelPosTopLeft(); only the render path uses this.
+	PixelPos GetInterpolatedMapPixelPosTopLeft() const;
 
 public:
 	class CUnitManagerData
@@ -352,6 +357,9 @@ public:
 
 	signed char IX = 0;         /// X image displacement to map position
 	signed char IY = 0;         /// Y image displacement to map position
+	int LastPixelX = 0;         /// absolute on-map pixel pos at the previous game cycle
+	int LastPixelY = 0;         /// (render-side movement interpolation; not gameplay state)
+	int LastFrame = 0;          /// unit.Frame at the previous game cycle (render-side sprite tween)
 	unsigned char Direction = 0; //: 8; /// angle (0-255) unit looking
 	unsigned char CurrentResource = 0;
 	int ResourcesHeld = 0;      /// Resources Held by a unit
@@ -461,6 +469,7 @@ public:
 	bool HardwareCursor = false;       /// If true, uses the hardware to draw the cursor. Shaders do no longer apply to the cursor, but this way it's decoupled from the game refresh rate
 	bool SelectionRectangleIndicatesDamage = false; /// If true, the selection rectangle interpolates color to indicate damage
 	bool FormationMovement = true; /// If true, player controlled units stay in formation
+	bool SmoothUnitAnimation = true; /// Cross-fade walk-animation poses between logic cycles (render-only)
 
 	int FrameSkip = 0;          /// Mask used to skip rendering frames (useful for slow renderers that keep up with the game logic, but not the rendering to screen like e.g. original Raspberry Pi)
 

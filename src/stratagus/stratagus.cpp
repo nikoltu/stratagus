@@ -184,6 +184,7 @@ extern void beos_init(int argc, char **argv);
 #include "stratagus.h"
 
 #include "ai.h"
+#include "debug_bridge.h"
 #include "editor.h"
 #include "filesystem.h"
 #include "game.h"
@@ -423,7 +424,18 @@ void Exit(int err)
 	delete UnitManager;
 
 	fprintf(stdout, "%s", _("Thanks for playing Stratagus.\n"));
+#ifdef __ANDROID__
+	// Android teardown race: exit() runs the process's static/global destructors, which tear
+	// down libhwui's global mutex while Android's hwuiTask RenderThread can still be running,
+	// tripping a FORTIFY "pthread_mutex_lock called on a destroyed mutex" SIGABRT during a clean
+	// quit. Every engine subsystem has already been freed explicitly above, so terminate the
+	// process immediately without static destructors/atexit — the OS reclaims the rest.
+	fflush(stdout);
+	fflush(stderr);
+	std::_Exit(err);
+#else
 	exit(err);
+#endif
 }
 
 /**
@@ -439,7 +451,15 @@ void ExitFatal(int err)
 #else
 	print_backtrace();
 #endif
+#ifdef __ANDROID__
+	// See Exit(): avoid the libhwui static-destructor teardown race on Android so a fatal exit
+	// terminates cleanly instead of masking the real error with a destroyed-mutex SIGABRT.
+	fflush(stdout);
+	fflush(stderr);
+	std::_Exit(err);
+#else
 	exit(err);
+#endif
 }
 
 /**
@@ -816,6 +836,9 @@ try {
 
 	UnitManager->Init(); // Units memory management
 	PreMenuSetup();     // Load everything needed for menus
+
+	// Start the observe-only debug bridge (wdbg/ command channel + crash catcher).
+	DebugBridge_Init();
 
 	MenuLoop();
 
