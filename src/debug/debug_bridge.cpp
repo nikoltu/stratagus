@@ -33,6 +33,7 @@
 #include "map.h"
 #include "parameters.h"
 #include "player.h"
+#include "settings.h"
 #include "tile.h"
 #include "ui.h"
 #include "unit.h"
@@ -178,6 +179,23 @@ void EmitUnitFields(Json &j, const CUnit &unit)
 	j.comma(); j.num("pxW", pxW);
 	j.comma(); j.num("pxH", pxH);
 	j.comma(); j.num("frame", unit.Frame);
+	// Player-colour diagnostic: the colour index the sprite tint path resolves to
+	// (GameSettings.Presets[player].PlayerColor) and the RGB it maps to via PlayerColorsRGB[idx][0].
+	// This is exactly the ColorMod the GPU team-mask pass applies; compare with the on-screen sprite.
+	{
+		const int pidx = unit.Player ? unit.Player->Index : -1;
+		int cidx = -1;
+		if (pidx >= 0 && pidx < PlayerMax) {
+			cidx = GameSettings.Presets[pidx].PlayerColor;
+		}
+		j.comma(); j.num("colorIdx", cidx);
+		if (cidx >= 0 && cidx < (int)PlayerColorsRGB.size() && !PlayerColorsRGB[cidx].empty()) {
+			char cbuf[32];
+			const CColor &c = PlayerColorsRGB[cidx][0];
+			std::snprintf(cbuf, sizeof(cbuf), "%d,%d,%d", c.R, c.G, c.B);
+			j.comma(); j.str("colorRGB", cbuf);
+		}
+	}
 	if (type && !type->File.empty()) { j.comma(); j.str("file", type->File); }
 	j.ch('}');
 }

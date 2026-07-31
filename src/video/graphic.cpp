@@ -90,6 +90,58 @@ static SDL_Texture *UploadSurfaceToTexture(SDL_Surface *surface)
 	return tex;
 }
 
+// Upload a grey-on-black player-colour MASK as a texture whose black background is made
+// transparent. The HD <file>_team.png masks store the team region as a grey silhouette on an
+// OPAQUE black rectangle; RenderCopy'd straight over the base sprite that black paints a box
+// around the unit. The CPU GetColorVariant() path avoids this by compositing only where the
+// mask's red channel is > 0; mirror that here by deriving per-pixel alpha from the mask
+// luminance so pure black becomes fully transparent, with a short ramp to keep silhouette
+// edges anti-aliased. Bright team pixels keep their (opaque) alpha so the tint stays solid.
+static SDL_Texture *UploadMaskToTexture(SDL_Surface *surface)
+{
+	if (!surface || !TheRenderer) {
+		return nullptr;
+	}
+	if (surface->format->palette != nullptr) {
+		// Paletted masks stay on the CPU colour-variant path.
+		return nullptr;
+	}
+	SDL_Surface *conv = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+	if (!conv) {
+		return nullptr;
+	}
+	SDL_LockSurface(conv);
+	const int w = conv->w;
+	const int h = conv->h;
+	const int stride = conv->pitch / 4;
+	Uint32 *pix = (Uint32 *)conv->pixels;
+	for (int yy = 0; yy < h; ++yy) {
+		for (int xx = 0; xx < w; ++xx) {
+			Uint32 &p = pix[xx + yy * stride];
+			Uint8 r, g, b, a;
+			SDL_GetRGBA(p, conv->format, &r, &g, &b, &a);
+			if (a == 0) {
+				continue;
+			}
+			int lum = r;
+			if (g > lum) lum = g;
+			if (b > lum) lum = b;
+			if (lum < 32) {
+				p = SDL_MapRGBA(conv->format, r, g, b, (Uint8)(a * lum / 32));
+			}
+		}
+	}
+	SDL_UnlockSurface(conv);
+	SDL_Texture *tex = SDL_CreateTextureFromSurface(TheRenderer, conv);
+	SDL_FreeSurface(conv);
+	if (!tex) {
+		return nullptr;
+	}
+	SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
+	SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+	return tex;
+}
+
 // Shared crisp-zoom helper: blit srcRect from src, scaled up by CrispZoomDrawScale, to
 // destination top-left (x,y). Clipping is delegated to dst->clip_rect (the crisp render path
 // constrains it to the painted viewport region). Only ever reached while CrispZoomDrawScale
@@ -516,7 +568,7 @@ void CPlayerColorGraphic::LoadTeamMask(const std::string &baseFile)
 	// reuses this same texture via RenderCopyEx horizontal flip, so no TeamMaskFlip texture is
 	// needed. Skipped for paletted masks (kept on the CPU path).
 	if (TeamMask && !mTextureTeam) {
-		mTextureTeam = UploadSurfaceToTexture(TeamMask);
+		mTextureTeam = UploadMaskToTexture(TeamMask);
 	}
 }
 
