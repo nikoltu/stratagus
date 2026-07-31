@@ -614,6 +614,29 @@ std::string CmdZoom(const std::vector<std::string> &tok)
 	return j.s;
 }
 
+// Override a player's colour slot live (GameSettings.Presets[player].PlayerColor). The sprite tint
+// and minimap read this every frame, so the change is immediate. Test tooling: verifies the HD
+// team-colour recolour works with a non-default colour. Usage: pcolor <player> <colorIdx>.
+std::string CmdPColor(const std::vector<std::string> &tok)
+{
+	if (tok.size() < 3) return InjectorResult(false, "usage: pcolor <player> <colorIdx>");
+	const int p = (int)std::strtol(tok[1].c_str(), nullptr, 10);
+	const int c = (int)std::strtol(tok[2].c_str(), nullptr, 10);
+	if (p < 0 || p >= PlayerMax) return InjectorResult(false, "player out of range");
+	if (c < 0 || c >= (int)PlayerColorsRGB.size()) return InjectorResult(false, "colorIdx out of range");
+	GameSettings.Presets[p].PlayerColor = c;
+	if (p < NumPlayers) {
+		Players[p].SetUnitColors(PlayerColorsRGB[c]);
+	}
+	Json j; j.ch('{'); j.boolean("ok", true); j.comma(); j.num("player", p);
+	j.comma(); j.num("colorIdx", c);
+	char cbuf[32];
+	const CColor &col = PlayerColorsRGB[c][0];
+	std::snprintf(cbuf, sizeof(cbuf), "%d,%d,%d", col.R, col.G, col.B);
+	j.comma(); j.str("colorRGB", cbuf); j.ch('}');
+	return j.s;
+}
+
 std::string CmdUnitTypes(const std::vector<std::string> &tok)
 {
 	const std::string filter = (tok.size() >= 2) ? tok[1] : std::string();
@@ -833,6 +856,7 @@ std::string Dispatch(const std::string &cmdline)
 	if (verb == "stop")      return CmdStop(Tokenize(line));
 	if (verb == "unittypes") return CmdUnitTypes(Tokenize(line));
 	if (verb == "zoom")      return CmdZoom(Tokenize(line));
+	if (verb == "pcolor")    return CmdPColor(Tokenize(line));
 	// --- HUD layout dump ---
 	if (verb == "hud")       return CmdHud();
 	Json j;
