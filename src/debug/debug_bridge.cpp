@@ -25,6 +25,7 @@
 #include "stratagus.h"
 
 #include "debug_bridge.h"
+#include "frame_profiler.h"
 
 #include "commands.h"
 #include "cursor.h"
@@ -87,6 +88,42 @@ static fs::path DbgStatFile;  /// wdbg/status.json
 // The crash handler must be async-signal-safe-ish, so it cannot touch fs::path
 // (allocations). Cache the crash file path as a plain C string up front.
 static char DbgCrashPath[4096] = {0};
+
+/*----------------------------------------------------------------------------
+--  Frame profiler (see frame_profiler.h)
+----------------------------------------------------------------------------*/
+
+// Per-section accumulators, keyed by FrameProfSection. Fixed-size, allocation-free.
+static Uint64 FpStart[FP_SECTION_COUNT] = {0};   // begin counter of the open span
+static Uint64 FpTotal[FP_SECTION_COUNT] = {0};   // accumulated ticks this window
+static long   FpFrames = 0;                      // rendered frames this window
+static Uint64 FpFrameTotal = 0;                  // wall-clock ticks across frames
+static Uint64 FpLastFrameEnd = 0;                // counter at previous EndFrame
+
+void FrameProfBegin(FrameProfSection s)
+{
+	if ((unsigned)s < FP_SECTION_COUNT) {
+		FpStart[s] = SDL_GetPerformanceCounter();
+	}
+}
+
+void FrameProfEnd(FrameProfSection s)
+{
+	if ((unsigned)s < FP_SECTION_COUNT && FpStart[s]) {
+		FpTotal[s] += SDL_GetPerformanceCounter() - FpStart[s];
+		FpStart[s] = 0;
+	}
+}
+
+void FrameProfEndFrame()
+{
+	const Uint64 now = SDL_GetPerformanceCounter();
+	if (FpLastFrameEnd) {
+		FpFrameTotal += now - FpLastFrameEnd;
+	}
+	FpLastFrameEnd = now;
+	++FpFrames;
+}
 
 /*----------------------------------------------------------------------------
 --  Tiny JSON string builder
@@ -402,6 +439,39 @@ std::string CmdColor(int x, int y)
 	j.comma(); j.num("b", b);
 	j.comma(); j.num("a", a);
 	j.ch('}');
+	return j.s;
+}
+
+// Report the per-frame profiler averages over the accumulated window, then RESET so each
+// call reports a fresh window. avgFrameMs is measured wall-clock (present-to-present); each
+// section value is total_ms/frames. present is a subset of realize (RenderPresent within it).
+std::string CmdProf()
+{
+	const double freq = (double)SDL_GetPerformanceFrequency();
+	const long frames = FpFrames;
+	const double div = frames > 0 ? (double)frames : 1.0;
+	const double toMsPerFrame = (freq > 0.0) ? (1000.0 / freq) / div : 0.0;
+
+	Json j;
+	j.ch('{');
+	j.num("frames", frames);
+	j.comma(); j.dbl("avgFrameMs", (double)FpFrameTotal * toMsPerFrame);
+	j.comma(); j.key_("sections"); j.ch('{');
+	static const char *names[FP_SECTION_COUNT] = {
+		"logic", "minimap", "fog", "updatedisplay", "world", "hud", "realize", "present"
+	};
+	for (int i = 0; i < FP_SECTION_COUNT; ++i) {
+		if (i) j.comma();
+		j.dbl(names[i], (double)FpTotal[i] * toMsPerFrame);
+	}
+	j.ch('}');
+	j.ch('}');
+
+	// Reset the window.
+	for (int i = 0; i < FP_SECTION_COUNT; ++i) { FpTotal[i] = 0; FpStart[i] = 0; }
+	FpFrames = 0;
+	FpFrameTotal = 0;
+	FpLastFrameEnd = 0;
 	return j.s;
 }
 
@@ -848,6 +918,7 @@ std::string Dispatch(const std::string &cmdline)
 	if (verb == "ping") {
 		return "{\"pong\":true}";
 	}
+	if (verb == "prof")  return CmdProf();
 	// --- Injector: drive units via the engine's Send* command API ---
 	if (verb == "select")    return CmdSelect(Tokenize(line));
 	if (verb == "build")     return CmdBuild(Tokenize(line));

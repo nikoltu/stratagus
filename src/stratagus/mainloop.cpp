@@ -53,6 +53,7 @@
 #include "unit.h"
 #include "video.h"
 #include "parameters.h"
+#include "frame_profiler.h"
 
 #ifdef HAVE_COZ_PROFILER
 # include <coz.h>
@@ -195,7 +196,10 @@ void UpdateDisplay()
 		// through wherever the overlay is untouched; only opaque CPU layers (HUD/fog/cursor)
 		// occlude it. 0 == transparent in ARGB8888. (Prevents empty spaces in the UI.)
 		SDL_FillRect(TheScreen, nullptr, 0);
+		FrameProfBegin(FP_WORLD);
 		DrawMapArea();
+		FrameProfEnd(FP_WORLD);
+		FrameProfBegin(FP_HUD);
 		// TODO: for e.g. environmental effects, we want to push to the renderer here with appropriate shaders set,
 		// then do the rest.
 		DrawMessages();
@@ -239,6 +243,8 @@ void UpdateDisplay()
 		DrawCursor();
 	}
 
+	FrameProfEnd(FP_HUD);
+
 	//
 	// Update changes to display.
 	//
@@ -279,6 +285,7 @@ double GetGameCycleFraction()
 // GamePaused / NetworkInSync / SkipGameCycle itself.
 static void RunOneGameCycle()
 {
+	FrameProfScope _prof(FP_LOGIC);
 	// Can't find a better place.
 	// FIXME: We need find better place!
 	SaveGameLoading = false;
@@ -374,7 +381,9 @@ static void DisplayLoop()
 	 *	FIXME: still not secure
 	 */
 	if (UI.Minimap.UpdateCache) {
+		FrameProfBegin(FP_MINIMAP);
 		UI.Minimap.Update();
+		FrameProfEnd(FP_MINIMAP);
 		UI.Minimap.UpdateCache = false;
 	}
 
@@ -390,11 +399,21 @@ static void DisplayLoop()
 		// program, as we now still have a game on the background and
 		// need to go through the game-menu or supply a map file
 
+		FrameProfBegin(FP_FOG);
 		FogOfWar->Update(FastForwardCycle > GameCycle);
+		FrameProfEnd(FP_FOG);
 
+		FrameProfBegin(FP_UPDATEDISPLAY);
 		UpdateDisplay();
+		FrameProfEnd(FP_UPDATEDISPLAY);
+
+		FrameProfBegin(FP_REALIZE);
 		RealizeVideoMemory();
+		FrameProfEnd(FP_REALIZE);
 	}
+
+	// One rendered frame elapsed (whether or not it drew this iteration).
+	FrameProfEndFrame();
 }
 
 static void SingleGameLoop()

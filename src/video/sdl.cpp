@@ -38,6 +38,7 @@
 
 #include "game.h"
 #include "debug_bridge.h"
+#include "frame_profiler.h"
 #include "network.h"
 #include "online_service.h"
 #include "parameters.h"
@@ -1351,7 +1352,9 @@ void EndFrame()
 	// Android the surface can be mid-teardown then, which races HWUI and trips a FORTIFY
 	// abort (pthread_mutex_lock on a destroyed mutex). The next visible frame presents.
 	if (IsSDLWindowVisible) {
+		FrameProfBegin(FP_PRESENT);
 		SDL_RenderPresent(TheRenderer);
+		FrameProfEnd(FP_PRESENT);
 	}
 	frameBegun = false;
 }
