@@ -55,6 +55,8 @@
 #include "parameters.h"
 #include "frame_profiler.h"
 
+#include <algorithm>
+
 #ifdef HAVE_COZ_PROFILER
 # include <coz.h>
 #endif
@@ -198,7 +200,82 @@ void UpdateDisplay()
 		// through wherever the overlay is untouched; only opaque CPU layers (HUD/fog/cursor)
 		// occlude it. 0 == transparent in ARGB8888. (Prevents empty spaces in the UI.)
 		FrameProfBegin(FP_OVLCLEAR);
-		SDL_FillRect(TheScreen, nullptr, 0);
+		{
+			// "Keep transparent" region = the actual viewport RENDER rect (where the GPU world is
+			// drawn), NOT UI.MapArea: the resource bar and other HUD elements sit inside MapArea but
+			// outside the viewport, so basing the border on MapArea leaves them uncleared (ghosting).
+			// Union the viewport rects (usually one) and clamp to the overlay.
+			const int w = TheScreen->w;
+			const int h = TheScreen->h;
+			int mapX = w, mapY = h, mapEndX = 0, mapEndY = 0;
+			for (std::size_t i = 0; i != UI.NumViewports; ++i) {
+				const PixelPos &tl = UI.Viewports[i].TopLeftPos;
+				const PixelPos &br = UI.Viewports[i].BottomRightPos;
+				mapX = std::min(mapX, tl.x);
+				mapY = std::min(mapY, tl.y);
+				mapEndX = std::max(mapEndX, br.x + 1);
+				mapEndY = std::max(mapEndY, br.y + 1);
+			}
+			mapX = std::max(0, std::min(mapX, w));
+			mapY = std::max(0, std::min(mapY, h));
+			mapEndX = std::max(0, std::min(mapEndX, w));
+			mapEndY = std::max(0, std::min(mapEndY, h));
+
+			const bool validMapArea = UI.NumViewports > 0 && mapEndX > mapX && mapEndY > mapY;
+			// Only the in-game HUD path benefits. Editor/big-map draw freely -> full clear.
+			const bool regionClear =
+				GameRunning && Editor.Running != EditorEditing && !BigMapMode && validMapArea;
+
+			static bool mapDirtyLastFrame = true; // force first in-game frame to clear interior
+
+			if (regionClear) {
+				// Border frame: up to 4 rects outside the map interior. Covers all persistent
+				// HUD dynamic content (minimap, portrait/InfoPanel, resources, status line,
+				// button panel, menu buttons).
+				if (mapY > 0) {
+					SDL_Rect r{0, 0, w, mapY};
+					SDL_FillRect(TheScreen, &r, 0);
+				}
+				if (mapEndY < h) {
+					SDL_Rect r{0, mapEndY, w, h - mapEndY};
+					SDL_FillRect(TheScreen, &r, 0);
+				}
+				if (mapX > 0) {
+					SDL_Rect r{0, mapY, mapX, mapEndY - mapY};
+					SDL_FillRect(TheScreen, &r, 0);
+				}
+				if (mapEndX < w) {
+					SDL_Rect r{mapEndX, mapY, w - mapEndX, mapEndY - mapY};
+					SDL_FillRect(TheScreen, &r, 0);
+				}
+
+				// The resource bar (gold/lumber/oil/food/score) overlays the TOP of the map
+				// viewport and its digits change, so its band must be cleared every frame even
+				// though it sits inside the interior. A fixed generous band covers it cheaply.
+				{
+					const int band = std::min(170, mapEndY - mapY);
+					if (band > 0) {
+						SDL_Rect r{mapX, mapY, mapEndX - mapX, band};
+						SDL_FillRect(TheScreen, &r, 0);
+					}
+				}
+
+				// Map interior holds transient overlay content only when messages are shown or
+				// a drag-select box is active. Clear it this frame if either is true now or was
+				// last frame (so the frame after the content vanishes erases it once).
+				const bool messagesVisible = AreMessagesShown();
+				const bool cursorRectangle = CursorState == CursorStates::Rectangle;
+				if (messagesVisible || cursorRectangle || mapDirtyLastFrame) {
+					SDL_Rect r{mapX, mapY, mapEndX - mapX, mapEndY - mapY};
+					SDL_FillRect(TheScreen, &r, 0);
+				}
+				mapDirtyLastFrame = messagesVisible || cursorRectangle;
+			} else {
+				// Menus/title, editor, big-map, or invalid MapArea: original full clear.
+				SDL_FillRect(TheScreen, nullptr, 0);
+				mapDirtyLastFrame = true;
+			}
+		}
 		FrameProfEnd(FP_OVLCLEAR);
 		FrameProfBegin(FP_WORLD);
 		DrawMapArea();

@@ -672,6 +672,7 @@ public:
 	void AddUniqueMessage(const char *s);
 	void DrawMessages();
 	void CleanMessages();
+	bool AnyShown() const { return show && Preference.ShowMessages && MessagesCount > 0; }
 	void ToggleShowMessages() { show = !show; }
 #ifdef DEBUG
 	void ToggleShowBuilListMessages() { showBuilList = !showBuilList; }
@@ -975,6 +976,14 @@ void CleanMessages()
 void DrawMessages()
 {
 	allmessages.DrawMessages();
+}
+
+/**
+**  True if any message is currently visible over the map.
+*/
+bool AreMessagesShown()
+{
+	return allmessages.AnyShown();
 }
 
 /**

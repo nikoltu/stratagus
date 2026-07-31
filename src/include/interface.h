@@ -373,6 +373,8 @@ extern void DrawUserDefinedButtons();
 extern void UpdateMessages();
 /// Draw messages as overlay over of the map
 extern void DrawMessages();
+/// True if any message is currently visible over the map
+extern bool AreMessagesShown();
 /// Draw the player resource in resource line
 extern void DrawResources();
 /// Set message to display
