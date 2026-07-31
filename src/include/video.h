@@ -65,6 +65,13 @@ extern SDL_Texture *TheTexture;
 // GPU path, so paletted graphics and off-screen targets always fall back to the CPU path.
 extern bool GpuWorldDrawActive;
 
+// GPU-pipeline (fonts): when true, CFont::DrawChar RenderCopy's each glyph straight to the
+// backbuffer (GPU) instead of blitting into the CPU overlay (TheScreen). Set ONLY around the
+// in-game HUD text draws in UpdateDisplay; false everywhere else (menus/title/tooltips/guichan)
+// so that text keeps the CPU path. Requires TheRenderer and a paletted font (an RGBA glyph
+// texture is built per font+colour); non-paletted fonts fall back to the CPU blit.
+extern bool GpuFontToBackbuffer;
+
 // GPU-pipeline (Phase 1, zoomed direct render): the magnification the world GPU draws are drawn at.
 // When the in-game viewport is zoomed (Android default 2.0), the tile/unit GPU path draws straight
 // to the backbuffer at the ZOOMED on-screen size instead of going through the CPU offscreen +

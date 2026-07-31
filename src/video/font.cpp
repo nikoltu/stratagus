@@ -54,6 +54,9 @@ static FontMap Fonts;  /// Font mappings
 using FontColorMap = std::map<std::string, std::unique_ptr<CFontColor>, std::less<>>;
 static FontColorMap FontColors;  /// Map of ident to font color.
 
+// GPU-pipeline (fonts). See video.h. Default off => every glyph stays on the CPU blit path.
+bool GpuFontToBackbuffer = false;
+
 static const CFontColor *LastTextColor;      /// Last text color
 static CFontColor *DefaultTextColor;         /// Default text color
 static CFontColor *ReverseTextColor;         /// Reverse text color
@@ -220,6 +223,52 @@ static void VideoDrawChar(const CGraphic &g,
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
 	SDL_SetPaletteColors(g.getSurface()->format->palette, fc.Colors.data(), 0, fc.Colors.size());
 	SDL_BlitSurface(g.getSurface(), &srect, TheScreen, &drect);
+}
+
+// GPU font path: one RGBA glyph-sheet texture per (font graphic, CFontColor). The classic path
+// applies the colour's 9-entry palette to the paletted sheet before each blit; here we bake that
+// palette into an RGBA copy once (colourkey -> transparent) and RenderCopy it, so the multicolour
+// shading/outline is reproduced exactly (no colormod flattening). Non-paletted fonts return null
+// and stay on the CPU blit.
+static std::map<std::pair<const CGraphic *, const CFontColor *>, SDL_Texture *> GlyphTextures;
+
+static SDL_Texture *GetGlyphColorTexture(CGraphic &g, const CFontColor &fc)
+{
+	if (!TheRenderer) {
+		return nullptr;
+	}
+	SDL_Surface *surf = g.getSurface();
+	if (!surf || !surf->format->palette) {
+		return nullptr;
+	}
+	const auto key = std::make_pair((const CGraphic *) &g, &fc);
+	auto it = GlyphTextures.find(key);
+	if (it != GlyphTextures.end()) {
+		return it->second;
+	}
+	SDL_SetPaletteColors(surf->format->palette, fc.Colors.data(), 0, fc.Colors.size());
+	SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ARGB8888, 0);
+	SDL_Texture *tex = nullptr;
+	if (rgba) {
+		tex = SDL_CreateTextureFromSurface(TheRenderer, rgba);
+		SDL_FreeSurface(rgba);
+		if (tex) {
+			SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
+			SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+		}
+	}
+	GlyphTextures[key] = tex; // cache null too, so we don't retry a non-convertible font every glyph
+	return tex;
+}
+
+static void CleanGlyphTextures()
+{
+	for (auto &[key, tex] : GlyphTextures) {
+		if (tex) {
+			SDL_DestroyTexture(tex);
+		}
+	}
+	GlyphTextures.clear();
 }
 
 /**
@@ -588,6 +637,25 @@ unsigned int CFont::DrawChar(CGraphic &g, int utf8, int x, int y, const CFontCol
 	const int w = this->CharWidth[c];
 	const int gx = (c % ipr) * this->G->Width;
 	const int gy = (c / ipr) * this->G->Height;
+
+	if (GpuFontToBackbuffer && TheRenderer) {
+		SDL_Texture *tex = GetGlyphColorTexture(*this->G, fc);
+		if (tex) {
+			SDL_Rect src = {gx, gy, w, this->G->Height};
+			SDL_Rect dst = {x, y, w, this->G->Height};
+			if (CLIP) {
+				// Mirror the CPU clip (global clip rect) onto the renderer for this glyph.
+				SDL_Rect clip = {ClipX1, ClipY1, ClipX2 - ClipX1 + 1, ClipY2 - ClipY1 + 1};
+				SDL_RenderSetClipRect(TheRenderer, &clip);
+				SDL_RenderCopy(TheRenderer, tex, &src, &dst);
+				SDL_RenderSetClipRect(TheRenderer, nullptr);
+			} else {
+				SDL_RenderCopy(TheRenderer, tex, &src, &dst);
+			}
+			return w + 1;
+		}
+		// No GPU texture (non-paletted font): fall through to the CPU blit.
+	}
 
 	if (CLIP) {
 		VideoDrawCharClip(g, gx, gy, w, this->G->Height, x , y, fc);
@@ -1022,6 +1090,8 @@ void LoadFonts()
 */
 void CleanFonts()
 {
+	CleanGlyphTextures();
+
 	Fonts.clear();
 
 	FontColors.clear();
