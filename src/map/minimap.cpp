@@ -67,6 +67,9 @@ static constexpr int SCALE_PRECISION       {100};
 ----------------------------------------------------------------------------*/
 
 SDL_Surface        *MinimapSurface{nullptr};        /// generated minimap
+static SDL_Texture *MinimapTexture{nullptr};        /// GPU-HUD: cached upload of MinimapSurface
+static int          MinimapTextureW{0};
+static int          MinimapTextureH{0};
 static SDL_Surface *MinimapTerrainSurface{nullptr}; /// generated minimap terrain
 static SDL_Surface *MinimapFogSurface{nullptr};     /// generated minimap fog of war
 
@@ -442,6 +445,37 @@ static void DrawEvents()
 */
 void CMinimap::Draw() const
 {
+	// GPU-HUD: upload the (small, opaque) minimap surface to a cached texture and RenderCopy it to
+	// the backbuffer. MinimapSurface has no alpha channel, so force BLENDMODE_NONE to match the
+	// opaque CPU blit. DrawEvents() and the viewport-area contour stay on the CPU overlay, which
+	// composites on top of this. Falls back to the CPU blit when the flag is off (menus/editor).
+	if (GpuHudDrawActive && TheRenderer && MinimapSurface) {
+		if (!MinimapTexture || MinimapTextureW != MinimapSurface->w
+			|| MinimapTextureH != MinimapSurface->h) {
+			if (MinimapTexture) {
+				SDL_DestroyTexture(MinimapTexture);
+			}
+			const Uint32 fmt = SDL_MasksToPixelFormatEnum(32,
+				MinimapSurface->format->Rmask, MinimapSurface->format->Gmask,
+				MinimapSurface->format->Bmask, MinimapSurface->format->Amask);
+			MinimapTexture = SDL_CreateTexture(TheRenderer, fmt,
+				SDL_TEXTUREACCESS_STREAMING, MinimapSurface->w, MinimapSurface->h);
+			MinimapTextureW = MinimapSurface->w;
+			MinimapTextureH = MinimapSurface->h;
+			if (MinimapTexture) {
+				SDL_SetTextureBlendMode(MinimapTexture, SDL_BLENDMODE_NONE);
+			}
+		}
+		if (MinimapTexture) {
+			SDL_UpdateTexture(MinimapTexture, nullptr,
+				MinimapSurface->pixels, MinimapSurface->pitch);
+			SDL_Rect dst = {X, Y, MinimapSurface->w, MinimapSurface->h};
+			SDL_RenderCopy(TheRenderer, MinimapTexture, nullptr, &dst);
+			DrawEvents();
+			return;
+		}
+	}
+
 	SDL_Rect drect = {Sint16(X), Sint16(Y), 0, 0};
 	SDL_BlitSurface(MinimapSurface, nullptr, TheScreen, &drect);
 
@@ -487,6 +521,12 @@ void CMinimap::Destroy()
 		VideoPaletteListRemove(MinimapTerrainSurface);
 		SDL_FreeSurface(MinimapTerrainSurface);
 		MinimapTerrainSurface = nullptr;
+	}
+	if (MinimapTexture) {
+		SDL_DestroyTexture(MinimapTexture);
+		MinimapTexture = nullptr;
+		MinimapTextureW = 0;
+		MinimapTextureH = 0;
 	}
 	if (MinimapSurface) {
 		VideoPaletteListRemove(MinimapSurface);

@@ -64,6 +64,9 @@ float CrispZoomDrawScale = 1.0f;
 // compositor until the on-screen world render explicitly turns it on for tiles/units.
 bool GpuWorldDrawActive = false;
 
+// GPU-pipeline (HUD sprites). See video.h. Off by default; set only around the in-game HUD draw.
+bool GpuHudDrawActive = false;
+
 // GPU-pipeline (Phase 1). See video.h. 1.0 => the classic native (Zoom==1) draw; set to the real
 // viewport zoom around the in-game world GPU render so tile/unit destination rects scale up.
 float GpuWorldDrawZoom = 1.0f;
@@ -179,6 +182,24 @@ static void WarnInvalidGraphicFrame(const CGraphic &graphic, unsigned frame, boo
 --  Functions
 ----------------------------------------------------------------------------*/
 
+// GPU-pipeline (HUD): RenderCopy a source sub-rect of tex to dst on the backbuffer at 1:1 screen
+// pixels, mirroring the global CPU clip rect onto the renderer so edge clipping matches the overlay
+// path. alpha < 255 applies a texture alpha mod for the trans variants (reset after). No zoom scale.
+static void HudRenderCopy(SDL_Texture *tex, const SDL_Rect &src, const SDL_Rect &dst,
+						  int alpha = 255)
+{
+	SDL_Rect clip = {ClipX1, ClipY1, ClipX2 - ClipX1 + 1, ClipY2 - ClipY1 + 1};
+	SDL_RenderSetClipRect(TheRenderer, &clip);
+	if (alpha != 255) {
+		SDL_SetTextureAlphaMod(tex, (Uint8)alpha);
+		SDL_RenderCopy(TheRenderer, tex, &src, &dst);
+		SDL_SetTextureAlphaMod(tex, 255);
+	} else {
+		SDL_RenderCopy(TheRenderer, tex, &src, &dst);
+	}
+	SDL_RenderSetClipRect(TheRenderer, nullptr);
+}
+
 /**
 **  Video draw the graphic clipped.
 **
@@ -286,6 +307,15 @@ void CGraphic::DrawSubClip(int gx, int gy, int w, int h, int x, int y,
 {
 	Assert(surface);
 
+	// GPU-pipeline (HUD): route RGBA sub-blits to the backbuffer. Renderer clip handles the edge
+	// clipping the CLIP_RECTANGLE below would do on the CPU. Paletted/off-screen fall through.
+	if (GpuHudDrawActive && mTexture && surface == TheScreen) {
+		SDL_Rect src = {gx, gy, w, h};
+		SDL_Rect dst = {x, y, w, h};
+		HudRenderCopy(mTexture, src, dst);
+		return;
+	}
+
 	// Crisp-zoom: bypass the native CLIP_RECTANGLE (clipping is delegated to the target
 	// surface clip_rect) and blit the frame scaled up to on-screen size at the already
 	// ·Zoom-positioned (x,y). No-op unless the crisp path is active.
@@ -347,6 +377,13 @@ void CGraphic::DrawSubClipTrans(int gx, int gy, int w, int h, int x, int y,
 								unsigned char alpha,
 								SDL_Surface *surface /*= TheScreen*/) const
 {
+	// GPU-pipeline (HUD): RGBA sub-blit with alpha straight to the backbuffer.
+	if (GpuHudDrawActive && mTexture && surface == TheScreen) {
+		SDL_Rect src = {gx, gy, w, h};
+		SDL_Rect dst = {x, y, w, h};
+		HudRenderCopy(mTexture, src, dst, alpha);
+		return;
+	}
 	int oldx = x;
 	int oldy = y;
 	CLIP_RECTANGLE(x, y, w, h);
@@ -721,7 +758,10 @@ void CPlayerColorGraphic::DrawPlayerColorFrameClip(int colorIndex, unsigned fram
 	// matches the CPU fallback below, where GraphicPlayerPixels is a no-op on paletteless sprites).
 	// Classic 8-bit paletted sprites (mTexture == nullptr) keep the CPU palette-remap path so
 	// player colours still render; off-screen targets also fall back.
-	if (GpuWorldDrawActive && mTexture && surface == TheScreen) {
+	// GpuHudDrawActive shares the GPU path so player-coloured HUD icons stay correctly tinted (the
+	// CPU swap path below would otherwise reach DrawSubClip with the un-baked base texture). Zoom is
+	// 1.0 outside the world draw, so the HUD icon is native-sized.
+	if ((GpuWorldDrawActive || GpuHudDrawActive) && mTexture && surface == TheScreen) {
 		DrawPlayerColorFrameClipTex(colorIndex, frame, x, y, false);
 		return;
 	}
@@ -787,6 +827,16 @@ void CGraphic::DrawFrameClipX(unsigned frame, int x, int y,
 	// is pixel-identical. See DrawFrameClip for the guard rationale.
 	if (GpuWorldDrawActive && mTexture && surface == TheScreen && frame < frame_map.size()) {
 		DrawFrameClipTexX(frame, x, y);
+		return;
+	}
+	// GPU-pipeline (HUD): mirrored RGBA HUD frame via RenderCopyEx from the base texture, 1:1 pixels.
+	if (GpuHudDrawActive && mTexture && surface == TheScreen && frame < frame_map.size()) {
+		SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+		SDL_Rect dst = {x, y, Width, Height};
+		SDL_Rect clip = {ClipX1, ClipY1, ClipX2 - ClipX1 + 1, ClipY2 - ClipY1 + 1};
+		SDL_RenderSetClipRect(TheRenderer, &clip);
+		SDL_RenderCopyEx(TheRenderer, mTexture, &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+		SDL_RenderSetClipRect(TheRenderer, nullptr);
 		return;
 	}
 	if (frame >= frameFlip_map.size()) {
@@ -879,7 +929,7 @@ void CPlayerColorGraphic::DrawPlayerColorFrameClipX(int colorIndex, unsigned fra
 	// GPU-pipeline (Phase 1): mirrored HD player-colour draw via RenderCopyEx from the base (+
 	// optional mask) texture (frame indexes the un-flipped layout; see DrawFrameClipX). CPU
 	// fallback for paletted sprites / off-screen targets.
-	if (GpuWorldDrawActive && mTexture && surface == TheScreen
+	if ((GpuWorldDrawActive || GpuHudDrawActive) && mTexture && surface == TheScreen
 		&& frame < frame_map.size()) {
 		DrawPlayerColorFrameClipTex(colorIndex, frame, x, y, true);
 		return;

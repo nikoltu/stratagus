@@ -286,6 +286,8 @@ void UpdateDisplay()
 		// are already GPU, so the text lands over them. Reset before DrawGuichanWidgets so
 		// menu/tooltip text keeps the CPU path.
 		GpuFontToBackbuffer = true;
+		// HUD sprites (icons, minimap, portrait) also route to the GPU backbuffer while true.
+		GpuHudDrawActive = true;
 		// TODO: for e.g. environmental effects, we want to push to the renderer here with appropriate shaders set,
 		// then do the rest.
 		DrawMessages();
@@ -341,6 +343,7 @@ void UpdateDisplay()
 	// End of the in-game HUD text: guichan widgets/menus/tooltips below draw into the CPU
 	// overlay, so keep them on the CPU font path.
 	GpuFontToBackbuffer = false;
+	GpuHudDrawActive = false;
 
 	FrameProfBegin(FP_HUD_GUICHAN);
 	DrawPieMenu(); // draw pie menu only if needed

@@ -72,6 +72,15 @@ extern bool GpuWorldDrawActive;
 // texture is built per font+colour); non-paletted fonts fall back to the CPU blit.
 extern bool GpuFontToBackbuffer;
 
+// GPU-pipeline (HUD sprites): when true, CGraphic::DrawFrameClip[X] / DrawSubClip / DrawSubClipTrans
+// route RGBA (mTexture) HUD blits straight to the backbuffer (RenderCopy) at 1:1 screen pixels
+// instead of blitting into the CPU overlay (TheScreen). The minimap and unit portrait also take a
+// GPU path when this is set. Set ONLY around the in-game HUD draws in UpdateDisplay (together with
+// GpuFontToBackbuffer); false everywhere else so menus/title/editor keep the CPU path. Unlike the
+// world path this never scales by GpuWorldDrawZoom (HUD is native pixels). Paletted graphics (no
+// mTexture) fall back to the CPU blit.
+extern bool GpuHudDrawActive;
+
 // GPU-pipeline (Phase 1, zoomed direct render): the magnification the world GPU draws are drawn at.
 // When the in-game viewport is zoomed (Android default 2.0), the tile/unit GPU path draws straight
 // to the backbuffer at the ZOOMED on-screen size instead of going through the CPU offscreen +

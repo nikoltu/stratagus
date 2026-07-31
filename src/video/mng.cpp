@@ -201,6 +201,20 @@ void Mng::Draw(int x, int y)
 		mng_display_resume(handle);
 	}
 
+	// GPU-HUD: route the portrait frame to the backbuffer. The frame is a small 24bpp surface with a
+	// black colour key; SDL_CreateTextureFromSurface honours the key (transparent black) and sets a
+	// BLEND mode, so the copy matches the colour-keyed CPU blit. Rebuilt per frame since the MNG
+	// animation mutates mSurface in place; cheap for a portrait-sized image.
+	if (GpuHudDrawActive && TheRenderer && mSurface) {
+		SDL_Texture *tex = SDL_CreateTextureFromSurface(TheRenderer, mSurface);
+		if (tex) {
+			SDL_Rect dst = {x, y, mSurface->w, mSurface->h};
+			SDL_RenderCopy(TheRenderer, tex, nullptr, &dst);
+			SDL_DestroyTexture(tex);
+			return;
+		}
+	}
+
 	SDL_Rect rect = {(short int)x, (short int)y, (short unsigned int)(mSurface->w), (short unsigned int)(mSurface->h)};
 	SDL_BlitSurface(mSurface, nullptr, TheScreen, &rect);
 }
