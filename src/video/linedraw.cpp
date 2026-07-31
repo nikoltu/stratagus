@@ -964,13 +964,30 @@ void InitLineDraw()
 // leaving them there is visually unchanged.
 namespace
 {
+// Also fires in the in-game HUD phase (GpuHudDrawActive, set in UpdateDisplay's FP_HUD block) so
+// panel bars, minimap blips and the minimap viewport rectangle land on the GPU backbuffer too.
 inline bool GpuPrimitivesActive()
 {
-	return GpuWorldDrawActive && TheRenderer;
+	return (GpuWorldDrawActive || GpuHudDrawActive) && TheRenderer;
 }
+
+// HUD primitives (GpuHudDrawActive && !GpuWorldDrawActive) run outside CViewport::Draw, so the
+// renderer clip is not the viewport. Mirror the global CPU clip (ClipX1..ClipY2) onto the renderer
+// for the primitive and restore afterwards (same pattern as the GPU font/sprite HUD paths). World
+// primitives keep the viewport clip CViewport::Draw already set.
+static SDL_Rect GpuSavedClip;
+static SDL_bool GpuSavedClipEnabled;
+static bool GpuClipMirrored;
 
 inline void GpuBeginPrimitive(Uint32 color, unsigned char alpha)
 {
+	GpuClipMirrored = GpuHudDrawActive && !GpuWorldDrawActive;
+	if (GpuClipMirrored) {
+		GpuSavedClipEnabled = SDL_RenderIsClipEnabled(TheRenderer);
+		SDL_RenderGetClipRect(TheRenderer, &GpuSavedClip);
+		SDL_Rect clip = {ClipX1, ClipY1, ClipX2 - ClipX1 + 1, ClipY2 - ClipY1 + 1};
+		SDL_RenderSetClipRect(TheRenderer, &clip);
+	}
 	Uint8 r, g, b;
 	SDL_GetRGB(color, TheScreen->format, &r, &g, &b);
 	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_BLEND);
@@ -978,11 +995,15 @@ inline void GpuBeginPrimitive(Uint32 color, unsigned char alpha)
 }
 
 // Restore the resting draw state (opaque black, no blend) that the benchmark overlay / next
-// BeginFrame assume.
+// BeginFrame assume, and the pre-primitive renderer clip if we mirrored it.
 inline void GpuEndPrimitive()
 {
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
 	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_NONE);
+	if (GpuClipMirrored) {
+		SDL_RenderSetClipRect(TheRenderer, GpuSavedClipEnabled ? &GpuSavedClip : nullptr);
+		GpuClipMirrored = false;
+	}
 }
 
 inline void GpuDrawPoints(const std::vector<SDL_Point> &pts, Uint32 color, unsigned char alpha)
@@ -1175,6 +1196,17 @@ void CVideo::DrawRectangle(Uint32 color, int x, int y, int w, int h)
 }
 void CVideo::DrawTransRectangle(Uint32 color, int x, int y, int w, int h, unsigned char alpha)
 {
+	// Sole caller is the minimap viewport rectangle (CMinimap::DrawViewportArea), which runs in the
+	// in-game HUD phase; route it to the backbuffer too so it survives overlay removal.
+	if (GpuPrimitivesActive()) {
+		if (w > 0 && h > 0) {
+			GpuBeginPrimitive(color, alpha);
+			SDL_Rect r = { x, y, w, h };
+			SDL_RenderDrawRect(TheRenderer, &r);
+			GpuEndPrimitive();
+		}
+		return;
+	}
 	linedraw_sdl::DrawTransRectangle(color, x, y, w, h, alpha);
 }
 void CVideo::DrawRectangleClip(Uint32 color, int x, int y, int w, int h)
