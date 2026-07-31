@@ -206,8 +206,21 @@ void Mng::Draw(int x, int y)
 	// BLEND mode, so the copy matches the colour-keyed CPU blit. Rebuilt per frame since the MNG
 	// animation mutates mSurface in place; cheap for a portrait-sized image.
 	if (GpuHudDrawActive && TheRenderer && mSurface) {
-		SDL_Texture *tex = SDL_CreateTextureFromSurface(TheRenderer, mSurface);
+		// Blit the keyed 24bpp frame onto a transparent RGBA surface (the blit honours the colour
+		// key, so keyed pixels stay transparent), then make a texture from that. Creating a texture
+		// straight from the raw 24bpp keyed surface fails on some GLES drivers, which would silently
+		// drop us to the CPU blit and leave the portrait stuck on the (now-skipped) overlay.
+		SDL_Surface *conv = SDL_CreateRGBSurfaceWithFormat(0, mSurface->w, mSurface->h, 32,
+		                                                   SDL_PIXELFORMAT_RGBA32);
+		SDL_Texture *tex = nullptr;
+		if (conv) {
+			SDL_FillRect(conv, nullptr, 0);
+			SDL_BlitSurface(mSurface, nullptr, conv, nullptr);
+			tex = SDL_CreateTextureFromSurface(TheRenderer, conv);
+			SDL_FreeSurface(conv);
+		}
 		if (tex) {
+			SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
 			SDL_Rect dst = {x, y, mSurface->w, mSurface->h};
 			SDL_RenderCopy(TheRenderer, tex, nullptr, &dst);
 			SDL_DestroyTexture(tex);
