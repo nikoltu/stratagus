@@ -39,6 +39,8 @@
 
 #include "intern_video.h"
 
+#include <vector>
+
 
 /*----------------------------------------------------------------------------
 -- Declarations
@@ -982,6 +984,107 @@ inline void GpuEndPrimitive()
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
 	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_NONE);
 }
+
+inline void GpuDrawPoints(const std::vector<SDL_Point> &pts, Uint32 color, unsigned char alpha)
+{
+	if (pts.empty()) {
+		return;
+	}
+	GpuBeginPrimitive(color, alpha);
+	SDL_RenderDrawPoints(TheRenderer, pts.data(), (int)pts.size());
+	GpuEndPrimitive();
+}
+
+// Midpoint-circle outline, same point set as the CPU DrawCircleClip. Renderer clip (set by
+// CViewport::Draw) does the per-point clipping the CPU path does via CLIP.
+void GpuCircleOutline(Uint32 color, int x, int y, int r, unsigned char alpha)
+{
+	std::vector<SDL_Point> pts;
+	int p = 1 - r;
+	int py = r;
+	for (int px = 0; px <= py + 1; ++px) {
+		pts.push_back({x + px, y + py});
+		pts.push_back({x + px, y - py});
+		pts.push_back({x - px, y + py});
+		pts.push_back({x - px, y - py});
+		pts.push_back({x + py, y + px});
+		pts.push_back({x + py, y - px});
+		pts.push_back({x - py, y + px});
+		pts.push_back({x - py, y - px});
+		if (p < 0) {
+			p += 2 * px + 3;
+		} else {
+			p += 2 * (px - py) + 5;
+			py -= 1;
+		}
+	}
+	GpuDrawPoints(pts, color, alpha);
+}
+
+// Filled circle, same vertical-span set as the CPU FillCircleClip.
+void GpuFillCircle(Uint32 color, int x, int y, int r, unsigned char alpha)
+{
+	GpuBeginPrimitive(color, alpha);
+	auto vspan = [](int vx, int vy, int h) {
+		if (h > 0) {
+			SDL_RenderDrawLine(TheRenderer, vx, vy, vx, vy + h - 1);
+		}
+	};
+	int p = 1 - r;
+	int py = r;
+	for (int px = 0; px <= py; ++px) {
+		vspan(x + px, y, py + 1);
+		vspan(x + px, y - py, py);
+		if (px) {
+			vspan(x - px, y, py + 1);
+			vspan(x - px, y - py, py);
+		}
+		if (p < 0) {
+			p += 2 * px + 3;
+		} else {
+			p += 2 * (px - py) + 5;
+			py -= 1;
+			if (py >= px) {
+				vspan(x + py + 1, y, px + 1);
+				vspan(x + py + 1, y - px, px);
+				vspan(x - py - 1, y, px + 1);
+				vspan(x - py - 1, y - px, px);
+			}
+		}
+	}
+	GpuEndPrimitive();
+}
+
+// Ellipse outline, same two-arc point set as the CPU DrawEllipseClip.
+void GpuEllipseOutline(Uint32 color, int xc, int yc, int rx, int ry, unsigned char alpha)
+{
+	std::vector<SDL_Point> pts;
+	int rx2 = rx * rx, ry2 = ry * ry, frx2 = 4 * rx2, fry2 = 4 * ry2;
+	int x, y, sigma;
+	for (x = 0, y = ry, sigma = 2 * ry2 + rx2 * (1 - 2 * ry); ry2 * x <= rx2 * y; x++) {
+		pts.push_back({xc + x, yc + y});
+		pts.push_back({xc - x, yc + y});
+		pts.push_back({xc + x, yc - y});
+		pts.push_back({xc - x, yc - y});
+		if (sigma >= 0) {
+			sigma += frx2 * (1 - y);
+			y--;
+		}
+		sigma += ry2 * (4 * x + 6);
+	}
+	for (x = rx, y = 0, sigma = 2 * rx2 + ry2 * (1 - 2 * rx); rx2 * y <= ry2 * x; y++) {
+		pts.push_back({xc + x, yc + y});
+		pts.push_back({xc - x, yc + y});
+		pts.push_back({xc + x, yc - y});
+		pts.push_back({xc - x, yc - y});
+		if (sigma >= 0) {
+			sigma += fry2 * (1 - x);
+			x--;
+		}
+		sigma += rx2 * (4 * y + 6);
+	}
+	GpuDrawPoints(pts, color, alpha);
+}
 }
 
 void CVideo::DrawPixelClip(Uint32 color, int x, int y)
@@ -1053,6 +1156,12 @@ void CVideo::DrawTransLine(Uint32 color, int sx, int sy, int dx, int dy, unsigne
 }
 void CVideo::DrawLineClip(Uint32 color, const PixelPos &pos1, const PixelPos &pos2)
 {
+	if (GpuPrimitivesActive()) {
+		GpuBeginPrimitive(color, 255);
+		SDL_RenderDrawLine(TheRenderer, pos1.x, pos1.y, pos2.x, pos2.y);
+		GpuEndPrimitive();
+		return;
+	}
 	linedraw_sdl::DrawLineClip(color, pos1.x, pos1.y, pos2.x, pos2.y);
 }
 void CVideo::DrawTransLineClip(Uint32 color, int sx, int sy, int dx, int dy, unsigned char alpha)
@@ -1131,15 +1240,27 @@ void CVideo::DrawTransCircle(Uint32 color, int x, int y, int r, unsigned char al
 }
 void CVideo::DrawCircleClip(Uint32 color, int x, int y, int r)
 {
+	if (GpuPrimitivesActive()) {
+		GpuCircleOutline(color, x, y, r, 255);
+		return;
+	}
 	linedraw_sdl::DrawCircleClip(color, x, y, r);
 }
 void CVideo::DrawTransCircleClip(Uint32 color, int x, int y, int r, unsigned char alpha)
 {
+	if (GpuPrimitivesActive()) {
+		GpuCircleOutline(color, x, y, r, alpha);
+		return;
+	}
 	linedraw_sdl::DrawTransCircleClip(color, x, y, r, alpha);
 }
 
 void CVideo::DrawEllipseClip(Uint32 color, int xc, int yc, int rx, int ry)
 {
+	if (GpuPrimitivesActive()) {
+		GpuEllipseOutline(color, xc, yc, rx, ry, 255);
+		return;
+	}
 	linedraw_sdl::DrawEllipseClip(color, xc, yc, rx, ry);
 }
 
@@ -1153,10 +1274,18 @@ void CVideo::FillTransCircle(Uint32 color, int x, int y, int r, unsigned char al
 }
 void CVideo::FillCircleClip(Uint32 color, const PixelPos &screenPos, int r)
 {
+	if (GpuPrimitivesActive()) {
+		GpuFillCircle(color, screenPos.x, screenPos.y, r, 255);
+		return;
+	}
 	linedraw_sdl::FillCircleClip(color, screenPos.x, screenPos.y, r);
 }
 void CVideo::FillTransCircleClip(Uint32 color, int x, int y, int r, unsigned char alpha)
 {
+	if (GpuPrimitivesActive()) {
+		GpuFillCircle(color, x, y, r, alpha);
+		return;
+	}
 	linedraw_sdl::FillTransCircleClip(color, x, y, r, alpha);
 }
 

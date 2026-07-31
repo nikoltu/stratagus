@@ -812,8 +812,42 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 	// path still applies to non-selected feedback.
 	//
 	if (Preference.ShowOrders) {
+		// GPU-pipeline (Phase 4b): the persistent order line + its endpoint dots are map-area
+		// overlays; issue them as GPU primitives (DrawLineClip / FillCircleClip) on the backbuffer
+		// like the selection boxes/circles, instead of the CPU TheScreen overlay. The world render
+		// above already restored GpuWorldDrawActive to false and dropped the renderer clip, so
+		// re-establish the viewport clip + active scope for the ShowOrder loop, then restore. Only
+		// when this frame's world actually landed on the backbuffer (Zoom==1 or the zoomed
+		// GPU-direct render); the editor/crisp offscreen paths keep the order line on the CPU
+		// overlay so it composites with their TheScreen world.
+		const bool zoomed = (this->Zoom != 1.0f);
+		const bool crisp = EnableCrispZoom && zoomed;
+		const bool gpuDirect = zoomed && (Editor.Running == EditorNotRunning);
+		const bool orderOnGpu = TheRenderer && !crisp && (!zoomed || gpuDirect);
+
+		bool prevGpuWorld = GpuWorldDrawActive;
+		float prevGpuZoom = GpuWorldDrawZoom;
+		SDL_Rect prevClip;
+		bool prevClipEnabled = false;
+		if (orderOnGpu) {
+			prevClipEnabled = (SDL_RenderIsClipEnabled(TheRenderer) == SDL_TRUE);
+			SDL_RenderGetClipRect(TheRenderer, &prevClip);
+			SDL_Rect vpClip = { this->TopLeftPos.x, this->TopLeftPos.y,
+								this->BottomRightPos.x - this->TopLeftPos.x + 1,
+								this->BottomRightPos.y - this->TopLeftPos.y + 1 };
+			SDL_RenderSetClipRect(TheRenderer, &vpClip);
+			GpuWorldDrawActive = true;
+			GpuWorldDrawZoom = this->Zoom;
+		}
+
 		for (const CUnit *unit : Selected) {
 			ShowOrder(*unit);
+		}
+
+		if (orderOnGpu) {
+			GpuWorldDrawActive = prevGpuWorld;
+			GpuWorldDrawZoom = prevGpuZoom;
+			SDL_RenderSetClipRect(TheRenderer, prevClipEnabled ? &prevClip : nullptr);
 		}
 	}
 
