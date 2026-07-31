@@ -1340,7 +1340,35 @@ void BeginFrame()
 	frameBegun = true;
 	SDL_SetRenderTarget(TheRenderer, nullptr);
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
-	SDL_RenderClear(TheRenderer);
+
+	// In-game the world (DrawMapArea) + opaque HUD overlay cover the whole present target,
+	// so the full-target clear is a wasted fillrate pass. Clear only what isn't guaranteed to
+	// be overwritten: the letterbox border outside the Video.Width x Video.Height blit region.
+	// A size guard forces one full clear after startup / a resolution change, and any non-game
+	// path (title/menus/loading, where the world doesn't cover the screen) keeps the full clear.
+	static int lastOutW = -1, lastOutH = -1;
+	int outW = 0, outH = 0;
+	SDL_GetRendererOutputSize(TheRenderer, &outW, &outH);
+	const bool sizeChanged = (outW != lastOutW || outH != lastOutH);
+	lastOutW = outW; lastOutH = outH;
+
+	if (!GameRunning || sizeChanged || outW <= 0 || outH <= 0) {
+		SDL_RenderClear(TheRenderer);
+		return;
+	}
+
+	const int coverW = std::min(Video.Width, outW);
+	const int coverH = std::min(Video.Height, outH);
+	if (coverW >= outW && coverH >= outH) {
+		return; // no letterbox: whole target is covered, skip the clear
+	}
+	SDL_Rect border[2];
+	int n = 0;
+	if (coverW < outW) { border[n++] = { coverW, 0, outW - coverW, outH }; }      // right strip
+	if (coverH < outH) { border[n++] = { 0, coverH, coverW, outH - coverH }; }    // bottom strip
+	if (n > 0) {
+		SDL_RenderFillRects(TheRenderer, border, n);
+	}
 }
 
 void EndFrame()

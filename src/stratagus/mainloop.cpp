@@ -189,13 +189,17 @@ void UpdateDisplay()
 	// clears the GPU backbuffer to opaque black; the GPU world layers (tiles/units) are then
 	// drawn on top of that clear during DrawMapArea, and the CPU overlay (TheScreen) is copied
 	// over them in RealizeVideoMemory. Idempotent per frame.
+	FrameProfBegin(FP_BEGINFRAME);
 	BeginFrame();
+	FrameProfEnd(FP_BEGINFRAME);
 
 	if (GameRunning || Editor.Running == EditorEditing) {
 		// Clear the CPU overlay to fully TRANSPARENT (was opaque black). The GPU world shows
 		// through wherever the overlay is untouched; only opaque CPU layers (HUD/fog/cursor)
 		// occlude it. 0 == transparent in ARGB8888. (Prevents empty spaces in the UI.)
+		FrameProfBegin(FP_OVLCLEAR);
 		SDL_FillRect(TheScreen, nullptr, 0);
+		FrameProfEnd(FP_OVLCLEAR);
 		FrameProfBegin(FP_WORLD);
 		DrawMapArea();
 		FrameProfEnd(FP_WORLD);
@@ -205,7 +209,9 @@ void UpdateDisplay()
 		DrawMessages();
 
 		if (CursorState == CursorStates::Rectangle) {
+			FrameProfBegin(FP_HUD_CURSOR);
 			DrawCursor();
+			FrameProfEnd(FP_HUD_CURSOR);
 		}
 
 		if ((Preference.BigScreen && !BigMapMode) || (!Preference.BigScreen && BigMapMode)) {
@@ -213,34 +219,46 @@ void UpdateDisplay()
 		}
 
 		if (!BigMapMode) {
+			FrameProfBegin(FP_HUD_FILLERS);
 			for (auto &filler : UI.Fillers) {
 				filler.G->DrawSubClip(0, 0, filler.G->Width, filler.G->Height, filler.X, filler.Y);
 			}
+			FrameProfEnd(FP_HUD_FILLERS);
+			FrameProfBegin(FP_HUD_PANELS);
 			DrawMenuButtonArea();
 			DrawUserDefinedButtons();
+			FrameProfEnd(FP_HUD_PANELS);
 
+			FrameProfBegin(FP_HUD_MINIMAP);
 			UI.Minimap.Draw();
 			for (std::size_t i = 0; i != UI.NumViewports; ++i) {
 				UI.Minimap.DrawViewportArea(UI.Viewports[i],
 				                            UI.SelectedViewport == &UI.Viewports[i] ? 255 : 128);
 			}
+			FrameProfEnd(FP_HUD_MINIMAP);
 
+			FrameProfBegin(FP_HUD_PANELS);
 			UI.InfoPanel.Draw();
 			DrawResources();
 			UI.StatusLine.Draw();
 			UI.StatusLine.DrawCosts();
 			UI.ButtonPanel.Draw();
+			FrameProfEnd(FP_HUD_PANELS);
 		}
 
 		DrawTimer();
 	}
 
+	FrameProfBegin(FP_HUD_GUICHAN);
 	DrawPieMenu(); // draw pie menu only if needed
 
 	DrawGuichanWidgets();
+	FrameProfEnd(FP_HUD_GUICHAN);
 
 	if (CursorState != CursorStates::Rectangle) {
+		FrameProfBegin(FP_HUD_CURSOR);
 		DrawCursor();
+		FrameProfEnd(FP_HUD_CURSOR);
 	}
 
 	FrameProfEnd(FP_HUD);
@@ -248,7 +266,9 @@ void UpdateDisplay()
 	//
 	// Update changes to display.
 	//
+	FrameProfBegin(FP_INVALIDATE);
 	Invalidate();
+	FrameProfEnd(FP_INVALIDATE);
 }
 
 static void InitGameCallbacks()

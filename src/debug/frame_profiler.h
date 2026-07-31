@@ -42,6 +42,14 @@ enum FrameProfSection {
 	FP_HUD,           /// HUD/minimap/panels/guichan/cursor CPU draw [subset of updatedisplay]
 	FP_REALIZE,       /// RealizeVideoMemory() (upload + RenderCopy + present)
 	FP_PRESENT,       /// SDL_RenderPresent inside EndFrame() (subset of realize)
+	FP_BEGINFRAME,    /// BeginFrame() — target + backbuffer clear [subset of updatedisplay gap]
+	FP_OVLCLEAR,      /// SDL_FillRect(TheScreen, 0) — full CPU overlay clear [gap]
+	FP_INVALIDATE,    /// Invalidate() [gap]
+	FP_HUD_FILLERS,   /// UI.Fillers draw loop [subset of hud]
+	FP_HUD_MINIMAP,   /// UI.Minimap.Draw + DrawViewportArea loop [subset of hud]
+	FP_HUD_PANELS,    /// menu/info/resources/status/costs/button panels [subset of hud]
+	FP_HUD_GUICHAN,   /// DrawPieMenu + DrawGuichanWidgets [subset of hud]
+	FP_HUD_CURSOR,    /// DrawCursor [subset of hud]
 	FP_SECTION_COUNT
 };
 

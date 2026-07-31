@@ -458,7 +458,9 @@ std::string CmdProf()
 	j.comma(); j.dbl("avgFrameMs", (double)FpFrameTotal * toMsPerFrame);
 	j.comma(); j.key_("sections"); j.ch('{');
 	static const char *names[FP_SECTION_COUNT] = {
-		"logic", "minimap", "fog", "updatedisplay", "world", "hud", "realize", "present"
+		"logic", "minimap", "fog", "updatedisplay", "world", "hud", "realize", "present",
+		"beginframe", "ovlclear", "invalidate",
+		"hud_fillers", "hud_minimap", "hud_panels", "hud_guichan", "hud_cursor"
 	};
 	for (int i = 0; i < FP_SECTION_COUNT; ++i) {
 		if (i) j.comma();
