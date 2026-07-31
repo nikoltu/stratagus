@@ -952,6 +952,38 @@ void InitLineDraw()
 
 }
 
+// GPU-pipeline (Phase 4a): during the on-screen world render the sparse map-area unit overlays
+// (selection boxes/corners, health/mana/variable bars) are issued as SDL_Render primitives on the
+// GPU backbuffer instead of being software-blended into the CPU TheScreen overlay. GpuWorldDrawActive
+// is only true inside the unit/tile world draw, where the viewport clip rect is already set on
+// TheRenderer (CViewport::Draw), so these land at the same screen pixels 1:1 and clip identically.
+// Colours were mapped in TheScreen's format (sdl.cpp), so decode with it. Circles/ellipses and the
+// order line stay on the CPU overlay for this step (see notes); the overlay is still uploaded, so
+// leaving them there is visually unchanged.
+namespace
+{
+inline bool GpuPrimitivesActive()
+{
+	return GpuWorldDrawActive && TheRenderer;
+}
+
+inline void GpuBeginPrimitive(Uint32 color, unsigned char alpha)
+{
+	Uint8 r, g, b;
+	SDL_GetRGB(color, TheScreen->format, &r, &g, &b);
+	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(TheRenderer, r, g, b, alpha);
+}
+
+// Restore the resting draw state (opaque black, no blend) that the benchmark overlay / next
+// BeginFrame assume.
+inline void GpuEndPrimitive()
+{
+	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
+	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_NONE);
+}
+}
+
 void CVideo::DrawPixelClip(Uint32 color, int x, int y)
 {
 	linedraw_sdl::DrawPixelClip(color, x, y);
@@ -971,6 +1003,14 @@ void CVideo::DrawTransVLine(Uint32 color, int x, int y, int height, unsigned cha
 }
 void CVideo::DrawVLineClip(Uint32 color, int x, int y, int height)
 {
+	if (GpuPrimitivesActive()) {
+		if (height > 0) {
+			GpuBeginPrimitive(color, 255);
+			SDL_RenderDrawLine(TheRenderer, x, y, x, y + height - 1);
+			GpuEndPrimitive();
+		}
+		return;
+	}
 	linedraw_sdl::DrawVLineClip(color, x, y, height);
 }
 void CVideo::DrawTransVLineClip(Uint32 color, int x, int y, int height, unsigned char alpha)
@@ -988,6 +1028,14 @@ void CVideo::DrawTransHLine(Uint32 color, int x, int y, int width, unsigned char
 }
 void CVideo::DrawHLineClip(Uint32 color, int x, int y, int width)
 {
+	if (GpuPrimitivesActive()) {
+		if (width > 0) {
+			GpuBeginPrimitive(color, 255);
+			SDL_RenderDrawLine(TheRenderer, x, y, x + width - 1, y);
+			GpuEndPrimitive();
+		}
+		return;
+	}
 	linedraw_sdl::DrawHLineClip(color, x, y, width);
 }
 void CVideo::DrawTransHLineClip(Uint32 color, int x, int y, int width, unsigned char alpha)
@@ -1022,6 +1070,15 @@ void CVideo::DrawTransRectangle(Uint32 color, int x, int y, int w, int h, unsign
 }
 void CVideo::DrawRectangleClip(Uint32 color, int x, int y, int w, int h)
 {
+	if (GpuPrimitivesActive()) {
+		if (w > 0 && h > 0) {
+			GpuBeginPrimitive(color, 255);
+			SDL_Rect r = { x, y, w, h };
+			SDL_RenderDrawRect(TheRenderer, &r);
+			GpuEndPrimitive();
+		}
+		return;
+	}
 	linedraw_sdl::DrawRectangleClip(color, x, y, w, h);
 }
 void CVideo::DrawTransRectangleClip(Uint32 color, int x, int y, int w, int h, unsigned char alpha)
@@ -1039,10 +1096,28 @@ void CVideo::FillTransRectangle(Uint32 color, int x, int y, int w, int h, unsign
 }
 void CVideo::FillRectangleClip(Uint32 color, int x, int y, int w, int h)
 {
+	if (GpuPrimitivesActive()) {
+		if (w > 0 && h > 0) {
+			GpuBeginPrimitive(color, 255);
+			SDL_Rect r = { x, y, w, h };
+			SDL_RenderFillRect(TheRenderer, &r);
+			GpuEndPrimitive();
+		}
+		return;
+	}
 	linedraw_sdl::FillRectangleClip(color, x, y, w, h);
 }
 void CVideo::FillTransRectangleClip(Uint32 color, int x, int y, int w, int h, unsigned char alpha)
 {
+	if (GpuPrimitivesActive()) {
+		if (w > 0 && h > 0) {
+			GpuBeginPrimitive(color, alpha);
+			SDL_Rect r = { x, y, w, h };
+			SDL_RenderFillRect(TheRenderer, &r);
+			GpuEndPrimitive();
+		}
+		return;
+	}
 	linedraw_sdl::FillTransRectangleClip(color, x, y, w, h, alpha);
 }
 
