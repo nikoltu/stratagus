@@ -75,6 +75,13 @@ extern bool GpuWorldDrawActive;
 // path (lround(W*1)==W), so nothing changes off the zoomed path.
 extern float GpuWorldDrawZoom;
 
+// World internal-resolution scale (0.25..1.0). When < 1.0 the zoomed in-game world (terrain, units,
+// missiles, particles, fog) is rendered into a GPU target texture at this fraction of the viewport
+// render size and upscaled (linear) onto the on-screen viewport, trading world sharpness for
+// fillrate. HUD/fonts/cursor stay native. 1.0 (default) => the direct-to-backbuffer path, unchanged.
+// Read once from <internal>/world_scale.txt at video init.
+extern float WorldRenderScale;
+
 #define RSHIFT  16
 #define GSHIFT  8
 #define BSHIFT  0

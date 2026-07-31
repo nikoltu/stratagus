@@ -598,6 +598,62 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 	const bool gpuDirect = zoomed && (Editor.Running == EditorNotRunning);
 	const bool useOffscreen = zoomed && !gpuDirect;
 
+	// GPU-pipeline (Phase 5): world internal-resolution downscale. Only on the zoomed GPU-direct
+	// path and only when WorldRenderScale < 1.0. The world (tiles/units/missiles/particles/fog) is
+	// rendered into a persistent GPU target texture (WorldRT) at a fraction of the viewport render
+	// size, then upscaled (linear) onto the on-screen viewport rect. HUD/order-lines/cursor draw
+	// afterwards on the backbuffer at native res. At 1.0 this whole block is skipped and the world
+	// renders straight to the backbuffer exactly as before (byte-identical).
+	static SDL_Texture *WorldRT = nullptr;
+	static int WorldRTW = 0;
+	static int WorldRTH = 0;
+	bool rtScaled = gpuDirect && TheRenderer && WorldRenderScale < 1.0f;
+	SDL_Rect vpClipScreen = { 0, 0, 0, 0 };
+	SDL_Rect rtUsedRect = { 0, 0, 0, 0 };
+	SDL_Texture *savedRenderTarget = nullptr;
+	if (rtScaled) {
+		vpClipScreen.x = this->TopLeftPos.x;
+		vpClipScreen.y = this->TopLeftPos.y;
+		vpClipScreen.w = this->BottomRightPos.x - this->TopLeftPos.x + 1;
+		vpClipScreen.h = this->BottomRightPos.y - this->TopLeftPos.y + 1;
+		const int tw = std::max(1, (int)std::lround(vpClipScreen.w * WorldRenderScale));
+		const int th = std::max(1, (int)std::lround(vpClipScreen.h * WorldRenderScale));
+		if (!WorldRT || WorldRTW != tw || WorldRTH != th) {
+			if (WorldRT) {
+				SDL_DestroyTexture(WorldRT);
+				WorldRT = nullptr;
+			}
+			WorldRT = SDL_CreateTexture(TheRenderer, SDL_PIXELFORMAT_ARGB8888,
+										SDL_TEXTUREACCESS_TARGET, tw, th);
+			if (WorldRT) {
+				WorldRTW = tw;
+				WorldRTH = th;
+				SDL_SetTextureScaleMode(WorldRT, SDL_ScaleModeLinear);
+				SDL_SetTextureBlendMode(WorldRT, SDL_BLENDMODE_NONE);
+			} else {
+				WorldRTW = WorldRTH = 0;
+			}
+		}
+		if (WorldRT) {
+			rtUsedRect = { 0, 0, tw, th };
+			// Reposition the viewport onto the RT origin at Zoom*scale so every world draw (which
+			// derives its screen position from TopLeftPos + Zoom*offset, and its GPU sprite/tile
+			// size from GpuWorldDrawZoom == this->Zoom) lands scaled into the RT with no per-call
+			// change. The renderer clip set below then becomes the full RT.
+			savedTopLeft = this->TopLeftPos;
+			savedBottomRight = this->BottomRightPos;
+			this->TopLeftPos = PixelPos(0, 0);
+			this->BottomRightPos = PixelPos(tw - 1, th - 1);
+			this->Zoom = savedZoom * WorldRenderScale;
+			savedRenderTarget = SDL_GetRenderTarget(TheRenderer);
+			SDL_SetRenderTarget(TheRenderer, WorldRT);
+			SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
+			SDL_RenderClear(TheRenderer);
+		} else {
+			rtScaled = false; // texture creation failed: fall back to the direct backbuffer render
+		}
+	}
+
 	if (useOffscreen) {
 		const PixelSize realSize = this->GetPixelSize();
 		renderSize = this->GetRenderPixelSize();
@@ -758,6 +814,21 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 
 	/// Draw Fog of War
 	this->DrawMapFogOfWar();
+
+	if (rtScaled) {
+		// World (tiles/units/missiles/particles/fog) is complete in WorldRT. Restore the real
+		// viewport placement + CPU clip, drop the render target back to the backbuffer, and upscale
+		// the RT into the on-screen viewport rect (linear). clickMissile/buildCursor/overlays below
+		// then draw on the backbuffer at native res, identical to the direct GPU path.
+		PopClipping();
+		this->TopLeftPos = savedTopLeft;
+		this->BottomRightPos = savedBottomRight;
+		this->Zoom = savedZoom;
+		SDL_SetRenderTarget(TheRenderer, savedRenderTarget);
+		SDL_RenderCopy(TheRenderer, WorldRT, &rtUsedRect, &vpClipScreen);
+		PushClipping();
+		this->SetClipping();
+	}
 
 	// If there was a click missile, draw it again here above the fog
 	if (clickMissile != nullptr) {

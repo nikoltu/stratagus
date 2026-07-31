@@ -505,6 +505,21 @@ void InitVideoSdl()
 			fprintf(stdout, "WargusHD: renderScale=%.2f -> framebuffer %dx%d, present %dx%d\n",
 			        renderScale, Video.Width, Video.Height, outW, outH);
 		}
+		// World internal-resolution scale (independent of renderScale above): the zoomed in-game
+		// world is rendered into a GPU target at this fraction of the viewport and upscaled, while
+		// the HUD stays native. Read from <internal>/world_scale.txt (0.25..1.00; default 1.0 = off)
+		// so it can be A/B tuned per device without a rebuild.
+		if (const char *base = SDL_AndroidGetInternalStoragePath()) {
+			std::string wp = std::string(base) + "/world_scale.txt";
+			if (FILE *wf = fopen(wp.c_str(), "r")) {
+				float v = 0.0f;
+				if (fscanf(wf, "%f", &v) == 1 && v > 0.0f && v <= 1.0f) {
+					WorldRenderScale = std::max(0.25f, std::min(1.0f, v));
+				}
+				fclose(wf);
+			}
+			fprintf(stdout, "WargusHD: worldScale=%.2f\n", WorldRenderScale);
+		}
 	}
 #endif
 	Video.ResizeScreen(Video.Width, Video.Height);

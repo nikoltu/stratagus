@@ -68,6 +68,10 @@ bool GpuWorldDrawActive = false;
 // viewport zoom around the in-game world GPU render so tile/unit destination rects scale up.
 float GpuWorldDrawZoom = 1.0f;
 
+// GPU-pipeline (Phase 5). See video.h. 1.0 => world renders straight to the backbuffer (no change).
+// Overwritten once at video init from <internal>/world_scale.txt on Android; clamped to [0.25, 1.0].
+float WorldRenderScale = 1.0f;
+
 // Upload an RGBA (paletteless) surface to a nearest-filtered, alpha-blended GPU texture. Returns
 // nullptr for paletted surfaces (kept on the CPU path for colour-cycling / palette remap) or on
 // failure. Nearest scaling matches the pixel-art look and the Zoom==1 world (Phase 1 only draws
