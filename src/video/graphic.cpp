@@ -460,6 +460,20 @@ void CGraphic::DrawFrameClipTexX(unsigned frame, int x, int y) const
 }
 
 /**
+**  GPU-pipeline: RenderCopy the whole image to the backbuffer at (x,y). srcRect == nullptr means
+**  the entire texture. Used for the static opaque HUD fillers (full-image blits). The texture keeps
+**  SDL_BLENDMODE_BLEND from upload so transparent cut-outs let the world/backbuffer show through.
+*/
+void CGraphic::DrawClipTex(int x, int y) const
+{
+	if (!mTexture) {
+		return;
+	}
+	SDL_Rect dst = {x, y, Width, Height};
+	SDL_RenderCopy(TheRenderer, mTexture, nullptr, &dst);
+}
+
+/**
 **  Crisp-zoom: draw a frame scaled to an explicit destination size via SDL_BlitScaled.
 **  Used by the terrain pass of the crisp render path to magnify a (possibly higher-res)
 **  tile to its on-screen size. Clipping is delegated to surface->clip_rect, which the

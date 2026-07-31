@@ -221,7 +221,14 @@ void UpdateDisplay()
 		if (!BigMapMode) {
 			FrameProfBegin(FP_HUD_FILLERS);
 			for (auto &filler : UI.Fillers) {
-				filler.G->DrawSubClip(0, 0, filler.G->Width, filler.G->Height, filler.X, filler.Y);
+				// GPU: static opaque HUD fillers RenderCopy straight to the backbuffer (under the
+				// CPU overlay, which is transparent here so the dynamic HUD composites on top). RGBA
+				// fillers carry mTexture; paletted ones (mTexture == null) keep the CPU DrawSubClip.
+				if (TheRenderer && filler.G->mTexture) {
+					filler.G->DrawClipTex(filler.X, filler.Y);
+				} else {
+					filler.G->DrawSubClip(0, 0, filler.G->Width, filler.G->Height, filler.X, filler.Y);
+				}
 			}
 			FrameProfEnd(FP_HUD_FILLERS);
 			FrameProfBegin(FP_HUD_PANELS);

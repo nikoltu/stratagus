@@ -152,6 +152,9 @@ public:
 	// sheet/texture is needed. Only valid when mTexture != nullptr (RGBA graphics only).
 	void DrawFrameClipTex(unsigned frame, int x, int y) const;
 	void DrawFrameClipTexX(unsigned frame, int x, int y) const;
+	// GPU-pipeline: RenderCopy the WHOLE image (src == full texture) to the backbuffer at (x,y).
+	// Used for static opaque HUD fillers. Only valid when mTexture != nullptr (RGBA graphics only).
+	void DrawClipTex(int x, int y) const;
 	// Crisp-zoom helper: blit a frame scaled to an explicit destination size (w,h) via
 	// SDL_BlitScaled. Used ONLY by the crisp-zoom terrain path; it relies on the target
 	// surface's clip_rect for clipping (not the engine CLIP_RECTANGLE), which the crisp
