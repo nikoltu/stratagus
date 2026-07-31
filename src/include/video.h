@@ -159,6 +159,11 @@ public:
 	// sheet/texture is needed. Only valid when mTexture != nullptr (RGBA graphics only).
 	void DrawFrameClipTex(unsigned frame, int x, int y) const;
 	void DrawFrameClipTexX(unsigned frame, int x, int y) const;
+	// GPU-pipeline: RenderCopy one frame into an explicit destination rect. Used by the zoomed
+	// map-tile path so adjacent tiles derive their size from consecutive rounded grid edges and
+	// abut seamlessly at fractional zoom (no 1px gaps). Paletted graphics (no mTexture) fall back
+	// to a native-size CPU blit at the rect origin, matching DrawFrameClip's fallback.
+	void DrawFrameClipTexDst(unsigned frame, const SDL_Rect &dst) const;
 	// GPU-pipeline: RenderCopy the WHOLE image (src == full texture) to the backbuffer at (x,y).
 	// Used for static opaque HUD fillers. Only valid when mTexture != nullptr (RGBA graphics only).
 	void DrawClipTex(int x, int y) const;

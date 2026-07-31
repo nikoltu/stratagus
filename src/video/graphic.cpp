@@ -464,6 +464,28 @@ void CGraphic::DrawFrameClipTexX(unsigned frame, int x, int y) const
 }
 
 /**
+**  GPU-pipeline: RenderCopy one frame into an explicit destination rect. The map-tile path
+**  computes dst from consecutive rounded tile-grid edges so neighbours abut with no gap at any
+**  zoom. Paletted tiles (no mTexture) fall back to a native-size CPU blit at the rect origin,
+**  the same fallback DrawFrameClip takes, so colour-cycling terrain keeps working.
+*/
+void CGraphic::DrawFrameClipTexDst(unsigned frame, const SDL_Rect &dst) const
+{
+	if (frame >= frame_map.size()) {
+		WarnInvalidGraphicFrame(*this, frame, false);
+		return;
+	}
+	if (!mTexture) {
+		DrawSubClip(frame_map[frame].x, frame_map[frame].y,
+					Width, Height, dst.x, dst.y, TheScreen);
+		return;
+	}
+	SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+	SDL_Rect d = dst;
+	SDL_RenderCopy(TheRenderer, mTexture, &src, &d);
+}
+
+/**
 **  GPU-pipeline: RenderCopy the whole image to the backbuffer at (x,y). srcRect == nullptr means
 **  the entire texture. Used for the static opaque HUD fillers (full-image blits). The texture keeps
 **  SDL_BLENDMODE_BLEND from upload so transparent cut-outs let the world/backbuffer show through.

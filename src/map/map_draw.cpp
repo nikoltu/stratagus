@@ -449,16 +449,23 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				src->DrawFrameClipScaled(tile, sx0, sy0, sx1 - sx0, sy1 - sy0);
 			} else if (gpuZoomTiles) {
 				// Zoomed GPU direct render: dx,dy are logical (native-stepped) screen positions.
-				// Convert each tile's logical offset from the viewport top-left to its zoomed screen
-				// top-left using consecutive rounded edges (so neighbouring tiles abut seamlessly at
-				// integer zoom). DrawFrameClip -> DrawFrameClipTex then scales the tile to
-				// PixelTileSize*Zoom via GpuWorldDrawZoom, filling the gap to the next tile.
+				// Derive both this tile's zoomed top-left AND its size from consecutive rounded grid
+				// edges (the next tile's edge minus this one). At integer zoom the edges land on exact
+				// multiples so the size equals PixelTileSize*Zoom, byte-identical to the old fixed
+				// DrawFrameClipTex dst; at fractional zoom (e.g. Zoom*WorldRenderScale = 1.6) each
+				// tile's right/bottom edge is exactly the next tile's left/top edge, so neighbours
+				// abut with no 1px gap (which the black render target would otherwise show as a grid).
 				const float z = this->Zoom;
 				const int zx = this->TopLeftPos.x
 				               + static_cast<int>(std::lround((dx - this->TopLeftPos.x) * z));
 				const int zy = this->TopLeftPos.y
 				               + static_cast<int>(std::lround((dy - this->TopLeftPos.y) * z));
-				Map.TileGraphic->DrawFrameClip(tile, zx, zy);
+				const int zx1 = this->TopLeftPos.x
+				                + static_cast<int>(std::lround((dx + graphicTileSize.x - this->TopLeftPos.x) * z));
+				const int zy1 = this->TopLeftPos.y
+				                + static_cast<int>(std::lround((dy + graphicTileSize.y - this->TopLeftPos.y) * z));
+				const SDL_Rect dst = { zx, zy, zx1 - zx, zy1 - zy };
+				Map.TileGraphic->DrawFrameClipTexDst(tile, dst);
 			} else {
 				Map.TileGraphic->DrawFrameClip(tile, dx, dy);
 			}
