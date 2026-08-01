@@ -309,6 +309,14 @@ public:
 	SDL_Texture *mTextureTeam = nullptr;
 	void DrawPlayerColorFrameClipTex(int colorIndex, unsigned frame, int x, int y, bool flip = false);
 
+	// HD player-colour icons (ui/icons_hd.png): an oversized RGBA sheet whose team region is baked
+	// as a MAGENTA mask and which ships NO separate _team.png -> it fits neither the GPU-mask path
+	// (mTexture null: too tall for one texture) nor the CPU palette-remap path (paletteless RGBA).
+	// Cache a per-(frame,colorIndex) recoloured HUD frame texture (magenta -> the player's ramp),
+	// keyed ((frame<<8)|colorIndex), so the icon matches the unit model's team colour.
+	mutable std::map<uint32_t, SDL_Texture *> mHudFrameColorTex;
+	SDL_Texture *GetHudFrameColorTexture(unsigned frame, int colorIndex) const;
+
 	void DrawPlayerColorFrameClipX(int colorIndex, unsigned frame, int x, int y,
 								   SDL_Surface *surface = TheScreen);
 	void DrawPlayerColorFrameClip(int colorIndex, unsigned frame, int x, int y,

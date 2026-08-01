@@ -564,6 +564,66 @@ SDL_Texture *CGraphic::GetHudFrameTexture(unsigned frame) const
 }
 
 /**
+**  Like GetHudFrameTexture, but for an oversized RGBA player-colour sheet (ui/icons_hd.png) whose
+**  team region is a baked MAGENTA mask and which ships no grey _team.png. Swap the magenta for the
+**  player's colour the same way HD unit sprites tint their grey mask (ramp[0] scaled by the mask
+**  intensity), so the icon matches the model's team colour. Cached per (frame, colorIndex).
+*/
+SDL_Texture *CPlayerColorGraphic::GetHudFrameColorTexture(unsigned frame, int colorIndex) const
+{
+	if (mTexture || !mSurface || !TheRenderer || frame >= frame_map.size()) {
+		return nullptr;
+	}
+	if (mSurface->format->palette) {
+		return nullptr; // paletted: classic palette remap handles it
+	}
+	if (colorIndex < 0 || (size_t)colorIndex >= PlayerColorsRGB.size()
+	    || PlayerColorsRGB[colorIndex].empty()) {
+		return GetHudFrameTexture(frame); // no valid ramp -> draw the untinted base frame
+	}
+	const uint32_t key = ((uint32_t)frame << 8) | (uint32_t)(colorIndex & 0xff);
+	auto it = mHudFrameColorTex.find(key);
+	if (it != mHudFrameColorTex.end()) {
+		return it->second;
+	}
+	const CColor c0 = PlayerColorsRGB[colorIndex][0]; // brightest ramp shade; models tint by this too
+	SDL_Texture *tex = nullptr;
+	SDL_Surface *fs = SDL_CreateRGBSurfaceWithFormat(0, Width, Height, 32, SDL_PIXELFORMAT_RGBA32);
+	if (fs) {
+		SDL_Rect srect = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+		SDL_FillRect(fs, nullptr, 0);
+		SDL_BlendMode prev = SDL_BLENDMODE_NONE;
+		SDL_GetSurfaceBlendMode(mSurface, &prev);
+		SDL_SetSurfaceBlendMode(mSurface, SDL_BLENDMODE_NONE); // copy pixels incl. alpha
+		SDL_BlitSurface(mSurface, &srect, fs, nullptr);
+		SDL_SetSurfaceBlendMode(mSurface, prev);
+		SDL_LockSurface(fs);
+		Uint8 *base = (Uint8 *)fs->pixels;
+		const int n = Width * Height;
+		for (int i = 0; i < n; ++i) {
+			Uint8 *p = base + i * 4; // RGBA32: p[0]=R p[1]=G p[2]=B p[3]=A
+			const int r = p[0], g = p[1], b = p[2], a = p[3];
+			// magenta team-mask test: high R & B, low G, roughly balanced R~B
+			if (a > 24 && r > 48 && b > 48 && g < r - 24 && g < b - 24 && std::abs(r - b) < 120) {
+				const int inten = (r + b) / 2; // mask "grey" -> shade the player colour
+				p[0] = (Uint8)(c0.R * inten / 255);
+				p[1] = (Uint8)(c0.G * inten / 255);
+				p[2] = (Uint8)(c0.B * inten / 255);
+				// keep alpha
+			}
+		}
+		SDL_UnlockSurface(fs);
+		tex = SDL_CreateTextureFromSurface(TheRenderer, fs);
+		if (tex) {
+			SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+		}
+		SDL_FreeSurface(fs);
+	}
+	mHudFrameColorTex[key] = tex; // cache (even null) to avoid per-frame rebuilds
+	return tex;
+}
+
+/**
 **  GPU-pipeline: RenderCopy one frame into an explicit destination rect. The map-tile path
 **  computes dst from consecutive rounded tile-grid edges so neighbours abut with no gap at any
 **  zoom. Paletted tiles (no mTexture) fall back to a native-size CPU blit at the rect origin,
@@ -827,6 +887,19 @@ void CPlayerColorGraphic::DrawPlayerColorFrameClip(int colorIndex, unsigned fram
 	if ((GpuWorldDrawActive || GpuHudDrawActive) && mTexture && surface == TheScreen) {
 		DrawPlayerColorFrameClipTex(colorIndex, frame, x, y, false);
 		return;
+	}
+	// HD player-colour icons (ui/icons_hd.png): oversized RGBA sheet -> mTexture is null so the GPU
+	// gate above never fires, its team mask is baked as magenta and it has no _team.png so the CPU
+	// GetColorVariant path below also cannot colour it. Draw a per-player recoloured per-frame
+	// texture so the icon's team colour matches the unit model (else it renders raw magenta).
+	if (GpuHudDrawActive && !mTexture && surface == TheScreen && !TeamMask
+	    && mSurface && mSurface->format->palette == nullptr) {
+		if (SDL_Texture *ft = GetHudFrameColorTexture(frame, colorIndex)) {
+			SDL_Rect src = {0, 0, Width, Height};
+			SDL_Rect dst = {x, y, Width, Height};
+			HudRenderCopy(ft, src, dst);
+			return;
+		}
 	}
 	if (mSurface && mSurface->format->palette == nullptr && TeamMask) {
 		SDL_Surface *saved = mSurface;
@@ -1381,6 +1454,12 @@ CPlayerColorGraphic::~CPlayerColorGraphic()
 		SDL_DestroyTexture(mTextureTeam);
 		mTextureTeam = nullptr;
 	}
+	for (auto &kv : mHudFrameColorTex) {
+		if (kv.second) {
+			SDL_DestroyTexture(kv.second);
+		}
+	}
+	mHudFrameColorTex.clear();
 }
 
 /**
