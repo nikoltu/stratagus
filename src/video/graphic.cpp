@@ -1233,15 +1233,21 @@ static void ApplyGrayScale(SDL_Surface *Surface, int Width, int Height)
 }
 
 /**
-**  Build a small, visible placeholder surface so a single missing/broken graphic
-**  degrades gracefully instead of taking down the whole program. A magenta 16x16
-**  tile reads as "asset missing" on screen while keeping menus/HUD alive.
+**  Build a placeholder surface so a single missing/broken graphic degrades
+**  gracefully instead of taking down the whole program. It must be:
+**   - fully TRANSPARENT, so a missing in-game graphic (a construction overlay,
+**     an effect) draws nothing rather than leaving a coloured stain on the map;
+**   - sized to the graphic's own frame cell (w x h) when known, so the frame-grid
+**     maths stays valid (NumFrames >= 1) and drawing does not index out of bounds.
 */
-static SDL_Surface *MakePlaceholderSurface()
+static SDL_Surface *MakePlaceholderSurface(int w, int h)
 {
-	SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, 16, 16, 32, SDL_PIXELFORMAT_RGBA32);
+	if (w < 1) { w = 16; }
+	if (h < 1) { h = 16; }
+	SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
 	if (s) {
-		SDL_FillRect(s, nullptr, SDL_MapRGBA(s->format, 255, 0, 255, 255));
+		SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_BLEND);
+		SDL_FillRect(s, nullptr, SDL_MapRGBA(s->format, 0, 0, 0, 0)); // fully transparent
 	}
 	return s;
 }
@@ -1266,17 +1272,17 @@ void CGraphic::Load(bool grayscale)
 	if (name.empty()) {
 		ErrorPrint("Can't load the graphic '%s': file not found; using placeholder\n",
 		           File.u8string().c_str());
-		mSurface = MakePlaceholderSurface();
+		mSurface = MakePlaceholderSurface(Width, Height);
 	} else if (fp->open(name.string().c_str(), CL_OPEN_READ) == -1) {
 		ErrorPrint("Can't open the graphic '%s': %s; using placeholder\n",
 		           File.u8string().c_str(), strerror(errno));
-		mSurface = MakePlaceholderSurface();
+		mSurface = MakePlaceholderSurface(Width, Height);
 	} else {
 		mSurface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(fp)), 1);
 		if (mSurface == nullptr) {
 			ErrorPrint("Couldn't decode the graphic '%s': %s; using placeholder\n",
 			           name.u8string().c_str(), IMG_GetError());
-			mSurface = MakePlaceholderSurface();
+			mSurface = MakePlaceholderSurface(Width, Height);
 		}
 	}
 	if (mSurface == nullptr) {
