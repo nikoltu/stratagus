@@ -126,16 +126,38 @@ std::string Format(const char *format, Ts... args)
 	return res;
 }
 
+#ifdef __ANDROID__
+#include <android/log.h>
+// Android discards process stdout/stderr, so engine diagnostics (Lua errors, asserts,
+// warnings) would vanish. Mirror them to logcat under a stable tag so on-device issues
+// are diagnosable with `adb logcat -s WargusHD`.
+inline void AndroidLogLine(int prio, std::string_view s)
+{
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
+		s.remove_suffix(1);
+	}
+	if (!s.empty()) {
+		__android_log_print(prio, "WargusHD", "%.*s", (int)s.size(), s.data());
+	}
+}
+#endif
+
 inline void PrintOnStderr(std::string_view s)
 {
 	fwrite(s.data(), 1, s.size(), stderr);
 	fflush(stderr);
+#ifdef __ANDROID__
+	AndroidLogLine(ANDROID_LOG_ERROR, s);
+#endif
 }
 
 inline void PrintOnStdOut(std::string_view s)
 {
 	fwrite(s.data(), 1, s.size(), stdout);
 	fflush(stdout);
+#ifdef __ANDROID__
+	AndroidLogLine(ANDROID_LOG_INFO, s);
+#endif
 }
 
 /**

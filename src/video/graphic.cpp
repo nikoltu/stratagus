@@ -1233,6 +1233,20 @@ static void ApplyGrayScale(SDL_Surface *Surface, int Width, int Height)
 }
 
 /**
+**  Build a small, visible placeholder surface so a single missing/broken graphic
+**  degrades gracefully instead of taking down the whole program. A magenta 16x16
+**  tile reads as "asset missing" on screen while keeping menus/HUD alive.
+*/
+static SDL_Surface *MakePlaceholderSurface()
+{
+	SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, 16, 16, 32, SDL_PIXELFORMAT_RGBA32);
+	if (s) {
+		SDL_FillRect(s, nullptr, SDL_MapRGBA(s->format, 255, 0, 255, 255));
+	}
+	return s;
+}
+
+/**
 **  Load a graphic
 **
 **  @param grayscale  Make a grayscale surface
@@ -1245,20 +1259,29 @@ void CGraphic::Load(bool grayscale)
 
 	auto fp = std::make_unique<CFile>();
 	const fs::path name = LibraryFileName(File.string());
+	// A missing or unreadable graphic must NOT kill the program: a single absent
+	// skin/menu asset (e.g. a race that ships fewer button variants) would otherwise
+	// take down the whole app via ExitFatal -> _Exit (silent on Android). Log loudly
+	// and substitute a visible placeholder so the owning menu/HUD still opens.
 	if (name.empty()) {
-		perror("Cannot find file");
-		ErrorPrint("Can't load the graphic '%s'\n", File.u8string().c_str());
-		ExitFatal(-1);
+		ErrorPrint("Can't load the graphic '%s': file not found; using placeholder\n",
+		           File.u8string().c_str());
+		mSurface = MakePlaceholderSurface();
+	} else if (fp->open(name.string().c_str(), CL_OPEN_READ) == -1) {
+		ErrorPrint("Can't open the graphic '%s': %s; using placeholder\n",
+		           File.u8string().c_str(), strerror(errno));
+		mSurface = MakePlaceholderSurface();
+	} else {
+		mSurface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(fp)), 1);
+		if (mSurface == nullptr) {
+			ErrorPrint("Couldn't decode the graphic '%s': %s; using placeholder\n",
+			           name.u8string().c_str(), IMG_GetError());
+			mSurface = MakePlaceholderSurface();
+		}
 	}
-	if (fp->open(name.string().c_str(), CL_OPEN_READ) == -1) {
-		perror("Can't open file");
-		ErrorPrint("Can't load the graphic '%s'\n", File.u8string().c_str());
-		ExitFatal(-1);
-	}
-	mSurface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(fp)), 1);
 	if (mSurface == nullptr) {
-		ErrorPrint("Couldn't load file '%s': %s", name.u8string().c_str(), IMG_GetError());
-		ErrorPrint("Can't load the graphic '%s'\n", File.u8string().c_str());
+		// Only reached if even a 16x16 surface could not be allocated (true OOM).
+		ErrorPrint("Can't allocate a placeholder surface for '%s'\n", File.u8string().c_str());
 		ExitFatal(-1);
 	}
 
