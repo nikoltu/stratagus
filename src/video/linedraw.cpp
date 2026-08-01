@@ -73,6 +73,7 @@ static void VideoDoDrawPixel16(Uint32 color, int x, int y)
 	if (x < 0 || y < 0 || x >= Video.Width || y >= Video.Height) {
 		return;
 	}
+	OverlayDirty = true;
 	((Uint16 *)TheScreen->pixels)[x + y * Video.Width] = color;
 }
 
@@ -96,6 +97,7 @@ static void VideoDoDrawPixel32(Uint32 color, int x, int y)
 	if (x < 0 || y < 0 || x >= Video.Width || y >= Video.Height) {
 		return;
 	}
+	OverlayDirty = true;
 	((Uint32 *)TheScreen->pixels)[x + y * Video.Width] = color;
 }
 
@@ -120,6 +122,7 @@ static void VideoDoDrawTransPixel16(Uint32 color, int x, int y, unsigned char al
 	// Loses precision for speed
 	alpha = (255 - alpha) >> 3;
 
+	OverlayDirty = true;
 	Uint16 *p = &((Uint16 *)TheScreen->pixels)[x + y * Video.Width];
 	color = (((color << 16) | color) & 0x07E0F81F);
 	unsigned long dp = *p;
@@ -148,6 +151,7 @@ static void VideoDoDrawTransPixel32(Uint32 color, int x, int y, unsigned char al
 	}
 	alpha = 255 - alpha;
 
+	OverlayDirty = true;
 	Uint32 *p = &((Uint32 *)TheScreen->pixels)[x + y * Video.Width];
 
 	const unsigned long sp2 = (color & 0xFF00FF00) >> 8;
@@ -582,6 +586,7 @@ void DrawTransRectangleClip(Uint32 color, int x, int y,
 void FillRectangle(Uint32 color, int x, int y, int w, int h)
 {
 	SDL_Rect drect = {Sint16(x), Sint16(y), Uint16(w), Uint16(h)};
+	OverlayDirty = true;
 	SDL_FillRect(TheScreen, &drect, color);
 }
 

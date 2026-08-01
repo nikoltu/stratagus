@@ -365,6 +365,8 @@ void DrawCursor()
 
 	//  Last, Normal cursor.
 	if (!Preference.HardwareCursor) {
+		// Software cursor blits into the CPU overlay (not reached on Android; see early return above).
+		OverlayDirty = true;
 		const PixelPos pos = CursorScreenPos - GameCursor->HotPos;
 
 		if (!GameRunning && !Editor.Running) {

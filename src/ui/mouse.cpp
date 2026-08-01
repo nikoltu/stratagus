@@ -2244,6 +2244,8 @@ void DrawPieMenu()
 		CursorState = CursorStates::Point;
 		return;
 	}
+	// Pie menu composites into the CPU overlay (icons/labels/background). Mark it dirty so it uploads.
+	OverlayDirty = true;
 	std::vector<ButtonAction> &buttons(CurrentButtons);
 	CLabel label(GetGameFont());
 	CViewport *vp = UI.SelectedViewport;

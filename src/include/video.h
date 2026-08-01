@@ -98,6 +98,23 @@ extern float GpuWorldDrawZoom;
 // Read once from <internal>/world_scale.txt at video init.
 extern float WorldRenderScale;
 
+// Overlay dirty-tracking: true if anything was CPU-blitted into TheScreen since the last overlay
+// clear. In-game the HUD composites on the GPU backbuffer, so a resting frame leaves the CPU
+// overlay empty (clean); UpdateDisplay then skips the overlay clear and RealizeVideoMemory skips
+// the SDL_UpdateTexture + RenderCopy of the overlay. Set true at EVERY CPU write into TheScreen
+// (paletted-graphic fallbacks, menus/tooltips/pie-menu/guichan, software cursor). Over-mark rather
+// than risk missing a writer (a missed writer would vanish in-game).
+extern bool OverlayDirty;
+// OverlayDirty carried from the previous rendered frame. UpdateDisplay reads it to decide whether
+// the in-game overlay clear is needed (clean last frame -> nothing to erase -> skip); set at the
+// end of RealizeVideoMemory. Initialised true so the first in-game frame clears once.
+extern bool OverlayDirtyPrevFrame;
+inline void MarkOverlayDirty(const SDL_Surface *surface) {
+	if (surface == TheScreen) {
+		OverlayDirty = true;
+	}
+}
+
 #define RSHIFT  16
 #define GSHIFT  8
 #define BSHIFT  0
@@ -251,6 +268,10 @@ public:
 	// palette colour-cycling (animated water/lava tiles) and the classic player-colour palette
 	// remap keep working. nullptr => this graphic is never drawn through the GPU path.
 	SDL_Texture *mTexture = nullptr;
+	// Per-frame fallback textures for HUD draws when mTexture is null because the whole sheet
+	// exceeds the GPU max texture size (e.g. the tall icons_hd sheet). Lazily built from mSurface.
+	mutable std::map<unsigned, SDL_Texture *> mHudFrameTex;
+	SDL_Texture *GetHudFrameTexture(unsigned frame) const;
 	std::vector<frame_pos_t> frame_map;
 	std::vector<frame_pos_t> frameFlip_map;
 	void GenFramesMap();

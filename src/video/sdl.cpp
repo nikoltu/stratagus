@@ -36,8 +36,10 @@
 
 #include "stratagus.h"
 
+#include "editor.h"
 #include "game.h"
 #include "debug_bridge.h"
+#include "shaders.h"
 #include "frame_profiler.h"
 #include "network.h"
 #include "online_service.h"
@@ -1409,27 +1411,39 @@ void RealizeVideoMemory()
 		return;
 	}
 	if (Preference.FrameSkip && (FrameCounter & Preference.FrameSkip)) {
+		OverlayDirtyPrevFrame = OverlayDirty;
 		return;
 	}
 	// Lazy clear for present paths that never went through UpdateDisplay (title/menus). When
 	// UpdateDisplay already ran, this is a no-op and the GPU world layers drawn since are kept.
 	BeginFrame();
 	if (NumRects) {
-		//SDL_UpdateWindowSurfaceRects(TheWindow, Rects, NumRects);
-		SDL_UpdateTexture(TheTexture, nullptr, TheScreen->pixels, TheScreen->pitch);
-		if (!RenderWithShader(TheRenderer, TheWindow, TheTexture)) {
-			// No RenderClear here anymore: BeginFrame already cleared the backbuffer and the
-			// GPU world layers were drawn on top of that clear. This copy blends the CPU
-			// overlay (TheScreen, now alpha-capable) over them.
-			//for (int i = 0; i < NumRects; i++)
-			//    SDL_UpdateTexture(TheTexture, &Rects[i], TheScreen->pixels, TheScreen->pitch);
-			SDL_RenderCopy(TheRenderer, TheTexture, nullptr, nullptr);
+		// In-game with the HUD composited entirely on the GPU backbuffer, the overlay (TheScreen) is
+		// empty (OverlayDirty stayed false through UpdateDisplay). The SDL_UpdateTexture upload and
+		// the RenderCopy of that empty overlay are then pure waste, so skip both. Never skip when a
+		// shader pass consumes the overlay, in the editor, or off the game path; any menu/tooltip/
+		// pie/cursor/paletted-fallback marks OverlayDirty via the instrumented CPU blits and uploads.
+		const bool skipOverlay = GameRunning && Editor.Running != EditorEditing
+		                         && !IsShaderActive() && !OverlayDirty;
+		if (!skipOverlay) {
+			//SDL_UpdateWindowSurfaceRects(TheWindow, Rects, NumRects);
+			SDL_UpdateTexture(TheTexture, nullptr, TheScreen->pixels, TheScreen->pitch);
+			if (!RenderWithShader(TheRenderer, TheWindow, TheTexture)) {
+				// No RenderClear here anymore: BeginFrame already cleared the backbuffer and the
+				// GPU world layers were drawn on top of that clear. This copy blends the CPU
+				// overlay (TheScreen, now alpha-capable) over them.
+				//for (int i = 0; i < NumRects; i++)
+				//    SDL_UpdateTexture(TheTexture, &Rects[i], TheScreen->pixels, TheScreen->pitch);
+				SDL_RenderCopy(TheRenderer, TheTexture, nullptr, nullptr);
+			}
 		}
 		if (Parameters::Instance.benchmark) {
 			RenderBenchmarkOverlay();
 		}
 		NumRects = 0;
 	}
+	// This frame's overlay dirtiness is now fully known; hand it to next frame's clear decision.
+	OverlayDirtyPrevFrame = OverlayDirty;
 	EndFrame();
 	if (!Preference.HardwareCursor) {
 		HideCursor();

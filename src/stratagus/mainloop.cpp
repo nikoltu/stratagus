@@ -196,6 +196,11 @@ void UpdateDisplay()
 	FrameProfEnd(FP_BEGINFRAME);
 
 	if (GameRunning || Editor.Running == EditorEditing) {
+		// Reset the per-frame overlay dirty flag before any CPU write this frame; the instrumented
+		// blit sites set it true again if they touch TheScreen. Must run before FP_OVLCLEAR so the
+		// clear/upload skips read a value that reflects only this frame's draws.
+		OverlayDirty = false;
+
 		// Clear the CPU overlay to fully TRANSPARENT (was opaque black). The GPU world shows
 		// through wherever the overlay is untouched; only opaque CPU layers (HUD/fog/cursor)
 		// occlude it. 0 == transparent in ARGB8888. (Prevents empty spaces in the UI.)
@@ -228,7 +233,15 @@ void UpdateDisplay()
 
 			static bool mapDirtyLastFrame = true; // force first in-game frame to clear interior
 
-			if (regionClear) {
+			// In-game overlay clean last frame (HUD composited entirely on the GPU backbuffer, nothing
+			// CPU-blitted into TheScreen) -> nothing to erase this frame, so skip the region fills. Any
+			// menu/tooltip/pie/cursor/paletted-fallback last frame set OverlayDirtyPrevFrame, forcing
+			// one clear here to erase it. Only the in-game region path skips; editor/menu/full clears
+			// always run.
+			if (regionClear && !OverlayDirtyPrevFrame) {
+				// keep mapDirtyLastFrame in sync so a later clear still handles transient interior
+				mapDirtyLastFrame = AreMessagesShown() || CursorState == CursorStates::Rectangle;
+			} else if (regionClear) {
 				// Border frame: up to 4 rects outside the map interior. Covers all persistent
 				// HUD dynamic content (minimap, portrait/InfoPanel, resources, status line,
 				// button panel, menu buttons).

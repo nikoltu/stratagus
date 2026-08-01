@@ -238,6 +238,16 @@ void handleInput(const SDL_Event *event)
 void DrawGuichanWidgets()
 {
 	if (Gui) {
+		// A visible top widget (menu/dialog/tooltip) composites into the CPU overlay via guichan's
+		// own SDLGraphics primitives, which bypass the instrumented CGraphic/CVideo paths. Mark the
+		// overlay dirty so it is uploaded. In-game with no menu the top is empty/invisible -> clean.
+		// Only a real shown menu/dialog (on MenuStack) composites opaque content into the overlay.
+		// In-game the top is a visible-but-empty input container that draws nothing, so gating on
+		// MenuStack (not just isVisible) keeps the resting in-game overlay clean and skippable.
+		gcn::Widget *top = Gui->getTop();
+		if (top && top->isVisible() && !MenuStack.empty()) {
+			OverlayDirty = true;
+		}
 		auto oldScreen = TheScreen;
 		TheScreen = static_cast<gcn::SDLGraphics*>(Gui->getGraphics())->getTarget();
 		Gui->draw();

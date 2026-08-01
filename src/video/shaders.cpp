@@ -283,6 +283,11 @@ bool RenderWithShader(SDL_Renderer *renderer, SDL_Window* win, SDL_Texture* back
 	return RenderWithShaderInternal(renderer, win, backBuffer);
 }
 
+// Mirrors the RenderWithShader gate: an actual shader pass will run (and read the whole overlay).
+bool IsShaderActive() {
+	return canUseShaders && currentShaderIdx != 0;
+}
+
 static bool RenderWithShaderInternal(SDL_Renderer *renderer, SDL_Window* win, SDL_Texture* backBuffer) {
 	GLint oldProgramId;
 	// Detach the texture

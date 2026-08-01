@@ -39,6 +39,7 @@
 #include "iolib.h"
 #include "player.h"
 #include "stratagus.h"
+#include <cstring>
 #include "ui.h"
 
 #include <SDL_image.h>
@@ -66,6 +67,8 @@ bool GpuWorldDrawActive = false;
 
 // GPU-pipeline (HUD sprites). See video.h. Off by default; set only around the in-game HUD draw.
 bool GpuHudDrawActive = false;
+bool OverlayDirty = false;
+bool OverlayDirtyPrevFrame = true;
 
 // GPU-pipeline (Phase 1). See video.h. 1.0 => the classic native (Zoom==1) draw; set to the real
 // viewport zoom around the in-game world GPU render so tile/unit destination rects scale up.
@@ -160,6 +163,7 @@ static void CrispBlitScaled(SDL_Surface *src, SDL_Rect srcRect, int x, int y, SD
 	drect.y = y;
 	drect.w = static_cast<int>(std::lround(srcRect.w * CrispZoomDrawScale));
 	drect.h = static_cast<int>(std::lround(srcRect.h * CrispZoomDrawScale));
+	MarkOverlayDirty(dst);
 	SDL_BlitScaled(src, &srcRect, dst, &drect);
 }
 
@@ -234,6 +238,14 @@ void CGraphic::DrawSub(int gx, int gy, int w, int h, int x, int y,
 {
 	Assert(surface);
 
+	// GPU-pipeline (HUD): route RGBA sub-blits to the backbuffer, same as DrawSubClip.
+	if (GpuHudDrawActive && mTexture && surface == TheScreen) {
+		SDL_Rect src = {gx, gy, w, h};
+		SDL_Rect dst = {x, y, w, h};
+		HudRenderCopy(mTexture, src, dst);
+		return;
+	}
+
 	SDL_Rect srect = {Sint16(gx), Sint16(gy), Uint16(w), Uint16(h)};
 	// Crisp-zoom: scale the sprite up to on-screen size. (x,y) already carries the
 	// on-screen ·Zoom position from the Zoom-aware viewport transform, so only the size is
@@ -246,6 +258,7 @@ void CGraphic::DrawSub(int gx, int gy, int w, int h, int x, int y,
 
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
 
+	MarkOverlayDirty(surface);
 	SDL_BlitSurface(mSurface, &srect, surface, &drect);
 }
 
@@ -270,6 +283,7 @@ void CGraphic::DrawSubCustomMod(int gx, int gy, int w, int h, int x, int y,
 	Assert(surface);
 	Assert(surface->format->BitsPerPixel == 32);
 
+	MarkOverlayDirty(surface);
 
 	size_t srcOffset = mSurface->w * gy + gx;
 	size_t dstOffset = surface->w * y + x;
@@ -333,6 +347,7 @@ void CGraphic::DrawSubClip(int gx, int gy, int w, int h, int x, int y,
 
 	SDL_Rect srect = {Sint16(gx), Sint16(gy), Uint16(w), Uint16(h)};
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
+	MarkOverlayDirty(surface);
 	SDL_BlitSurface(mSurface, &srect, surface, &drect);
 }
 
@@ -458,6 +473,17 @@ void CGraphic::DrawFrameClip(unsigned frame, int x, int y,
 		DrawFrameClipTex(frame, x, y);
 		return;
 	}
+	// GPU-pipeline (HUD): when the whole sheet was too big for one texture (mTexture == null, e.g.
+	// icons_hd), draw via a small cached per-frame texture instead of the CPU blit. mTexture!=null
+	// RGBA graphics are handled by DrawSubClip's own HUD gate below; paletted fall through to CPU.
+	if (GpuHudDrawActive && !mTexture && surface == TheScreen) {
+		if (SDL_Texture *ft = GetHudFrameTexture(frame)) {
+			SDL_Rect src = {0, 0, Width, Height};
+			SDL_Rect dst = {x, y, Width, Height};
+			HudRenderCopy(ft, src, dst);
+			return;
+		}
+	}
 	DrawSubClip(frame_map[frame].x, frame_map[frame].y,
 				Width, Height, x, y, surface);
 }
@@ -498,6 +524,43 @@ void CGraphic::DrawFrameClipTexX(unsigned frame, int x, int y) const
 	SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
 	SDL_Rect dst = {x, y, dw, dh};
 	SDL_RenderCopyEx(TheRenderer, mTexture, &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+}
+
+/**
+**  Lazily build and cache a small per-frame texture from mSurface, for RGBA HUD graphics whose
+**  whole sheet was too large for one GPU texture (mTexture == null, e.g. the tall icons_hd sheet).
+**  Returns null for the normal case (mTexture set), for paletted sheets, or on failure -> CPU blit.
+*/
+SDL_Texture *CGraphic::GetHudFrameTexture(unsigned frame) const
+{
+	if (mTexture || !mSurface || !TheRenderer || frame >= frame_map.size()) {
+		return nullptr;
+	}
+	if (mSurface->format->palette) {
+		return nullptr; // paletted: keep the CPU path (colour cycling / player-colour remap)
+	}
+	auto it = mHudFrameTex.find(frame);
+	if (it != mHudFrameTex.end()) {
+		return it->second;
+	}
+	SDL_Texture *tex = nullptr;
+	SDL_Surface *fs = SDL_CreateRGBSurfaceWithFormat(0, Width, Height, 32, SDL_PIXELFORMAT_RGBA32);
+	if (fs) {
+		SDL_Rect srect = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+		SDL_FillRect(fs, nullptr, 0);
+		const SDL_BlendMode prev = SDL_BLENDMODE_NONE;
+		SDL_GetSurfaceBlendMode(mSurface, const_cast<SDL_BlendMode *>(&prev));
+		SDL_SetSurfaceBlendMode(mSurface, SDL_BLENDMODE_NONE); // copy pixels incl. alpha
+		SDL_BlitSurface(mSurface, &srect, fs, nullptr);
+		SDL_SetSurfaceBlendMode(mSurface, prev);
+		tex = SDL_CreateTextureFromSurface(TheRenderer, fs);
+		if (tex) {
+			SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+		}
+		SDL_FreeSurface(fs);
+	}
+	mHudFrameTex[frame] = tex; // cache (even null) to avoid rebuild attempts each frame
+	return tex;
 }
 
 /**
@@ -808,6 +871,7 @@ void CGraphic::DrawFrameX(unsigned frame, int x, int y,
 	SDL_Rect srect = {frameFlip_map[frame].x, frameFlip_map[frame].y, Uint16(Width), Uint16(Height)};
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
 
+	MarkOverlayDirty(surface);
 	SDL_BlitSurface(SurfaceFlip, &srect, surface, &drect);
 }
 
@@ -859,6 +923,7 @@ void CGraphic::DrawFrameClipX(unsigned frame, int x, int y,
 
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
 
+	MarkOverlayDirty(surface);
 	SDL_BlitSurface(SurfaceFlip, &srect, surface, &drect);
 }
 
@@ -875,6 +940,7 @@ void CGraphic::DrawFrameTransX(unsigned frame, int x, int y, int alpha,
 	SDL_GetSurfaceAlphaMod(SurfaceFlip, &oldalpha);
 
 	SDL_SetSurfaceAlphaMod(SurfaceFlip, alpha);
+	MarkOverlayDirty(surface);
 	SDL_BlitSurface(SurfaceFlip, &srect, surface, &drect);
 	SDL_SetSurfaceAlphaMod(SurfaceFlip, oldalpha);
 }
@@ -909,6 +975,7 @@ void CGraphic::DrawFrameClipTransX(unsigned frame, int x, int y, int alpha,
 	SDL_GetSurfaceAlphaMod(SurfaceFlip, &oldalpha);
 
 	SDL_SetSurfaceAlphaMod(SurfaceFlip, alpha);
+	MarkOverlayDirty(surface);
 	SDL_BlitSurface(SurfaceFlip, &srect, surface, &drect);
 	SDL_SetSurfaceAlphaMod(SurfaceFlip, oldalpha);
 }
