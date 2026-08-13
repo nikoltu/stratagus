@@ -262,8 +262,11 @@ struct Settings {
 
 	std::uint32_t getBitfield() const
 	{
+		// UserGameSettings is a 26-bit field that promotes to signed int; shifting its high bits left
+		// by 6 would overflow int (undefined behaviour). Shift it as unsigned so the result is defined.
 		return NoFogOfWar | (Inside << 1) | (AiExplores << 2) | (SimplifiedAutoTargeting << 3)
-		     | (AiChecksDependencies << 4) | (AllyDepositsAllowed << 5) | (UserGameSettings << 6);
+		     | (AiChecksDependencies << 4) | (AllyDepositsAllowed << 5)
+		     | (static_cast<std::uint32_t>(UserGameSettings) << 6);
 	}
 	void setBitfield(std::uint32_t bitfield)
 	{
