@@ -42,4 +42,9 @@ int PresentationControlCount(const std::string &screenId);
 /// A control field: "id", "group", "kind", "config_key", "label", "evidence_grade". "" when absent.
 std::string PresentationControlField(const std::string &screenId, int order, const std::string &field);
 
+/// Number of value options for an enum/dropdown control (0 for a plain control).
+int PresentationControlValueCount(const std::string &screenId, int order);
+/// The `index`-th value-option string key of a control, or "" when out of range.
+std::string PresentationControlValue(const std::string &screenId, int order, int index);
+
 #endif // __CONTENT_PRESENTATION_H__

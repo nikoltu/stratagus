@@ -124,15 +124,48 @@ int PresentationControlCount(const std::string &screenId)
 	return controls ? static_cast<int>(controls->items().size()) : 0;
 }
 
-std::string PresentationControlField(const std::string &screenId, int order, const std::string &field)
+namespace
+{
+
+const content::JsonValue *control(const std::string &screenId, int order)
 {
 	const content::JsonValue *node = screen(screenId);
 	if (!node) {
-		return std::string();
+		return nullptr;
 	}
 	const content::JsonValue *controls = node->find("controls");
 	if (!controls || order < 0 || order >= static_cast<int>(controls->items().size())) {
+		return nullptr;
+	}
+	return &controls->items()[static_cast<size_t>(order)];
+}
+
+} // namespace
+
+std::string PresentationControlField(const std::string &screenId, int order, const std::string &field)
+{
+	return fieldString(control(screenId, order), field);
+}
+
+int PresentationControlValueCount(const std::string &screenId, int order)
+{
+	const content::JsonValue *node = control(screenId, order);
+	if (!node) {
+		return 0;
+	}
+	const content::JsonValue *values = node->find("values");
+	return values ? static_cast<int>(values->items().size()) : 0;
+}
+
+std::string PresentationControlValue(const std::string &screenId, int order, int index)
+{
+	const content::JsonValue *node = control(screenId, order);
+	if (!node) {
 		return std::string();
 	}
-	return fieldString(&controls->items()[static_cast<size_t>(order)], field);
+	const content::JsonValue *values = node->find("values");
+	if (!values || index < 0 || index >= static_cast<int>(values->items().size())) {
+		return std::string();
+	}
+	return values->items()[static_cast<size_t>(index)].asString();
 }

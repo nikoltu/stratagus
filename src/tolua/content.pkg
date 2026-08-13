@@ -8,3 +8,5 @@ std::string PresentationScreenId(int index);
 std::string PresentationScreenField(const std::string screenId, const std::string field);
 int PresentationControlCount(const std::string screenId);
 std::string PresentationControlField(const std::string screenId, int order, const std::string field);
+int PresentationControlValueCount(const std::string screenId, int order);
+std::string PresentationControlValue(const std::string screenId, int order, int index);
