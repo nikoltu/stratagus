@@ -45,6 +45,7 @@ class CPreference
 	unsigned int ShowNameDelay;
 	unsigned int ShowNameTime;
 	unsigned int AutosaveMinutes;
+	int HealthBarMode;
 
 	CGraphicPtr IconFrameG;
 	CGraphicPtr PressedIconFrameG;

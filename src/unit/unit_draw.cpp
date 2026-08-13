@@ -642,6 +642,17 @@ static void DrawDecoration(const CUnit &unit, const CUnitType &type, const Pixel
 		const int max = unit.Variable[var.Index].Max;
 		Assert(value <= max);
 
+		// Global health-bar visibility preference gates only the HP bar (never, or only when
+		// the unit is not at full health); other decorations are unaffected.
+		if (var.Index == HP_INDEX) {
+			if (Preference.HealthBarMode == 1) {
+				continue;
+			}
+			if (Preference.HealthBarMode == 2 && value == max) {
+				continue;
+			}
+		}
+
 		if (!((value == 0 && !var.ShowWhenNull) || (value == max && !var.ShowWhenMax)
 			  || (var.HideHalf && value != 0 && value != max)
 			  || (!var.ShowIfNotEnable && !unit.Variable[var.Index].Enable)
