@@ -1381,14 +1381,18 @@ void CGraphic::Load(bool grayscale)
 	Assert(Width <= GetGraphicWidth() && Height <= GetGraphicHeight());
 
 	if (GetGraphicWidth() % Width != 0 || GetGraphicHeight() % Height != 0) {
+		// A wrong-sized asset must not be fatal (mirrors the missing-graphic placeholder policy):
+		// when the image does not tile evenly into the declared frame, fall back to treating the
+		// whole image as a single frame so it still loads instead of aborting startup.
 		ErrorPrint("Invalid graphic (width, height) '%s'\n"
-		           "Expected: (%d,%d)  Found: (%d,%d)\n",
+		           "Expected: (%d,%d)  Found: (%d,%d); using the whole image as one frame\n",
 		           File.u8string().c_str(),
 		           Width,
 		           Height,
 		           GetGraphicWidth(),
 		           GetGraphicHeight());
-		ExitFatal(-1);
+		Width = GetGraphicWidth();
+		Height = GetGraphicHeight();
 	}
 
 	NumFrames = GetGraphicWidth() / Width * GetGraphicHeight() / Height;
