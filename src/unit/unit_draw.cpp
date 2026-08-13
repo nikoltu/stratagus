@@ -662,9 +662,13 @@ static void DrawDecoration(const CUnit &unit, const CUnitType &type, const Pixel
 			  || (ThisPlayer->IsAllied(unit) && (unit.Player != ThisPlayer) && var.HideAllied)
 			  || var.BoolFlagMatches(type)
 			  || max == 0)) {
+			// Health-bar location preference relocates only the HP bar to below the unit's box.
+			const int locationDy =
+				(var.Index == HP_INDEX && Preference.HealthBarLocation == 1) ? unit.Type->BoxHeight : 0;
 			var.Draw(
 				x + var.Offset.x + var.OffsetPercent.x * unit.Type->TileWidth * PixelTileSize.x / 100,
-				y + var.Offset.y + var.OffsetPercent.y * unit.Type->TileHeight * PixelTileSize.y / 100,
+				y + var.Offset.y + var.OffsetPercent.y * unit.Type->TileHeight * PixelTileSize.y / 100
+					+ locationDy,
 				type, unit.Variable[var.Index]);
 		}
 	}

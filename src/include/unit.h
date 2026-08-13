@@ -477,6 +477,7 @@ public:
 	int ShowNameDelay = 0;      /// How many cycles need to wait until unit's name popup will appear.
 	int ShowNameTime = 0;       /// How many cycles need to show unit's name popup.
 	int HealthBarMode = 0;      /// Health-bar visibility: 0 = always, 1 = never, 2 = only when not full.
+	int HealthBarLocation = 0;  /// Health-bar placement: 0 = above the unit, 1 = below the unit's box.
 	int AutosaveMinutes = 5;    /// Autosave the game every X minutes; autosave is disabled if the value is 0
 	std::shared_ptr<CGraphic> IconFrameG;
 	std::shared_ptr<CGraphic> PressedIconFrameG;
