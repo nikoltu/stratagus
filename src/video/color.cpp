@@ -95,6 +95,11 @@ const SDL_Color *PaletteSwap::GetColorsForPercentAndAlternative(unsigned int val
 	if (max == 0) {
 		return Colors.data();
 	}
+	// value is a fraction of max; a value above max (e.g. a unit whose variable exceeds its maximum)
+	// would push step past Steps-1 and index out of Colors, so SDL would read colours out of bounds.
+	if (value > max) {
+		value = max;
+	}
 	unsigned int step = (this->Steps - 1) * value / max;
 	unsigned char alternative = alt % AlternativesCount;
 
