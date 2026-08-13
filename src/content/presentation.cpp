@@ -94,6 +94,11 @@ std::string PresentationFidelityProfile()
 	return g_contentSet.fidelityProfile();
 }
 
+std::string PresentationOracleSchema()
+{
+	return g_contentSet.oracleSchema();
+}
+
 int PresentationPackCount()
 {
 	return static_cast<int>(g_contentSet.packs().size());

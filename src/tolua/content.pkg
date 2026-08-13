@@ -4,6 +4,7 @@
 
 bool PresentationLoaded();
 std::string PresentationFidelityProfile();
+std::string PresentationOracleSchema();
 int PresentationPackCount();
 int PresentationControlTotal();
 int PresentationScreenCount();
