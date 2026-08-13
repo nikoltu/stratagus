@@ -19,6 +19,7 @@
 
 #include "importer.h"
 
+#include "content_set.h"
 #include "sha256.h"
 
 #include <cstdio>
@@ -155,15 +156,23 @@ bool RunFirstRunImport(const std::string &cacheDir, const std::string &sourceRoo
 	// Pipeline hook: with no validated set present, bootstrap a minimal but schema-valid content
 	// set from the engine's built-in default so the next boot is content-ready. Fuller packs
 	// (original-derived) are produced by the offline compiler and override this when present.
-	if (writeBuiltinContentSet(cacheDir)) {
-		fprintf(stderr,
-		        "content: first-run import wrote a built-in minimal content set to %s "
-		        "(source under %s); it will load on the next start\n",
-		        cacheDir.c_str(), sourceRoot.c_str());
-		return true;
+	if (!writeBuiltinContentSet(cacheDir)) {
+		fprintf(stderr, "content: first-run import could not write a content set to %s\n", cacheDir.c_str());
+		return false;
 	}
-	fprintf(stderr, "content: first-run import could not write a content set to %s\n", cacheDir.c_str());
-	return false;
+	// Self-verify the emitted set: it must load cleanly (schema, per-pack SHA-256, JSON) before we
+	// rely on it. This turns a botched emit into a clear failure now rather than a bad boot later.
+	ContentSet check;
+	if (!check.load(cacheDir + "/content-set.json")) {
+		fprintf(stderr, "content: first-run import wrote an invalid content set to %s (%s)\n",
+		        cacheDir.c_str(), check.error().c_str());
+		return false;
+	}
+	fprintf(stderr,
+	        "content: first-run import wrote a built-in minimal content set to %s "
+	        "(%zu pack(s), verified; source under %s); it will load on the next start\n",
+	        cacheDir.c_str(), check.packs().size(), sourceRoot.c_str());
+	return true;
 }
 
 const char *ToString(FirstRunAction action)
