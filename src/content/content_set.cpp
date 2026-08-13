@@ -113,6 +113,11 @@ bool ContentSet::load(const std::string &contentSetJsonPath)
 		if (pack.name.empty() || pack.path.empty() || pack.sha256.empty()) {
 			return fail("pack entry missing name/path/sha256");
 		}
+		// A duplicate name would silently shadow the earlier pack (findPack returns the first); reject
+		// it so a malformed manifest is a clear error rather than an ambiguous lookup.
+		if (findPack(pack.name)) {
+			return fail("duplicate pack name '" + pack.name + "'");
+		}
 
 		std::string packText;
 		if (!readFile(root / pack.path, packText)) {
