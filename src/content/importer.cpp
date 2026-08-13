@@ -19,8 +19,12 @@
 
 #include "importer.h"
 
+#include "sha256.h"
+
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <system_error>
 
 namespace content
@@ -63,6 +67,76 @@ bool sourcePresent(const std::string &sourceRoot)
 	return false;
 }
 
+// The engine's built-in minimal presentation pack: a small set of option screens whose controls are
+// genuinely backed by engine settings (speed and volume sliders). This is a documented last-resort
+// default, NOT original-derived data; it exists so a first run can produce a bootable content set.
+const char *const kBuiltinPresentation =
+	"{\n"
+	"  \"generator\": \"engine-builtin-minimal/1\",\n"
+	"  \"screens\": [\n"
+	"    {\n"
+	"      \"id\": \"options_speeds\",\n"
+	"      \"title\": \"Speed Settings\",\n"
+	"      \"controls\": [\n"
+	"        { \"id\": \"game_speed\", \"kind\": \"slider\" },\n"
+	"        { \"id\": \"mouse_scroll\", \"kind\": \"slider\" },\n"
+	"        { \"id\": \"key_scroll\", \"kind\": \"slider\" }\n"
+	"      ]\n"
+	"    },\n"
+	"    {\n"
+	"      \"id\": \"options_sound\",\n"
+	"      \"title\": \"Sound\",\n"
+	"      \"controls\": [\n"
+	"        { \"id\": \"music_volume\", \"kind\": \"slider\" },\n"
+	"        { \"id\": \"sfx_volume\", \"kind\": \"slider\" }\n"
+	"      ]\n"
+	"    }\n"
+	"  ]\n"
+	"}\n";
+
+// Write text to path, creating parent directories. Returns false on any I/O error.
+bool writeFile(const std::filesystem::path &path, const std::string &text)
+{
+	std::error_code ec;
+	std::filesystem::create_directories(path.parent_path(), ec);
+	std::ofstream out(path, std::ios::binary | std::ios::trunc);
+	if (!out) {
+		return false;
+	}
+	out.write(text.data(), static_cast<std::streamsize>(text.size()));
+	return static_cast<bool>(out);
+}
+
+// Emit a minimal but schema-valid content set (manifest + presentation pack) into `cacheDir`.
+// The manifest references the pack by its exact SHA-256 so a subsequent load self-verifies.
+bool writeBuiltinContentSet(const std::string &cacheDir)
+{
+	const std::filesystem::path root(cacheDir);
+	const std::string packText = kBuiltinPresentation;
+	if (!writeFile(root / "oracle" / "presentation.json", packText)) {
+		return false;
+	}
+
+	const std::string sha = Sha256Hex(packText);
+	std::string manifest;
+	manifest += "{\n";
+	manifest += "  \"schema\": \"content-set/1\",\n";
+	manifest += "  \"fidelity_profile\": \"ENGINE_BUILTIN_MINIMAL\",\n";
+	manifest += "  \"oracle_schema\": \"builtin\",\n";
+	manifest += "  \"packs\": [\n";
+	manifest += "    {\n";
+	manifest += "      \"pack\": \"presentation\",\n";
+	manifest += "      \"path\": \"oracle/presentation.json\",\n";
+	manifest += "      \"schema\": \"presentation/1\",\n";
+	manifest += "      \"sha256\": \"" + sha + "\",\n";
+	manifest += "      \"bytes\": " + std::to_string(packText.size()) + "\n";
+	manifest += "    }\n";
+	manifest += "  ]\n";
+	manifest += "}\n";
+
+	return writeFile(root / "content-set.json", manifest);
+}
+
 } // namespace
 
 FirstRunAction EvaluateFirstRun(bool contentReady, const std::string &sourceRoot)
@@ -78,13 +152,17 @@ FirstRunAction EvaluateFirstRun(bool contentReady, const std::string &sourceRoot
 
 bool RunFirstRunImport(const std::string &cacheDir, const std::string &sourceRoot)
 {
-	// Pipeline hook: owned source -> validated content set. In-engine generation is not yet
-	// implemented; the offline pack compiler currently produces the cache. Report honestly and
-	// leave the cache untouched so a subsequent boot re-evaluates cleanly once a set is present.
-	fprintf(stderr,
-	        "content: first-run import hook reached (source under %s -> cache %s); "
-	        "in-engine generation not yet available -- provision the content set to proceed\n",
-	        sourceRoot.c_str(), cacheDir.c_str());
+	// Pipeline hook: with no validated set present, bootstrap a minimal but schema-valid content
+	// set from the engine's built-in default so the next boot is content-ready. Fuller packs
+	// (original-derived) are produced by the offline compiler and override this when present.
+	if (writeBuiltinContentSet(cacheDir)) {
+		fprintf(stderr,
+		        "content: first-run import wrote a built-in minimal content set to %s "
+		        "(source under %s); it will load on the next start\n",
+		        cacheDir.c_str(), sourceRoot.c_str());
+		return true;
+	}
+	fprintf(stderr, "content: first-run import could not write a content set to %s\n", cacheDir.c_str());
 	return false;
 }
 
