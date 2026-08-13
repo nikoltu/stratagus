@@ -1959,7 +1959,7 @@ static int CclDefineDecorations(lua_State *l)
 		bool HideAllied = false;
 		bool ShowOpponent = false;
 		bool BoolFlagInvert = false;
-		int BoolFlag = 0;
+		int BoolFlag = -1;
 	} tmp;
 
 	const int nargs = lua_gettop(l);
@@ -1967,6 +1967,9 @@ static int CclDefineDecorations(lua_State *l)
 		Assert(lua_istable(l, i + 1));
 		std::unique_ptr<CDecoVar> decovar;
 		memset(&tmp, 0, sizeof(tmp));
+		// A decoration with no explicit bool-flag must not filter on one; -1 is the "no flag"
+		// sentinel (memset would otherwise leave it at flag index 0, hiding e.g. the health bar).
+		tmp.BoolFlag = -1;
 		lua_pushnil(l);
 		while (lua_next(l, i + 1)) {
 			std::string_view key = LuaToString(l, -2);
