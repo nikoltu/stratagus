@@ -3,6 +3,7 @@
 // (ARC-003: Lua identifies logical assets, not machine paths).
 
 bool PresentationLoaded();
+std::string PresentationFidelityProfile();
 int PresentationPackCount();
 int PresentationControlTotal();
 int PresentationScreenCount();

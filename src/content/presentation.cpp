@@ -89,6 +89,11 @@ bool PresentationLoaded()
 	return g_presentation != nullptr;
 }
 
+std::string PresentationFidelityProfile()
+{
+	return g_contentSet.fidelityProfile();
+}
+
 int PresentationPackCount()
 {
 	return static_cast<int>(g_contentSet.packs().size());

@@ -31,6 +31,8 @@
 bool LoadContentSet(const std::string &cacheDir);
 
 bool PresentationLoaded();
+/// Fidelity profile of the loaded content set (e.g. "PC_REMASTERED_REFERENCE"), or "" when none.
+std::string PresentationFidelityProfile();
 /// Number of packs in the loaded content set (0 when none loaded).
 int PresentationPackCount();
 int PresentationScreenCount();
