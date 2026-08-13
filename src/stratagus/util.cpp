@@ -463,6 +463,9 @@ int UTF8GetNext(std::string_view text, int curpos)
 	if ((c & 0xF0) == 0xE0) {
 		return curpos + 3;
 	}
+	if ((c & 0xF8) == 0xF0) {
+		return curpos + 4;
+	}
 	ErrorPrint("Invalid UTF8.\n");
 	return text.size();
 }
