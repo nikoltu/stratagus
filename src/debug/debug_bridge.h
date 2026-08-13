@@ -25,6 +25,7 @@
 
 //@{
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,12 @@ void DebugBridge_Init();
 /// Call once per rendered frame from the main loop. Cheap: mostly a throttled stat.
 void DebugBridge_Poll();
 
+/// Record a fatal C++ exception (kind + what()) plus a backtrace to crash.txt and logcat.
+/// Call from the top-level catch blocks BEFORE terminating: on Android an uncaught exception
+/// unwinds and _Exit()s with no signal, so the signal handler never runs and crash.txt would
+/// otherwise be empty. This captures the one path that actually reaches CrashExit.
+void DebugBridge_RecordFatal(const char *kind, const char *what);
+
 /// Lightweight description of a loaded CGraphic, filled by the video module so the
 /// `assets` command can enumerate the existing (file-scope) graphic registry without
 /// exposing its internals here. Implemented in src/video/graphic.cpp.
@@ -59,6 +66,29 @@ struct DebugGraphicInfo {
 	int numFrames = 0;
 };
 void DebugBridge_CollectGraphics(std::vector<DebugGraphicInfo> &out);
+
+/*----------------------------------------------------------------------------
+--  Main-loop watchdog
+----------------------------------------------------------------------------*/
+
+// A background thread samples a heartbeat that the main loop bumps at labelled
+// checkpoints. If the heartbeat stops advancing (main thread wedged) it logs the
+// last checkpoint to logcat + crash.txt. This catches a silent hang that raises
+// no signal and throws no C++ exception (an ANR that Android just kills), telling
+// us WHERE the main thread stuck instead of leaving crash.txt empty.
+extern std::atomic<const char *> DbgCheckpoint;   /// last checkpoint label (string literal)
+extern std::atomic<unsigned long> DbgHeartbeat;   /// bumped at every checkpoint
+
+inline void DebugBridge_Checkpoint(const char *label)
+{
+	DbgCheckpoint.store(label, std::memory_order_relaxed);
+	DbgHeartbeat.fetch_add(1, std::memory_order_relaxed);
+}
+
+#define DBG_CHECKPOINT(label) DebugBridge_Checkpoint(label)
+
+/// Launch the watchdog thread (idempotent). Called from DebugBridge_Init.
+void DebugBridge_StartWatchdog();
 
 //@}
 

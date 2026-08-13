@@ -851,6 +851,7 @@ try {
 		        "and tell us what caused this bug to occur.\n"
 		        " === exception state traceback === \n");
 	ErrorPrint("%s", e.what());
+	DebugBridge_RecordFatal("std::exception", e.what());
 	CrashExit();
 }
 catch (const gcn::Exception &ex) {
@@ -864,6 +865,11 @@ catch (const gcn::Exception &ex) {
 	           ex.getLine(),
 	           ex.getFunction().c_str(),
 	           ex.getMessage().c_str());
+	{
+		std::string msg = ex.getFilename() + ":" + std::to_string(ex.getLine())
+		                + " (" + ex.getFunction() + "): " + ex.getMessage();
+		DebugBridge_RecordFatal("gcn::Exception", msg.c_str());
+	}
 	CrashExit();
 }
 catch (...) {
@@ -872,6 +878,7 @@ catch (...) {
 	           "https://github.com/Wargus/stratagus/issues\n"
 	           "and tell us what caused this bug to occur.\n"
 	           " === exception state traceback === \n");
+	DebugBridge_RecordFatal("unknown", "non-standard exception (catch ...)");
 	CrashExit();
 }
 //@}

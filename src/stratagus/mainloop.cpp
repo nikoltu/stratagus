@@ -37,6 +37,7 @@
 #include "stratagus.h"
 
 #include "actions.h"
+#include "debug_bridge.h"
 #include "editor.h"
 #include "fow.h"
 #include "game.h"
@@ -191,6 +192,7 @@ void UpdateDisplay()
 	// clears the GPU backbuffer to opaque black; the GPU world layers (tiles/units) are then
 	// drawn on top of that clear during DrawMapArea, and the CPU overlay (TheScreen) is copied
 	// over them in RealizeVideoMemory. Idempotent per frame.
+	DBG_CHECKPOINT("UpdateDisplay:begin");
 	FrameProfBegin(FP_BEGINFRAME);
 	BeginFrame();
 	FrameProfEnd(FP_BEGINFRAME);
@@ -361,6 +363,7 @@ void UpdateDisplay()
 	FrameProfBegin(FP_HUD_GUICHAN);
 	DrawPieMenu(); // draw pie menu only if needed
 
+	DBG_CHECKPOINT("UpdateDisplay:guichan");
 	DrawGuichanWidgets();
 	FrameProfEnd(FP_HUD_GUICHAN);
 
@@ -375,9 +378,11 @@ void UpdateDisplay()
 	//
 	// Update changes to display.
 	//
+	DBG_CHECKPOINT("UpdateDisplay:invalidate");
 	FrameProfBegin(FP_INVALIDATE);
 	Invalidate();
 	FrameProfEnd(FP_INVALIDATE);
+	DBG_CHECKPOINT("UpdateDisplay:done");
 }
 
 static void InitGameCallbacks()
@@ -488,6 +493,7 @@ static void PerFrameHousekeeping()
 	ParticleManager.update(); // handle particles
 
 	if (FastForwardCycle <= GameCycle || !(GameCycle & CallPeriod::cEvery256th)) {
+		DBG_CHECKPOINT("WaitEventsOneFrame");
 		WaitEventsOneFrame();
 	}
 
@@ -502,6 +508,7 @@ static void PerFrameHousekeeping()
 
 static void DisplayLoop()
 {
+	DBG_CHECKPOINT("DisplayLoop");
 	/* update only if viewmode changed */
 	CheckViewportMode();
 
@@ -536,6 +543,7 @@ static void DisplayLoop()
 		UpdateDisplay();
 		FrameProfEnd(FP_UPDATEDISPLAY);
 
+		DBG_CHECKPOINT("RealizeVideoMemory");
 		FrameProfBegin(FP_REALIZE);
 		RealizeVideoMemory();
 		FrameProfEnd(FP_REALIZE);

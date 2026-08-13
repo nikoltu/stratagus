@@ -34,6 +34,7 @@
 #include "map.h"
 #include "parameters.h"
 #include "player.h"
+#include "script.h"
 #include "settings.h"
 #include "tile.h"
 #include "ui.h"
@@ -46,30 +47,37 @@
 #include <guisan.hpp>
 #include <guisan/widgets/label.hpp>
 
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #include <csignal>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <cstdint>
 
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#include <unwind.h>   // _Unwind_Backtrace: works at Android API24 (backtrace() does not)
+#include <dlfcn.h>    // dladdr: module + nearest symbol resolution, available on Android
 #endif
 
-// Android ships <execinfo.h> in the sysroot but backtrace()/backtrace_symbols_fd() are only
-// declared/available at API >= 33; this build targets API 24, so exclude Android (the system's
-// debuggerd/tombstone provides the native backtrace on crash regardless — the handler here just
-// records signal + frameCounter + gameCycle to a pullable file).
-#if __has_include(<execinfo.h>) && !defined(__ANDROID__)
-#include <execinfo.h>
-#define DBG_HAVE_EXECINFO 1
+#ifdef __ANDROID__
+#include <android/log.h>
+#define DBG_LOG_TAG "WargusHD"
 #endif
+
+// backtrace()/backtrace_symbols_fd() are only available at Android API >= 33 (this build targets
+// API 24), so the crash handler uses <unwind.h> _Unwind_Backtrace + dladdr instead (both work at
+// API 24) to resolve frames to module + offset + nearest symbol.
 
 // The guichan top widget (current MenuScreen / game / editor container).
 extern std::unique_ptr<gcn::Gui> Gui;
@@ -88,6 +96,10 @@ static fs::path DbgStatFile;  /// wdbg/status.json
 // The crash handler must be async-signal-safe-ish, so it cannot touch fs::path
 // (allocations). Cache the crash file path as a plain C string up front.
 static char DbgCrashPath[4096] = {0};
+
+// Watchdog heartbeat (see debug_bridge.h). File scope so the header extern binds here.
+std::atomic<const char *> DbgCheckpoint{"init"};
+std::atomic<unsigned long> DbgHeartbeat{0};
 
 /*----------------------------------------------------------------------------
 --  Frame profiler (see frame_profiler.h)
@@ -617,6 +629,30 @@ std::string CmdBuild(const std::vector<std::string> &tok)
 	return InjectorResult(true, "build ordered", (long)UnitNumber(*worker));
 }
 
+// Evaluate an arbitrary Lua chunk on the engine's Lua state. A UI-testing lever: lets a menu
+// screen be opened directly (e.g. `lua RunCampaignSubmenu("campaigns/...")`) without touch
+// navigation, so any window can be reached + screenshotted from the bridge. Debug tool only.
+std::string CmdLua(const std::string &code)
+{
+	if (code.empty()) return InjectorResult(false, "usage: lua <chunk>");
+	if (!Lua) return InjectorResult(false, "no lua state");
+	const int base = lua_gettop(Lua);
+	if (luaL_loadstring(Lua, code.c_str()) != 0 || lua_pcall(Lua, 0, LUA_MULTRET, 0) != 0) {
+		const char *err = lua_tostring(Lua, -1);
+		std::string e = err ? err : "lua error";
+		lua_settop(Lua, base);
+		return InjectorResult(false, "lua error: " + e);
+	}
+	// Report the first return value (if any) as the message, so `lua return X` is inspectable.
+	std::string ret = "ok";
+	if (lua_gettop(Lua) > base) {
+		const char *s = lua_tostring(Lua, base + 1);
+		if (s) ret = s;
+	}
+	lua_settop(Lua, base);
+	return InjectorResult(true, ret);
+}
+
 std::string CmdTrain(const std::vector<std::string> &tok)
 {
 	if (!InjectorGameReady()) return InjectorResult(false, "no game");
@@ -932,6 +968,11 @@ std::string Dispatch(const std::string &cmdline)
 	if (verb == "pcolor")    return CmdPColor(Tokenize(line));
 	// --- HUD layout dump ---
 	if (verb == "hud")       return CmdHud();
+	// --- arbitrary Lua eval (UI testing: open any menu without touch navigation) ---
+	if (verb == "lua") {
+		std::string code = (sp != std::string::npos) ? line.substr(sp + 1) : "";
+		return CmdLua(code);
+	}
 	Json j;
 	j.ch('{');
 	j.str("error", "unknown command");
@@ -989,8 +1030,89 @@ void RawWriteInt(int fd, long v)
 }
 void RawWrite(int fd, const char *s) { (void)!write(fd, s, std::strlen(s)); }
 
-void CrashHandler(int sig)
+// Async-signal-safe "0x..." hex writer.
+void RawWriteHex(int fd, unsigned long v)
 {
+	char buf[2 + sizeof(unsigned long) * 2];
+	int i = sizeof(buf);
+	static const char hex[] = "0123456789abcdef";
+	if (v == 0) { buf[--i] = '0'; }
+	while (v && i > 1) { buf[--i] = hex[v & 0xF]; v >>= 4; }
+	buf[--i] = 'x';
+	buf[--i] = '0';
+	(void)!write(fd, buf + i, sizeof(buf) - i);
+}
+
+// Per-frame sink for _Unwind_Backtrace. Resolves module + nearest symbol via dladdr and
+// writes one line per frame:  #NN 0x<pc> <module>+0x<off> <symbol>+0x<symoff>
+struct BtState {
+	int fd;
+	int count;
+	int max;
+};
+
+_Unwind_Reason_Code BtCallback(struct _Unwind_Context *ctx, void *arg)
+{
+	BtState *st = (BtState *)arg;
+	if (st->count >= st->max) { return _URC_END_OF_STACK; }
+	const uintptr_t pc = (uintptr_t)_Unwind_GetIP(ctx);
+	if (pc == 0) { return _URC_END_OF_STACK; }
+
+	RawWrite(st->fd, "  #");
+	RawWriteInt(st->fd, st->count);
+	RawWrite(st->fd, " ");
+	RawWriteHex(st->fd, (unsigned long)pc);
+
+	Dl_info info;
+	std::memset(&info, 0, sizeof(info));
+	// dladdr is not strictly async-signal-safe, but the process is already dying and this is
+	// the only way to turn a raw PC into a module+symbol offline. Best-effort.
+	if (dladdr((void *)pc, &info) && info.dli_fname) {
+		RawWrite(st->fd, " ");
+		RawWrite(st->fd, info.dli_fname);
+		if (info.dli_fbase) {
+			RawWrite(st->fd, "+");
+			RawWriteHex(st->fd, (unsigned long)(pc - (uintptr_t)info.dli_fbase));
+		}
+		if (info.dli_sname) {
+			RawWrite(st->fd, " ");
+			RawWrite(st->fd, info.dli_sname);
+			RawWrite(st->fd, "+");
+			RawWriteHex(st->fd, (unsigned long)(pc - (uintptr_t)info.dli_saddr));
+		}
+#ifdef __ANDROID__
+		__android_log_print(ANDROID_LOG_ERROR, DBG_LOG_TAG, "  #%d %p %s+0x%lx %s",
+			st->count, (void *)pc, info.dli_fname,
+			(unsigned long)(pc - (uintptr_t)info.dli_fbase),
+			info.dli_sname ? info.dli_sname : "?");
+#endif
+	}
+	RawWrite(st->fd, "\n");
+	st->count++;
+	return _URC_NO_REASON;
+}
+
+// Shared writer: dump a header + unwound frames to fd. Used by the signal handler and by the
+// C++ fatal-exception recorder (which is the path that actually reaches CrashExit on Android:
+// an uncaught gcn::Exception / std::exception unwinds to stratagusMain and _Exit()s, so NO
+// signal fires and the signal handler below never runs -- crash.txt would otherwise stay empty).
+void DumpFramesToFd(int fd)
+{
+	RawWrite(fd, "\nframeCounter=");
+	RawWriteInt(fd, (long)FrameCounter);
+	RawWrite(fd, "\ngameCycle=");
+	RawWriteInt(fd, (long)GameCycle);
+	RawWrite(fd, "\nbacktrace:\n");
+	BtState st{fd, 0, 48};
+	_Unwind_Backtrace(BtCallback, &st);
+	if (st.count == 0) {
+		RawWrite(fd, "  (unwind produced no frames)\n");
+	}
+}
+
+void CrashHandler(int sig, siginfo_t *info, void *ucontext)
+{
+	(void)ucontext;
 	// Use only low-level, mostly async-signal-safe calls. Best-effort readable dump.
 	int fd = open(DbgCrashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd >= 0) {
@@ -998,23 +1120,20 @@ void CrashHandler(int sig)
 		RawWrite(fd, SignalName(sig));
 		RawWrite(fd, " (");
 		RawWriteInt(fd, sig);
-		RawWrite(fd, ")\nts=");
+		RawWrite(fd, ")\nfaultAddr=");
+		RawWriteHex(fd, info ? (unsigned long)(uintptr_t)info->si_addr : 0UL);
+		RawWrite(fd, "\nts=");
 		RawWriteInt(fd, (long)time(nullptr));
-		RawWrite(fd, "\nframeCounter=");
-		RawWriteInt(fd, (long)FrameCounter);
-		RawWrite(fd, "\ngameCycle=");
-		RawWriteInt(fd, (long)GameCycle);
-		RawWrite(fd, "\nbacktrace:\n");
-#ifdef DBG_HAVE_EXECINFO
-		void *frames[64];
-		int n = backtrace(frames, 64);
-		backtrace_symbols_fd(frames, n, fd);
-#else
-		RawWrite(fd, "(no execinfo available on this platform)\n");
-#endif
+		DumpFramesToFd(fd);
 		fsync(fd);
 		close(fd);
 	}
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, DBG_LOG_TAG,
+		"FATAL %s (%d) faultAddr=%p frame=%ld cycle=%ld -> frames follow (also in %s)",
+		SignalName(sig), sig, info ? info->si_addr : nullptr,
+		(long)FrameCounter, (long)GameCycle, DbgCrashPath);
+#endif
 	// Restore default disposition and re-raise so the process still dies normally.
 	signal(sig, SIG_DFL);
 	raise(sig);
@@ -1024,9 +1143,9 @@ void InstallCrashHandlers()
 {
 	struct sigaction sa;
 	std::memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = CrashHandler;
+	sa.sa_sigaction = CrashHandler;
 	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
+	sa.sa_flags = SA_RESTART | SA_SIGINFO;
 	sigaction(SIGSEGV, &sa, nullptr);
 	sigaction(SIGABRT, &sa, nullptr);
 #ifdef SIGBUS
@@ -1043,11 +1162,103 @@ void InstallCrashHandlers()
 }
 #endif
 
+/*----------------------------------------------------------------------------
+--  Main-loop watchdog thread
+----------------------------------------------------------------------------*/
+
+static std::atomic<bool> WatchdogStarted{false};
+
+// Sample the heartbeat once a second. When it stops advancing the main thread is
+// wedged (silent hang: no signal, no exception). Log the last checkpoint to logcat
+// and rewrite crash.txt with it, so an on-device ANR that Android kills still tells
+// us WHERE it stuck. A working modal menu still bumps checkpoints (its loop runs
+// UpdateDisplay), so it does not false-trigger.
+void WatchdogThreadMain()
+{
+	unsigned long lastBeat = DbgHeartbeat.load(std::memory_order_relaxed);
+	int stalledSec = 0;
+	int lastReported = 0;
+	for (;;) {
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		const unsigned long beat = DbgHeartbeat.load(std::memory_order_relaxed);
+		if (beat != lastBeat) {
+			lastBeat = beat;
+			stalledSec = 0;
+			lastReported = 0;
+			continue;
+		}
+		// Heartbeat frozen for >= 1s: main loop has not crossed a checkpoint.
+		++stalledSec;
+		if (stalledSec >= 3 && stalledSec != lastReported) {
+			lastReported = stalledSec;
+			const char *cp = DbgCheckpoint.load(std::memory_order_relaxed);
+			if (!cp) { cp = "?"; }
+#ifdef __ANDROID__
+			__android_log_print(ANDROID_LOG_ERROR, DBG_LOG_TAG,
+				"WATCHDOG: main loop STALLED %ds at checkpoint '%s' (frame=%ld cycle=%ld paused=%d)",
+				stalledSec, cp, (long)FrameCounter, (long)GameCycle, (int)GamePaused);
+#endif
+			if (DbgCrashPath[0]) {
+				FILE *f = std::fopen(DbgCrashPath, "wb");
+				if (f) {
+					std::fprintf(f,
+						"signal=none (WATCHDOG STALL)\ncheckpoint=%s\nstalledSec=%d\n"
+						"frameCounter=%ld\ngameCycle=%ld\npaused=%d\nts=%ld\n",
+						cp, stalledSec, (long)FrameCounter, (long)GameCycle,
+						(int)GamePaused, (long)time(nullptr));
+					std::fclose(f);
+				}
+			}
+		}
+	}
+}
+
 } // namespace
 
 /*----------------------------------------------------------------------------
 --  Public API
 ----------------------------------------------------------------------------*/
+
+void DebugBridge_RecordFatal(const char *kind, const char *what)
+{
+	// Called from stratagusMain's catch blocks BEFORE CrashExit()/_Exit(). This is the real
+	// silent-death path on Android (uncaught C++ exception -> no signal, no tombstone). Record
+	// kind + what() + a here-and-now backtrace (catch site / main; the throw site is already
+	// unwound, but kind/what -- e.g. gcn::Exception "file:line (func): message" -- pinpoints it).
+	if (!kind) { kind = "?"; }
+	if (!what) { what = ""; }
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, DBG_LOG_TAG,
+		"FATAL C++ exception [%s]: %s (frame=%ld cycle=%ld)",
+		kind, what, (long)FrameCounter, (long)GameCycle);
+#endif
+#ifndef _WIN32
+	if (DbgCrashPath[0]) {
+		int fd = open(DbgCrashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd >= 0) {
+			RawWrite(fd, "signal=none (C++ exception)\nkind=");
+			RawWrite(fd, kind);
+			RawWrite(fd, "\nwhat=");
+			RawWrite(fd, what);
+			RawWrite(fd, "\nts=");
+			RawWriteInt(fd, (long)time(nullptr));
+			DumpFramesToFd(fd);
+			fsync(fd);
+			close(fd);
+		}
+	}
+#else
+	if (DbgCrashPath[0]) {
+		FILE *f = std::fopen(DbgCrashPath, "wb");
+		if (f) {
+			std::fprintf(f, "signal=none (C++ exception)\nkind=%s\nwhat=%s\nts=%ld\n"
+			                "frameCounter=%ld\ngameCycle=%ld\nbacktrace:\n(win32: see minidump)\n",
+			             kind, what, (long)time(nullptr), (long)FrameCounter, (long)GameCycle);
+			std::fclose(f);
+		}
+	}
+#endif
+}
 
 void DebugBridge_Init()
 {
@@ -1079,6 +1290,17 @@ void DebugBridge_Init()
 	DbgInited = true;
 
 	WriteStatus();
+
+	DebugBridge_StartWatchdog();
+}
+
+void DebugBridge_StartWatchdog()
+{
+	bool expected = false;
+	if (!WatchdogStarted.compare_exchange_strong(expected, true)) {
+		return; // already running
+	}
+	std::thread(WatchdogThreadMain).detach();
 }
 
 void DebugBridge_Poll()

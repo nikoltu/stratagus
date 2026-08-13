@@ -34,6 +34,7 @@
 ----------------------------------------------------------------------------*/
 
 #include "stratagus.h"
+#include "debug_bridge.h"
 #include "video.h"
 #include "font.h"
 #include "cursor.h"
@@ -280,7 +281,11 @@ LuaActionListener::LuaActionListener(lua_State *l, lua_Object f) :
 */
 void LuaActionListener::action(const gcn::ActionEvent &event) /* override */
 {
+	// Watchdog: a widget callback that shows a menu runs its Lua synchronously here. If it
+	// wedges (or opens a modal menu that wedges), the last checkpoint pins it to this dispatch.
+	DBG_CHECKPOINT("LuaActionListener::action");
 	callback.call(event.getId());
+	DBG_CHECKPOINT("LuaActionListener::action:done");
 }
 
 void LuaActionListener::keyPressed(gcn::KeyEvent &event) /* override */
@@ -2728,6 +2733,7 @@ int MenuScreen::run(bool loop)
 		const EventCallback *old_callbacks = GetCallbacks();
 		SetCallbacks(&GuichanCallbacks);
 		while (runLoop) {
+			DBG_CHECKPOINT("MenuScreen::run");
 			UpdateDisplay();
 			RealizeVideoMemory();
 			WaitEventsOneFrame();
