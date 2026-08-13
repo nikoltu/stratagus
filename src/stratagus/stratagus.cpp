@@ -187,6 +187,7 @@ extern void beos_init(int argc, char **argv);
 #include "debug_bridge.h"
 #include "editor.h"
 #include "presentation.h"
+#include "importer.h"
 #include "filesystem.h"
 #include "game.h"
 #include "interface.h"
@@ -792,7 +793,17 @@ try {
 
 	// Load the versioned runtime content set (presentation pack, etc.) before Lua runs, so Wargus
 	// can read original-derived screens/controls by logical id. An absent cache degrades gracefully.
-	LoadContentSet((parameters.GetUserDirectory() / "content-cache").string());
+	const std::string contentCacheDir = (parameters.GetUserDirectory() / "content-cache").string();
+	const bool contentReady = LoadContentSet(contentCacheDir);
+
+	// First-run decision (ARC-002): with no validated set, an owned source tree triggers the import
+	// hook; with neither, the engine runs on built-in defaults. Presence-only -- nothing is fabricated.
+	const std::string contentSourceRoot = parameters.GetUserDirectory().string();
+	const content::FirstRunAction firstRun = content::EvaluateFirstRun(contentReady, contentSourceRoot);
+	fprintf(stderr, "content: first-run action = %s\n", content::ToString(firstRun));
+	if (firstRun == content::FirstRunAction::ImportNeeded) {
+		content::RunFirstRunImport(contentCacheDir, contentSourceRoot);
+	}
 
 	// Init Lua and register lua functions!
 	InitLua();
