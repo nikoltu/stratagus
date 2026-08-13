@@ -20,6 +20,7 @@
 #include "json.h"
 
 #include <cstdlib>
+#include <limits>
 
 namespace content
 {
@@ -48,7 +49,18 @@ double JsonValue::asNumber(double fallback) const
 
 long JsonValue::asInt(long fallback) const
 {
-	return type == JsonType::Number ? static_cast<long>(number) : fallback;
+	if (type != JsonType::Number) {
+		return fallback;
+	}
+	// Casting a double outside long's range to long is undefined behaviour; clamp instead so an
+	// out-of-range JSON number yields a defined saturated value rather than garbage.
+	if (number >= static_cast<double>(std::numeric_limits<long>::max())) {
+		return std::numeric_limits<long>::max();
+	}
+	if (number <= static_cast<double>(std::numeric_limits<long>::min())) {
+		return std::numeric_limits<long>::min();
+	}
+	return static_cast<long>(number);
 }
 
 bool JsonValue::asBool(bool fallback) const
