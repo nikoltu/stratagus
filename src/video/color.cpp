@@ -109,6 +109,16 @@ static float lerp(float a, float b, float t)
 
 IntColor InterpolateColor(IntColor color1, IntColor color2, float fraction)
 {
+	// Clamp to [0, 1] (nan-safe: !(f >= 0) also catches nan). An out-of-range fraction -- e.g. a
+	// unit whose hit points exceed its maximum, or a zero maximum yielding nan -- would otherwise
+	// extrapolate a channel past 0..255 and corrupt the packed colour, and the float->int cast of an
+	// out-of-range value is undefined behaviour.
+	if (!(fraction >= 0.0f)) {
+		fraction = 0.0f;
+	} else if (fraction > 1.0f) {
+		fraction = 1.0f;
+	}
+
 	unsigned char r1 = (color1 >> 16) & 0xff;
 	unsigned char r2 = (color2 >> 16) & 0xff;
 	unsigned char g1 = (color1 >> 8) & 0xff;
