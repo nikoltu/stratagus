@@ -32,6 +32,8 @@ bool LoadContentSet(const std::string &cacheDir);
 
 bool PresentationLoaded();
 int PresentationScreenCount();
+/// Total number of typed controls across every screen in the presentation pack (0 when unloaded).
+int PresentationControlTotal();
 /// Logical screen id at `index` (0-based), or "" when out of range.
 std::string PresentationScreenId(int index);
 /// A screen-level field: "kind", "parent", "marker", "geometry_status", "runtime_capture", or a

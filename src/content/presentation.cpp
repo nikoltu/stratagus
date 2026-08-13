@@ -78,8 +78,9 @@ bool LoadContentSet(const std::string &cacheDir)
 			}
 		}
 	}
-	fprintf(stderr, "content: loaded content set (%s), presentation pack: %zu screens\n",
-	        g_contentSet.fidelityProfile().c_str(), g_screenOrder.size());
+	fprintf(stderr, "content: loaded content set (%s), %zu pack(s), presentation: %zu screens / %d controls\n",
+	        g_contentSet.fidelityProfile().c_str(), g_contentSet.packs().size(), g_screenOrder.size(),
+	        PresentationControlTotal());
 	return true;
 }
 
@@ -91,6 +92,17 @@ bool PresentationLoaded()
 int PresentationScreenCount()
 {
 	return static_cast<int>(g_screenOrder.size());
+}
+
+int PresentationControlTotal()
+{
+	int total = 0;
+	for (const auto &entry : g_screenById) {
+		if (const content::JsonValue *controls = entry.second->find("controls")) {
+			total += static_cast<int>(controls->items().size());
+		}
+	}
+	return total;
 }
 
 std::string PresentationScreenId(int index)
