@@ -21,6 +21,7 @@
 
 #include "sha256.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -116,6 +117,12 @@ bool ContentSet::load(const std::string &contentSetJsonPath)
 		std::string packText;
 		if (!readFile(root / pack.path, packText)) {
 			return fail("cannot open pack '" + pack.name + "' at " + pack.path);
+		}
+		// Cheap integrity signal, separate from the SHA-256 gate: flag a declared-size mismatch. A
+		// declared size of 0 is treated as "unspecified". This warns only; SHA-256 remains the gate.
+		if (pack.bytes > 0 && static_cast<long>(packText.size()) != pack.bytes) {
+			fprintf(stderr, "content: pack '%s' declares %ld bytes but the file is %zu bytes\n",
+			        pack.name.c_str(), pack.bytes, packText.size());
 		}
 		if (Sha256Hex(packText) != pack.sha256) {
 			return fail("pack '" + pack.name + "' failed SHA-256 verification");
