@@ -31,6 +31,8 @@
 bool LoadContentSet(const std::string &cacheDir);
 
 bool PresentationLoaded();
+/// Number of packs in the loaded content set (0 when none loaded).
+int PresentationPackCount();
 int PresentationScreenCount();
 /// Total number of typed controls across every screen in the presentation pack (0 when unloaded).
 int PresentationControlTotal();

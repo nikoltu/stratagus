@@ -89,6 +89,11 @@ bool PresentationLoaded()
 	return g_presentation != nullptr;
 }
 
+int PresentationPackCount()
+{
+	return static_cast<int>(g_contentSet.packs().size());
+}
+
 int PresentationScreenCount()
 {
 	return static_cast<int>(g_screenOrder.size());
