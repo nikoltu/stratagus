@@ -187,6 +187,7 @@ set(content_SRCS
 	src/content/json.cpp
 	src/content/sha256.cpp
 	src/content/content_set.cpp
+	src/content/presentation.cpp
 )
 source_group(content FILES ${content_SRCS})
 

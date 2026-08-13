@@ -186,6 +186,7 @@ extern void beos_init(int argc, char **argv);
 #include "ai.h"
 #include "debug_bridge.h"
 #include "editor.h"
+#include "presentation.h"
 #include "filesystem.h"
 #include "game.h"
 #include "interface.h"
@@ -788,6 +789,10 @@ try {
 	InitSyncRand();
 
 	fs::create_directories(parameters.GetUserDirectory());
+
+	// Load the versioned runtime content set (presentation pack, etc.) before Lua runs, so Wargus
+	// can read original-derived screens/controls by logical id. An absent cache degrades gracefully.
+	LoadContentSet((parameters.GetUserDirectory() / "content-cache").string());
 
 	// Init Lua and register lua functions!
 	InitLua();

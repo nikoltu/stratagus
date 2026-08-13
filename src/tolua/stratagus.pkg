@@ -18,6 +18,7 @@ $#include "unittype.h"
 $#include "video.h"
 $#include "movie.h"
 $#include "widgets.h"
+$#include "presentation.h"
 
 $#ifdef _MSC_VER
 $#pragma warning(disable:4800)
@@ -69,6 +70,7 @@ $using std::string;
 $using std::vector;
 
 $pfile "ai.pkg"
+$pfile "content.pkg"
 $pfile "editor.pkg"
 $pfile "font.pkg"
 $pfile "game.pkg"
