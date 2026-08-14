@@ -103,39 +103,29 @@ size_t serialize(unsigned char *buf, const std::string &s)
 		buf += serialize16(buf, uint16_t(s.size()));
 		memcpy(buf, s.c_str(), s.size());
 		buf += s.size();
-		//Wyrmgus start
-		//Andrettin: fix to the multiplayer OOS issue - the fix works, but it would be better if someone reviewed the code! I am leaving the Wyrmgus tags on these changes until the code has been properly reviewed
-		/*
-		if ((s.size() & 0x03) != 0) {
-			memset(buf, 0, s.size() & 0x03);
-		}
-		*/
-		//Wyrmgus end
+		// The reported length is s.size() + 5 but only s.size() + 2 bytes carry data.
+		// Zero the 3 trailing bytes so no uninitialised memory reaches the wire: it keeps
+		// the serialised stream deterministic (important once anything checksums it) and
+		// avoids leaking heap/stack contents to peers.
+		memset(buf, 0, 3);
 	}
-	//Wyrmgus start
-//	return 2 + ((s.size() + 3) & ~0x03); // round up to multiple of 4 for alignment.
 	return 2 + (s.size() + 3);
-	//Wyrmgus end
 }
 size_t serialize(unsigned char *buf, const std::vector<unsigned char> &data)
 {
 	if (buf) {
-		if (data.empty()) {
-			return serialize16(buf, uint16_t(data.size()));
-		}
 		buf += serialize16(buf, uint16_t(data.size()));
-		memcpy(buf, &data[0], data.size());
-		buf += data.size();
-		//Wyrmgus start
-//		if ((data.size() & 0x03) != 0) {
-//			memset(buf, 0, data.size() & 0x03);
-//		}
-		//Wyrmgus end
+		if (!data.empty()) {
+			memcpy(buf, &data[0], data.size());
+			buf += data.size();
+		}
+		// Zero the 3 trailing pad bytes (see serialize(std::string)). Dropping the former
+		// empty-vector early return is deliberate: it used to advance by only 2 while both
+		// deserialize() and the null-buffer sizing path advance by 2 + size + 3, so an empty
+		// vector field desynced the writer from the reader and corrupted every later field.
+		memset(buf, 0, 3);
 	}
-	//Wyrmgus start
-//	return 2 + ((data.size() + 3) & ~0x03); // round up to multiple of 4 for alignment.
 	return 2 + (data.size() + 3);
-	//Wyrmgus end
 }
 
 size_t deserialize32(const unsigned char *buf, uint32_t *data)
