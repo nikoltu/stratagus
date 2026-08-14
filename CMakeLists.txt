@@ -570,6 +570,7 @@ set(stratagus_tests_SRCS
 	tests/stratagus/test_unitptr.cpp
 	tests/stratagus/test_util.cpp
 	tests/network/test_net_lowlevel.cpp
+	tests/network/test_net_message.cpp
 	tests/network/test_netconnect.cpp
 	tests/network/test_network.cpp
 	tests/network/test_udpsocket.cpp
