@@ -17,6 +17,13 @@
 
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- LAN multiplayer: sockets need INTERNET; mDNS host discovery receives
+         multicast, which Android only delivers while a MulticastLock is held, and
+         that lock plus the Wi-Fi state require these Wi-Fi permissions. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
     <application
         android:label="@string/app_name"
         android:icon="@drawable/ic_launcher"
