@@ -119,12 +119,20 @@ static Mix_Chunk *ChooseSample(CSound &sound, bool selection, Origin &source)
 				// check whether the second group is really a group
 				auto *chunks =
 					std::get_if<std::vector<sdl2::ChunkPtr>>(&SelectionHandler.Sound->Sound);
-				Assert(SelectionHandler.HowMany < chunks->size());
-				result = (*chunks)[SelectionHandler.HowMany].get();
-				SelectionHandler.HowMany++;
-				if (SelectionHandler.HowMany >= chunks->size()) {
+				Assert(chunks && SelectionHandler.HowMany < chunks->size());
+				if (chunks && SelectionHandler.HowMany < chunks->size()) {
+					result = (*chunks)[SelectionHandler.HowMany].get();
+					SelectionHandler.HowMany++;
+					if (SelectionHandler.HowMany >= chunks->size()) {
+						SelectionHandler.HowMany = 0;
+						SelectionHandler.Sound = p->first;
+					}
+				} else {
+					// The alternate selection group is not a usable, in-range sample
+					// list (wrong variant or empty); reset instead of dereferencing it.
 					SelectionHandler.HowMany = 0;
 					SelectionHandler.Sound = p->first;
+					result = SimpleChooseSample(*p->first);
 				}
 			}
 		} else {
