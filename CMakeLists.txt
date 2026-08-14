@@ -578,6 +578,7 @@ set(stratagus_tests_SRCS
 	tests/video/test_uianchor.cpp
 	tests/video/test_uiscale.cpp
 	tests/content/test_content_set.cpp
+	tests/content/test_presentation.cpp
 )
 
 source_group(include FILES ${stratagus_generic_HDRS})
