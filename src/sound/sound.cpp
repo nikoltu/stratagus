@@ -81,6 +81,11 @@ static Mix_Chunk *SimpleChooseSample(const CSound &sound)
 {
 	if (auto *chunks = std::get_if<std::vector<sdl2::ChunkPtr>>(&sound.Sound)) {
 		Assert(!chunks->empty());
+		// The Assert is compiled out in release; an empty group (e.g. every sample failed
+		// to load) would otherwise be a modulo-by-zero here.
+		if (chunks->empty()) {
+			return nullptr;
+		}
 		return (*chunks)[FrameCounter % chunks->size()].get();
 	} else {
 		return nullptr;
