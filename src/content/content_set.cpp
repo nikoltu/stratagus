@@ -118,6 +118,18 @@ bool ContentSet::load(const std::string &contentSetJsonPath)
 		if (findPack(pack.name)) {
 			return fail("duplicate pack name '" + pack.name + "'");
 		}
+		// The path is defined as cache-relative; a manifest must not reach outside the content root.
+		// std::filesystem's `root / path` silently yields `path` when it is absolute, and `..`
+		// segments walk out of the directory, so reject anything that is not a pure relative path.
+		const std::filesystem::path packRel(pack.path);
+		if (packRel.is_absolute() || packRel.has_root_name() || packRel.has_root_directory()) {
+			return fail("pack '" + pack.name + "' path is not relative: " + pack.path);
+		}
+		for (const std::filesystem::path &part : packRel) {
+			if (part == "..") {
+				return fail("pack '" + pack.name + "' path escapes the content root: " + pack.path);
+			}
+		}
 
 		std::string packText;
 		if (!readFile(root / pack.path, packText)) {
