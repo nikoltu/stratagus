@@ -1,5 +1,14 @@
 $extern void InitVideo();
 $extern void ShowFullImage(const std::string& name, unsigned int timeOutInSecond);
+$#include "uiscale.h"
+
+$// HD UI scaling: the uniform (aspect-preserving) factor to fit a reference
+$// resolution into the current screen, as an exact integer rational.
+$static int UIScaleNum(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).num; }
+$static int UIScaleDen(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).den; }
+
+extern int UIScaleNum(int refW, int refH);
+extern int UIScaleDen(int refW, int refH);
 
 void InitVideo();
 extern int PlayMovie(const std::string name);
@@ -25,6 +34,7 @@ $void Resize(CGraphicPtr* self, int w, int h) { (*self)->Resize(w, h); }
 $void ResizeKeepRatio(CGraphicPtr* self, int w, int h) { (*self)->ResizeKeepRatio(w, h); }
 $void SetPaletteColor(CGraphicPtr* self, int idx, int r, int g, int b) { (*self)->SetPaletteColor(idx, r, g, b); }
 $void OverlayGraphic(CGraphicPtr* self, CGraphicPtr g, bool mask) { (*self)->OverlayGraphic(g.get(), mask); }
+$void DrawNineSlice(CGraphicPtr* self, int x, int y, int w, int h, int left, int top, int right, int bottom) { SDL_Rect d = {x, y, w, h}; (*self)->DrawNineSlice(d, left, top, right, bottom); }
 
 $using CPlayerColorGraphicPtr = std::shared_ptr<CPlayerColorGraphic>;
 $void Load(CPlayerColorGraphicPtr* self, bool grayscale) { (*self)->Load(grayscale); }
@@ -39,6 +49,7 @@ struct CGraphicPtr // std::shared_ptr<CGraphic>
 	tolua_outside void ResizeKeepRatio(int w, int h);
 	tolua_outside void SetPaletteColor(int idx, int r, int g, int b);
 	tolua_outside void OverlayGraphic(CGraphicPtr g, bool mask = false);
+	tolua_outside void DrawNineSlice(int x, int y, int w, int h, int left, int top, int right, int bottom);
 };
 
 struct CPlayerColorGraphicPtr // std::shared_ptr<CPlayerColorGraphic>
