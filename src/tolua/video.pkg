@@ -7,8 +7,19 @@ $// resolution into the current screen, as an exact integer rational.
 $static int UIScaleNum(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).num; }
 $static int UIScaleDen(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).den; }
 
+$// The centred aspect-preserved fit rectangle (letterbox/pillarbox) of a reference resolution inside
+$// the current screen.
+$static int UIScaleFitX(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).fit.x; }
+$static int UIScaleFitY(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).fit.y; }
+$static int UIScaleFitW(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).fit.w; }
+$static int UIScaleFitH(int refW, int refH) { SDL_Rect t = {0, 0, Video.Width, Video.Height}; return ComputeUniformScale(refW, refH, t).fit.h; }
+
 extern int UIScaleNum(int refW, int refH);
 extern int UIScaleDen(int refW, int refH);
+extern int UIScaleFitX(int refW, int refH);
+extern int UIScaleFitY(int refW, int refH);
+extern int UIScaleFitW(int refW, int refH);
+extern int UIScaleFitH(int refW, int refH);
 
 void InitVideo();
 extern int PlayMovie(const std::string name);
