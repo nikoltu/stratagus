@@ -23,13 +23,13 @@ public class WargusHDActivity extends SDLActivity {
     // LAN multiplayer plumbing. Android does not deliver multicast/broadcast
     // datagrams to an app unless it holds a WifiManager MulticastLock, so the
     // engine's own mDNS LAN host discovery (mdns_wrapper) cannot see peers on the
-    // Wi-Fi without it. A high-performance WifiLock keeps the radio from dozing so
-    // the lockstep net game is not throttled while the screen is on. Both are held
-    // only while the activity is in the foreground so battery is not wasted when
-    // the game is backgrounded. The in-engine multiplayer lobby and protocol are
-    // unchanged; this only makes their existing network traffic reach the device.
+    // Wi-Fi without it. The lock is held only while the activity is in the
+    // foreground so battery is not wasted when the game is backgrounded. The
+    // in-engine multiplayer lobby and protocol are unchanged; this only makes
+    // their existing network traffic reach the device. (A high-performance
+    // WifiLock would additionally need the WAKE_LOCK permission and is not
+    // required for discovery, so it is deliberately not used.)
     private WifiManager.MulticastLock multicastLock;
-    private WifiManager.WifiLock wifiLock;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,8 +39,6 @@ public class WargusHDActivity extends SDLActivity {
         if (wifi != null) {
             multicastLock = wifi.createMulticastLock("wargushd-lan");
             multicastLock.setReferenceCounted(false);
-            wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "wargushd-lan");
-            wifiLock.setReferenceCounted(false);
         }
     }
 
@@ -50,18 +48,12 @@ public class WargusHDActivity extends SDLActivity {
         if (multicastLock != null && !multicastLock.isHeld()) {
             multicastLock.acquire();
         }
-        if (wifiLock != null && !wifiLock.isHeld()) {
-            wifiLock.acquire();
-        }
     }
 
     @Override
     protected void onPause() {
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
-        }
-        if (wifiLock != null && wifiLock.isHeld()) {
-            wifiLock.release();
         }
         super.onPause();
     }
