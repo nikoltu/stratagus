@@ -146,7 +146,8 @@ bool ButtonCheckUnitVariable(const CUnit &unit, const ButtonAction &button)
 		} else if (type == "Enable") {
 			varValue = unit.Variable[index].Enable;
 		} else if (type == "Percent") {
-			varValue = unit.Variable[index].Value * 100 / unit.Variable[index].Max;
+			const int max = unit.Variable[index].Max;
+			varValue = max ? unit.Variable[index].Value * 100 / max : 0;
 		} else {
 			ErrorPrint("Bad variable type '%s'\n", type.data());
 			Exit(1);

@@ -246,7 +246,8 @@ int ParseAnimInt(const CUnit &unit, const std::string_view s)
 		} else if (next == "Enable") {
 			return goal->Variable[index].Enable;
 		} else if (next == "Percent") {
-			return goal->Variable[index].Value * 100 / goal->Variable[index].Max;
+			const int max = goal->Variable[index].Max;
+			return max ? goal->Variable[index].Value * 100 / max : 0;
 		}
 		return 0;
 	} else if (s[0] == 'b' || s[0] == 'g') { //unit bool flag detected

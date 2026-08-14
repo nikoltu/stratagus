@@ -116,7 +116,8 @@ void CAnimation_SetVar::Action(CUnit &unit, int & /*move*/, int /*scale*/) const
 		modifyValue(this->mod, value, rop);
 		goal->Variable[index].Enable = value;
 	} else if (next == "Percent") {
-		value = goal->Variable[index].Value * 100 / goal->Variable[index].Max;
+		const int max = goal->Variable[index].Max;
+		value = max ? goal->Variable[index].Value * 100 / max : 0;
 		modifyValue(this->mod, value, rop);
 		goal->Variable[index].Value = goal->Variable[index].Max * value / 100;
 	}
