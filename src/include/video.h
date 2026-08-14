@@ -206,6 +206,11 @@ public:
 	// render path sets up. Not used at all when EnableCrispZoom is off.
 	void DrawFrameClipScaled(unsigned frame, int x, int y, int w, int h,
 							 SDL_Surface *surface = TheScreen) const;
+	// Draw this graphic as a nine-slice: the four corners keep their native size
+	// while the edges and centre stretch to fill dest, using left/top/right/bottom
+	// as the border insets (in source pixels). See ComputeNineSlice (nineslice.h).
+	void DrawNineSlice(const SDL_Rect &dest, int left, int top, int right, int bottom,
+					   unsigned frame = 0, SDL_Surface *surface = TheScreen) const;
 	void DrawFrameTrans(unsigned frame, int x, int y, int alpha,
 						SDL_Surface *surface = TheScreen) const;
 	void DrawFrameClipTrans(unsigned frame, int x, int y, int alpha,

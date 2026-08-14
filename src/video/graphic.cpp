@@ -37,6 +37,7 @@
 
 #include "intern_video.h"
 #include "iolib.h"
+#include "nineslice.h"
 #include "player.h"
 #include "stratagus.h"
 #include <cstring>
@@ -677,6 +678,39 @@ void CGraphic::DrawFrameClipScaled(unsigned frame, int x, int y, int w, int h,
 					  Uint16(Width), Uint16(Height)};
 	SDL_Rect drect = {Sint16(x), Sint16(y), Uint16(w), Uint16(h)};
 	SDL_BlitScaled(mSurface, &srect, surface, &drect);
+}
+
+void CGraphic::DrawNineSlice(const SDL_Rect &dest,
+							 int left, int top, int right, int bottom,
+							 unsigned frame /*= 0*/,
+							 SDL_Surface *surface /*= TheScreen*/) const
+{
+	if (frame >= frame_map.size()) {
+		WarnInvalidGraphicFrame(*this, frame, false);
+		return;
+	}
+	const int ox = frame_map[frame].x;
+	const int oy = frame_map[frame].y;
+
+	NineSlicePatch patches[9];
+	ComputeNineSlice(Width, Height, left, top, right, bottom, dest, patches);
+
+	// Same GPU/CPU split as DrawSub: on the HUD GPU path route each patch through
+	// the backbuffer, otherwise scale-blit it on the CPU. Corners come out 1:1
+	// (equal src/dst size), edges and centre are stretched by the blit.
+	const bool gpu = GpuHudDrawActive && mTexture && surface == TheScreen;
+	for (const NineSlicePatch &p : patches) {
+		if (p.src.w <= 0 || p.src.h <= 0 || p.dst.w <= 0 || p.dst.h <= 0) {
+			continue;
+		}
+		SDL_Rect srect = {ox + p.src.x, oy + p.src.y, p.src.w, p.src.h};
+		SDL_Rect drect = {p.dst.x, p.dst.y, p.dst.w, p.dst.h};
+		if (gpu) {
+			HudRenderCopy(mTexture, srect, drect);
+		} else {
+			SDL_BlitScaled(mSurface, &srect, surface, &drect);
+		}
+	}
 }
 
 void CGraphic::DrawFrameTrans(unsigned frame, int x, int y, int alpha,
