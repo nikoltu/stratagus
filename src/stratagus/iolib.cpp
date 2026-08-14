@@ -183,6 +183,11 @@ static Sint64 sdl_seek(SDL_RWops *context, Sint64 offset, int whence)
 
 static size_t sdl_read(SDL_RWops *context, void *ptr, size_t size, size_t maxnum)
 {
+	// SDL_RWread permits a zero element size; guard the division so a zero-sized
+	// read from an asset loader cannot divide by zero.
+	if (size == 0) {
+		return 0;
+	}
 	CFile *self = reinterpret_cast<CFile*>(context->hidden.unknown.data1);
 	return self->read(ptr, size * maxnum) / size;
 }
