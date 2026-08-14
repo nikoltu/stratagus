@@ -197,6 +197,9 @@ size_t deserialize(const unsigned char *buf, std::vector<unsigned char> &data)
 
 size_t CNetworkHost::Serialize(unsigned char *buf) const
 {
+	if (buf == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *p = buf;
 
 	p += serialize32(p, this->Host);
@@ -237,6 +240,9 @@ void CNetworkHost::SetName(const char *name)
 
 size_t CServerSetup::Serialize(unsigned char *buf) const
 {
+	if (buf == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *p = buf;
 
 	p += serialize8(p, static_cast<int8_t>(this->ServerGameSettings.DefeatReveal));
@@ -354,6 +360,9 @@ bool CServerSetup::operator == (const CServerSetup &rhs) const
 
 size_t CInitMessage_Header::Serialize(unsigned char *p) const
 {
+	if (p == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *buf = p;
 	p += serialize8(p, type);
 	p += serialize8(p, subtype);
@@ -657,6 +666,9 @@ void CInitMessage_Resync::Deserialize(const unsigned char *p)
 
 size_t CNetworkCommand::Serialize(unsigned char *buf) const
 {
+	if (buf == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *p = buf;
 	p += serialize16(p, this->Unit);
 	p += serialize16(p, this->X);
@@ -681,6 +693,9 @@ size_t CNetworkCommand::Deserialize(const unsigned char *buf)
 
 size_t CNetworkExtendedCommand::Serialize(unsigned char *buf) const
 {
+	if (buf == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *p = buf;
 	p += serialize8(p, this->ExtendedType);
 	p += serialize8(p, this->Arg1);
@@ -732,6 +747,9 @@ size_t CNetworkChat::Size() const
 
 size_t CNetworkCommandSync::Serialize(unsigned char *buf) const
 {
+	if (buf == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *p = buf;
 	p += serialize32(p, this->syncSeed);
 	p += serialize32(p, this->syncHash);
@@ -776,6 +794,9 @@ size_t CNetworkCommandQuit::Deserialize(const unsigned char *buf)
 
 size_t CNetworkSelection::Serialize(unsigned char *buf) const
 {
+	if (buf == nullptr) { // size-only query
+		return Size();
+	}
 	unsigned char *p = buf;
 
 	p += serialize16(p, this->player);
