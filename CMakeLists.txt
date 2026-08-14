@@ -352,6 +352,7 @@ set(video_SRCS
 	src/video/mng.cpp
 	src/video/movie.cpp
 	src/video/nineslice.cpp
+	src/video/uianchor.cpp
 	src/video/png.cpp
 	src/video/sdl.cpp
 	src/video/video.cpp
