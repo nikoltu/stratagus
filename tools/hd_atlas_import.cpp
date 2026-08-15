@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -289,6 +290,57 @@ bool parseAtlas(const std::string &text, std::vector<FrameInput> &frames, int &m
 			fi.ch = fi.fh;
 		}
 		frames.push_back(fi);
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Optional pre-pack filter + rename (P2 building-atlas slicing).
+// When hasPrefix is set, keeps only frames whose name starts with 'prefix'
+// (an empty result is an error). When renameNumeric is set, each kept frame
+// is renamed to the decimal integer formed by the run of digits immediately
+// following 'prefix' (so 'thall_7' -> "7" and 'thall_7_team' -> "7"); a
+// missing leading digit or a duplicate resulting number is an error.
+// ---------------------------------------------------------------------------
+bool applyPrefixRename(std::vector<FrameInput> &frames, const std::string &prefix, bool hasPrefix,
+                       bool renameNumeric, std::string &err)
+{
+	if (hasPrefix) {
+		std::vector<FrameInput> kept;
+		for (const FrameInput &fi : frames) {
+			if (fi.name.compare(0, prefix.size(), prefix) == 0) {
+				kept.push_back(fi);
+			}
+		}
+		frames.swap(kept);
+		if (frames.empty()) {
+			err = "no frames match prefix '" + prefix + "'";
+			return false;
+		}
+	}
+	if (renameNumeric) {
+		std::map<long, std::string> seenNumbers; // parsed number -> first original frame name
+		for (FrameInput &fi : frames) {
+			const std::string rest = hasPrefix ? fi.name.substr(prefix.size()) : fi.name;
+			size_t p = 0;
+			while (p < rest.size() && std::isdigit(static_cast<unsigned char>(rest[p]))) {
+				++p;
+			}
+			if (p == 0) {
+				err = "frame '" + fi.name + "' has no digits after prefix '" + prefix + "'";
+				return false;
+			}
+			const std::string digits = rest.substr(0, p);
+			const long num = std::atol(digits.c_str());
+			auto it = seenNumbers.find(num);
+			if (it != seenNumbers.end()) {
+				err = "duplicate renamed frame number " + std::to_string(num) + ": '" +
+				      it->second + "' and '" + fi.name + "'";
+				return false;
+			}
+			seenNumbers.emplace(num, fi.name);
+			fi.name = std::to_string(num);
+		}
 	}
 	return true;
 }
@@ -608,6 +660,71 @@ int runSelfTest()
 
 	printf("SELFTEST OK: %zu frames, %zu page(s), cap %d, %zu unique rect(s), .hdatlas %zu bytes\n",
 	       records.size(), pages.size(), cap, records.size() - 1, blob.size());
+
+	// --- --prefix / --rename-numeric filter self-check (P2 building slice) ---
+	{
+		const std::string json2 =
+		    "{ \"frames\": {"
+		    "  \"foo_0\": { \"frame\": {\"x\":0,\"y\":0,\"w\":4,\"h\":4}, \"rotated\": false,"
+		    "               \"trimmed\": false,"
+		    "               \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":4,\"h\":4},"
+		    "               \"sourceSize\": {\"w\":4,\"h\":4} },"
+		    "  \"foo_1\": { \"frame\": {\"x\":4,\"y\":0,\"w\":4,\"h\":4}, \"rotated\": false,"
+		    "               \"trimmed\": false,"
+		    "               \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":4,\"h\":4},"
+		    "               \"sourceSize\": {\"w\":4,\"h\":4} },"
+		    "  \"foo_2_team\": { \"frame\": {\"x\":8,\"y\":0,\"w\":4,\"h\":4}, \"rotated\": false,"
+		    "               \"trimmed\": false,"
+		    "               \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":4,\"h\":4},"
+		    "               \"sourceSize\": {\"w\":4,\"h\":4} },"
+		    "  \"bar_0\": { \"frame\": {\"x\":12,\"y\":0,\"w\":4,\"h\":4}, \"rotated\": false,"
+		    "               \"trimmed\": false,"
+		    "               \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":4,\"h\":4},"
+		    "               \"sourceSize\": {\"w\":4,\"h\":4} } }"
+		    ", \"meta\": { \"size\": {\"w\":16,\"h\":16}, \"format\": \"RGBA8888\" } }";
+
+		std::vector<FrameInput> frames2;
+		int mw2 = 0, mh2 = 0;
+		std::string err2;
+		if (!parseAtlas(json2, frames2, mw2, mh2, err2)) {
+			fprintf(stderr, "SELFTEST FAIL: prefix-rename parse: %s\n", err2.c_str());
+			return 1;
+		}
+		if (!applyPrefixRename(frames2, "foo_", true, true, err2)) {
+			fprintf(stderr, "SELFTEST FAIL: prefix-rename filter: %s\n", err2.c_str());
+			return 1;
+		}
+		if (frames2.size() != 3) {
+			fprintf(stderr, "SELFTEST FAIL: prefix-rename kept %zu frames, expected 3\n",
+			        frames2.size());
+			return 1;
+		}
+		std::vector<std::string> names2;
+		for (const FrameInput &fi : frames2) {
+			names2.push_back(fi.name);
+		}
+		std::sort(names2.begin(), names2.end());
+		if (names2 != std::vector<std::string>{"0", "1", "2"}) {
+			std::string got;
+			for (const std::string &n : names2) {
+				got += "'" + n + "' ";
+			}
+			fprintf(stderr, "SELFTEST FAIL: prefix-rename names mismatch: got %s\n", got.c_str());
+			return 1;
+		}
+
+		// Zero-matches case must fail loud.
+		std::vector<FrameInput> frames3 = frames2;
+		std::string err3;
+		if (applyPrefixRename(frames3, "nope_", true, false, err3)) {
+			fprintf(stderr, "SELFTEST FAIL: prefix-rename zero-match case unexpectedly succeeded\n");
+			return 1;
+		}
+
+		printf("SELFTEST OK: prefix-rename: {foo_0,foo_1,foo_2_team,bar_0} + --prefix foo_ "
+		       "--rename-numeric -> {\"0\",\"1\",\"2\"} (bar_0 excluded)\n");
+	}
+
 	return 0;
 }
 
@@ -615,6 +732,7 @@ void usage(const char *argv0)
 {
 	fprintf(stderr,
 	        "Usage: %s --json <atlas.json> --png <atlas.png> --out <basename> [--cap N]\n"
+	        "                        [--prefix <P>] [--rename-numeric]\n"
 	        "       %s --selftest\n",
 	        argv0, argv0);
 }
@@ -626,6 +744,9 @@ int main(int argc, char *argv[])
 	std::string jsonPath, pngPath, outBase;
 	int cap = 4096;
 	bool selftest = false;
+	std::string prefix;
+	bool hasPrefix = false;
+	bool renameNumeric = false;
 
 	for (int i = 1; i < argc; ++i) {
 		std::string a = argv[i];
@@ -646,6 +767,11 @@ int main(int argc, char *argv[])
 			outBase = next("--out");
 		} else if (a == "--cap") {
 			cap = atoi(next("--cap").c_str());
+		} else if (a == "--prefix") {
+			prefix = next("--prefix");
+			hasPrefix = true;
+		} else if (a == "--rename-numeric") {
+			renameNumeric = true;
 		} else if (a == "-h" || a == "--help") {
 			usage(argv[0]);
 			return 0;
@@ -690,6 +816,12 @@ int main(int argc, char *argv[])
 	if (!parseAtlas(jsonText, frames, metaW, metaH, err)) {
 		fprintf(stderr, "error: %s\n", err.c_str());
 		return 1;
+	}
+	if (hasPrefix || renameNumeric) {
+		if (!applyPrefixRename(frames, prefix, hasPrefix, renameNumeric, err)) {
+			fprintf(stderr, "error: %s\n", err.c_str());
+			return 1;
+		}
 	}
 	if (frames.empty()) {
 		fprintf(stderr, "error: atlas has no frames\n");
