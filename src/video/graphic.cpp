@@ -719,10 +719,15 @@ void CAtlasGraphic::DrawAtlasFrameClip(int frame, int anchorX, int anchorY) cons
 	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 }
 
-// Mirror of DrawAtlasFrameClip with a horizontal flip. Identical dst-rect math (canvas centred on
-// (anchorX, anchorY), only the size scaled by GpuWorldDrawZoom); the sole difference is
-// RenderCopyEx + SDL_FLIP_HORIZONTAL. See DrawAtlasFrameClipX in video.h for the P2 trim caveat.
-void CAtlasGraphic::DrawAtlasFrameClipX(int frame, int anchorX, int anchorY) const
+// Draw one frame with its RAW untrimmed HD canvas (cw x ch) mapped onto the caller's on-screen rect
+// (dstX, dstY, dstW, dstH). The stored frame is trimmed (offx/offy into that canvas, sw x sh actual
+// pixels), so scale the trim offset and size by the canvas->footprint ratio to place the sub-frame
+// proportionally. Buildings need this instead of DrawAtlasFrameClip: their HD sourceSize (cw) is the
+// full-resolution art (e.g. ~986px), far larger than the classic tile footprint (e.g. 128px), so a
+// native sw x sh blit would draw the building ~6x oversized. An (r,g,b) != 255 tints the page via
+// SDL_SetTextureColorMod (reset to 255 after) for the player-colour `_team` mask; `flip` mirrors.
+void CAtlasGraphic::DrawAtlasFrameClipScaled(int frame, int dstX, int dstY, int dstW, int dstH,
+                                             bool flip, uint8_t r, uint8_t g, uint8_t b) const
 {
 	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
 		return;
@@ -732,39 +737,25 @@ void CAtlasGraphic::DrawAtlasFrameClipX(int frame, int anchorX, int anchorY) con
 	if (rec.page >= pages.size() || !pages[rec.page]) {
 		return;
 	}
-	const int dw = (GpuWorldDrawZoom == 1.0f) ? rec.sw : (int) std::lround(rec.sw * GpuWorldDrawZoom);
-	const int dh = (GpuWorldDrawZoom == 1.0f) ? rec.sh : (int) std::lround(rec.sh * GpuWorldDrawZoom);
+	const double sxScale = (rec.cw != 0) ? (double) dstW / rec.cw : 1.0;
+	const double syScale = (rec.ch != 0) ? (double) dstH / rec.ch : 1.0;
 	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
-	SDL_Rect dst = {anchorX - rec.cw / 2 + rec.offx, anchorY - rec.ch / 2 + rec.offy, dw, dh};
-	SDL_RenderCopyEx(TheRenderer, pages[rec.page], &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
-}
-
-// Draw one frame with a colour-mod tint (used for the `_team` player-colour mask atlas). Same
-// canvas-centre placement as DrawAtlasFrameClip; the page texture's colour mod is set to (r,g,b)
-// for the blit and reset to 255,255,255 afterwards so a later plain draw of the same page is not
-// left tinted (mirrors CPlayerColorGraphic::DrawPlayerColorFrameClipTex). `flip` picks the mirror.
-void CAtlasGraphic::DrawAtlasFrameClipTinted(int frame, int anchorX, int anchorY,
-                                             uint8_t r, uint8_t g, uint8_t b, bool flip) const
-{
-	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
-		return;
+	SDL_Rect dst = {dstX + (int) std::lround(rec.offx * sxScale),
+	                dstY + (int) std::lround(rec.offy * syScale),
+	                (int) std::lround(rec.sw * sxScale),
+	                (int) std::lround(rec.sh * syScale)};
+	const bool tint = (r != 255 || g != 255 || b != 255);
+	if (tint) {
+		SDL_SetTextureColorMod(pages[rec.page], r, g, b);
 	}
-	const hdatlas::HdFrameRecord &rec = frames[frame];
-	Assert(rec.rotated == 0);
-	if (rec.page >= pages.size() || !pages[rec.page]) {
-		return;
-	}
-	const int dw = (GpuWorldDrawZoom == 1.0f) ? rec.sw : (int) std::lround(rec.sw * GpuWorldDrawZoom);
-	const int dh = (GpuWorldDrawZoom == 1.0f) ? rec.sh : (int) std::lround(rec.sh * GpuWorldDrawZoom);
-	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
-	SDL_Rect dst = {anchorX - rec.cw / 2 + rec.offx, anchorY - rec.ch / 2 + rec.offy, dw, dh};
-	SDL_SetTextureColorMod(pages[rec.page], r, g, b);
 	if (flip) {
 		SDL_RenderCopyEx(TheRenderer, pages[rec.page], &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
 	} else {
 		SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 	}
-	SDL_SetTextureColorMod(pages[rec.page], 255, 255, 255);
+	if (tint) {
+		SDL_SetTextureColorMod(pages[rec.page], 255, 255, 255);
+	}
 }
 
 // World HD (P1): blit the whole frame's src rect scaled into the caller-supplied dst rect. Used by

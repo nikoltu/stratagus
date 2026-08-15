@@ -874,24 +874,21 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 		const int f = type.HDSprite->FrameByName(std::to_string(absFrame).c_str());
 		if (f >= 0) {
 			const bool flip = (frame < 0) && type.Flip;
-			// Anchor mapping (the crux): DrawAtlasFrameClip centres the untrimmed canvas on
-			// (ax, ay): dst.x = ax - cw/2 + offx. The baked canvas cw/ch == the building's
-			// untrimmed sourceSize == the classic full frame footprint (type.Width/type.Height).
-			// The classic path draws that canvas by its top-left at `pos`. So choosing
-			// ax = pos.x + type.Width/2 makes ax - cw/2 == pos.x (cw/2 and Width/2 are the same
-			// integer since cw == Width), reproducing the classic on-screen top-left exactly.
-			// GpuWorldDrawZoom only scales the drawn size (both paths anchor by top-left and grow
-			// down/right), so this holds at every zoom without extra scaling of the anchor.
-			const int ax = pos.x + type.Width / 2;
-			const int ay = pos.y + type.Height / 2;
-			if (flip) {
-				type.HDSprite->DrawAtlasFrameClipX(f, ax, ay);
-			} else {
-				type.HDSprite->DrawAtlasFrameClip(f, ax, ay);
-			}
+			// Footprint mapping (the crux): the atlas canvas cw/ch is the RAW HD sourceSize (the
+			// full-resolution art, e.g. ~986px), NOT the classic tile footprint. Map that canvas
+			// onto the SAME on-screen rect the classic sprite occupies: top-left `pos` (already
+			// screenPos + the zoom-scaled centring offset), size type.Width x type.Height scaled by
+			// GpuWorldDrawZoom (the classic frame draws at Width x Height x zoom). DrawAtlasFrameClipScaled
+			// then fits the HD art into that rect, so the building keeps its classic tile footprint
+			// but renders at HD detail. (Contrast DrawAtlasFrameClip, which blits at native HD
+			// sw x sh and would draw the building several times too large.)
+			const float z = GpuWorldDrawZoom;
+			const int dw = (z == 1.0f) ? type.Width  : (int) std::lround(type.Width  * z);
+			const int dh = (z == 1.0f) ? type.Height : (int) std::lround(type.Height * z);
+			type.HDSprite->DrawAtlasFrameClipScaled(f, pos.x, pos.y, dw, dh, flip);
 			// Team-colour overlay: tint the `_team` mask to the player's canonical ramp colour
 			// (ramp[0], matching CPlayerColorGraphic::DrawPlayerColorFrameClipTex) and draw it over
-			// the base at the same anchor. Sparse: a building without team colour has no mask atlas.
+			// the base into the same footprint rect. Sparse: a building without team colour has no mask.
 			if (type.HDSpriteTeam && type.HDSpriteTeam->IsLoaded()) {
 				const int tf = type.HDSpriteTeam->FrameByName(std::to_string(absFrame).c_str());
 				if (tf >= 0) {
@@ -903,7 +900,7 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 						g = c.G;
 						b = c.B;
 					}
-					type.HDSpriteTeam->DrawAtlasFrameClipTinted(tf, ax, ay, r, g, b, flip);
+					type.HDSpriteTeam->DrawAtlasFrameClipScaled(tf, pos.x, pos.y, dw, dh, flip, r, g, b);
 				}
 			}
 			return; // HD drawn; skip the classic blit for this unit

@@ -373,17 +373,14 @@ public:
 	// No-op if not loaded or frame out of range. Asserts record.rotated==0.
 	void DrawAtlasFrameClip(int frame, int anchorX, int anchorY) const;
 
-	// Same canvas-centre placement as DrawAtlasFrameClip, but horizontally mirrored
-	// (SDL_RenderCopyEx + SDL_FLIP_HORIZONTAL). The destination rect is identical: for P2 the
-	// building frames' trim is symmetric enough that the mirror keeps the canvas centred on
-	// (anchorX, anchorY). Used for the frame<0 mirrored building facing.
-	void DrawAtlasFrameClipX(int frame, int anchorX, int anchorY) const;
-
-	// Draw one frame tinted by (r,g,b) via SDL_SetTextureColorMod on its page, then reset the mod
-	// to 255,255,255. Same dst-rect math as DrawAtlasFrameClip; `flip` selects RenderCopy vs
-	// RenderCopyEx(SDL_FLIP_HORIZONTAL). Used for the player-colour `_team` mask overlay.
-	void DrawAtlasFrameClipTinted(int frame, int anchorX, int anchorY,
-	                              uint8_t r, uint8_t g, uint8_t b, bool flip) const;
+	// Draw one frame so its RAW untrimmed HD canvas (cw x ch) is mapped onto the on-screen rect
+	// (dstX, dstY, dstW, dstH), with the trimmed sub-frame placed proportionally inside it. Unlike
+	// DrawAtlasFrameClip (which blits at native HD sw x sh and would render a building ~6x too big),
+	// this scales the HD art down to the caller's footprint rect. `flip` selects
+	// RenderCopy vs RenderCopyEx(SDL_FLIP_HORIZONTAL); an (r,g,b) other than 255,255,255 tints the
+	// page via SDL_SetTextureColorMod (reset to 255 after) for the player-colour `_team` mask.
+	void DrawAtlasFrameClipScaled(int frame, int dstX, int dstY, int dstW, int dstH, bool flip,
+	                              uint8_t r = 255, uint8_t g = 255, uint8_t b = 255) const;
 
 	// World HD (P1): draw the whole frame scaled into an explicit on-screen rect. Unlike
 	// DrawAtlasFrameClip there is NO canvas-centre and NO GpuWorldDrawZoom: the caller supplies
