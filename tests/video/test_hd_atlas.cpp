@@ -474,6 +474,150 @@ TEST_CASE("hd_atlas byte-exact trimmed draw (pivot/trim math gate)")
 	h.shutdown();
 }
 
+TEST_CASE("hd_atlas byte-exact draw with odd canvas dimensions (cw/2 truncation)")
+{
+	// Locks the integer-truncation placement rule (dst.x = anchorX - cw/2 + offx, C++
+	// truncating division) for an ODD cw/ch, so later pivot work has a documented baseline.
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("draw_odd");
+
+	const int pw = 16, ph = 16;
+	std::vector<uint8_t> page = patternPixels(pw, ph);
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, page));
+
+	// Odd sub-rect and odd untrimmed canvas.
+	const uint16_t sx = 1, sy = 2, sw = 5, sh = 3;
+	const uint16_t cw = 7, ch = 5; // odd canvas -> cw/2 == 3, ch/2 == 2 (truncated)
+	const int16_t offx = 0, offy = 0;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("epsilon_0", 0, sx, sy, sw, sh, offx, offy, cw, ch),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("epsilon_0");
+	REQUIRE(frame >= 0);
+
+	const uint8_t sr = 21, sg = 22, sb = 23, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	GpuWorldDrawZoom = 1.0f;
+	const int anchorX = 31, anchorY = 33;
+	g.DrawAtlasFrameClip(frame, anchorX, anchorY);
+	SDL_RenderPresent(h.renderer);
+
+	// C++ integer division truncates toward zero: cw/2 == 3 (not 3.5), ch/2 == 2 (not 2.5).
+	const int dstX = anchorX - cw / 2 + offx; // 31 - 3 + 0 = 28
+	const int dstY = anchorY - ch / 2 + offy; // 33 - 2 + 0 = 31
+	REQUIRE(dstX >= 0);
+	REQUIRE(dstY >= 0);
+	REQUIRE(dstX + sw < W);
+	REQUIRE(dstY + sh < H);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	auto screenPx = [&](int x, int y) -> const uint8_t * {
+		return sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+	};
+
+	bool blockExact = true;
+	for (int dy = 0; dy < sh; ++dy) {
+		for (int dx = 0; dx < sw; ++dx) {
+			const uint8_t *want = page.data()
+			    + (static_cast<size_t>(sy + dy) * pw + (sx + dx)) * 4;
+			const uint8_t *got = screenPx(dstX + dx, dstY + dy);
+			if (std::memcmp(want, got, 4) != 0) {
+				blockExact = false;
+			}
+		}
+	}
+	CHECK(blockExact);
+
+	auto isSentinel = [&](int x, int y) {
+		const uint8_t *p = screenPx(x, y);
+		return p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa;
+	};
+	CHECK(isSentinel(dstX + sw, dstY));  // one column past the right edge
+	CHECK(isSentinel(dstX, dstY + sh));  // one row past the bottom edge
+	CHECK(isSentinel(dstX - 1, dstY));   // one column before the left edge
+	CHECK(isSentinel(dstX, dstY - 1));   // one row above the top edge
+
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	GpuWorldDrawZoom = 1.0f;
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas Load rejects corrupt header counts and structurally invalid records")
+{
+	SdlHarness h;
+	if (!h.init(64, 64)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	auto writePage = [](const fs::path &p) {
+		return writePagePng(p, 16, 16, patternPixels(16, 16));
+	};
+
+	SUBCASE("frameCount far larger than the file can hold")
+	{
+		fs::path dir = caseDir("corrupt_count");
+		CHECK(writePage(dir / "atlas.p0.png"));
+		std::vector<hdatlas::HdFrameRecord> recs = {
+			makeRec("alpha_0", 0, 0, 0, 4, 4, 0, 0, 4, 4),
+		};
+		std::vector<uint8_t> bytes = buildHdAtlas(4096, {"atlas.p0.png"}, recs);
+		// Header layout: magic[4](0-3), cap u32(4-7), pageCount u32(8-11), frameCount u32(12-15).
+		// Overwrite frameCount with a huge value the file cannot possibly back; the real
+		// record bytes stay in place unread.
+		bytes[12] = 0xFF; bytes[13] = 0xFF; bytes[14] = 0xFF; bytes[15] = 0x7F;
+		writeBytes(dir / "atlas.hdatlas", bytes);
+		CAtlasGraphic g;
+		CHECK_FALSE(g.Load((dir / "atlas.hdatlas").string()));
+		CHECK_FALSE(g.IsLoaded());
+	}
+
+	SUBCASE("record references a page beyond pageCount")
+	{
+		fs::path dir = caseDir("bad_page_ref");
+		CHECK(writePage(dir / "atlas.p0.png"));
+		std::vector<hdatlas::HdFrameRecord> recs = {
+			makeRec("alpha_0", 0, 0, 0, 4, 4, 0, 0, 4, 4),
+			makeRec("beta_0", 5 /* only page 0 exists */, 0, 0, 4, 4, 0, 0, 4, 4),
+		};
+		writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+		CAtlasGraphic g;
+		CHECK_FALSE(g.Load((dir / "atlas.hdatlas").string()));
+		CHECK_FALSE(g.IsLoaded());
+	}
+
+	SUBCASE("frames present but pageCount == 0")
+	{
+		fs::path dir = caseDir("frames_no_pages");
+		std::vector<hdatlas::HdFrameRecord> recs = {
+			makeRec("alpha_0", 0, 0, 0, 4, 4, 0, 0, 4, 4),
+		};
+		writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {}, recs));
+		CAtlasGraphic g;
+		CHECK_FALSE(g.Load((dir / "atlas.hdatlas").string()));
+		CHECK_FALSE(g.IsLoaded());
+	}
+
+	h.shutdown();
+}
+
 TEST_CASE("hd_atlas zoom=2 scales the destination block size")
 {
 	const int W = 64, H = 64;

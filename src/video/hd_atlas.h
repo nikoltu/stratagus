@@ -52,7 +52,7 @@ struct HdFrameRecord {
 // the JSON object's map/iteration order.
 
 /// Four-byte magic identifying an .hdatlas stream.
-static const char kMagic[4] = { 'H', 'D', 'A', '1' };
+inline constexpr char kMagic[4] = { 'H', 'D', 'A', '1' };
 
 /// 32-bit FNV-1a hash of a NUL-terminated string. Offset basis 2166136261,
 /// prime 16777619. Shared by tool, engine and tests so keys hash identically.

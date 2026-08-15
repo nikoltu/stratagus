@@ -563,6 +563,15 @@ bool CAtlasGraphic::Load(const std::string &path)
 	if (resolved.empty()) {
 		return false;
 	}
+	// Fetch the file size up front so the header counts can be bounds-checked before any
+	// allocation is sized from them: a corrupt uint32 count (e.g. 0xFFFFFFFF) must not be
+	// able to make frames.resize()/pageNames.reserve() throw std::length_error/bad_alloc,
+	// which would propagate out of this bool-returning function and terminate the process.
+	std::error_code ec;
+	const uintmax_t fileSize = fs::file_size(resolved, ec);
+	if (ec) {
+		return false;
+	}
 	auto fp = std::make_unique<CFile>();
 	if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
 		return false;
@@ -577,6 +586,24 @@ bool CAtlasGraphic::Load(const std::string &path)
 	uint32_t frameCount = 0;
 	if (!readExact(magic, 4) || memcmp(magic, hdatlas::kMagic, 4) != 0
 		|| !readExact(&cap, 4) || !readExact(&pageCount, 4) || !readExact(&frameCount, 4)) {
+		fp->close();
+		cap = 0;
+		return false;
+	}
+
+	// Reject header counts that cannot possibly fit in the file before allocating anything
+	// sized from them (64-bit math avoids the uint32 overflow that a naive size check could
+	// hit). Each page needs at least a 2-byte nameLen; each frame is a fixed HdFrameRecord.
+	if ((uint64_t) frameCount * sizeof(hdatlas::HdFrameRecord) > (uint64_t) fileSize
+		|| (uint64_t) pageCount * 2 > (uint64_t) fileSize) {
+		fp->close();
+		cap = 0;
+		return false;
+	}
+	// An atlas with frames must reference at least one page (see Fix 4 below); a corrupt
+	// file could otherwise claim frames but no pages, which would leave Load() returning
+	// true while IsLoaded() (!pages.empty()) stays false and every draw silently no-ops.
+	if (frameCount > 0 && pageCount == 0) {
 		fp->close();
 		cap = 0;
 		return false;
@@ -611,8 +638,10 @@ bool CAtlasGraphic::Load(const std::string &path)
 	fp->close();
 
 	// P0 forbids rotated frames (the importer asserts rotated==0); reject defensively here too.
+	// Also reject any record referencing a page beyond the header's pageCount: a frame
+	// pointing at a missing page must fail at load, not silently no-op at draw time.
 	for (const hdatlas::HdFrameRecord &rec : frames) {
-		if (rec.rotated != 0) {
+		if (rec.rotated != 0 || rec.page >= pageCount) {
 			frames.clear();
 			cap = 0;
 			return false;

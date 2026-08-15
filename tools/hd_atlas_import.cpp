@@ -313,6 +313,12 @@ bool packAtlas(std::vector<FrameInput> &frames, const Image &src, int cap,
 	};
 	std::map<std::array<int, 4>, Loc> placed; // (fx,fy,fw,fh) -> location
 
+	// The .hdatlas stores only nameHash (never the name itself), so two distinct frame
+	// names that collide under 32-bit FNV-1a would make FrameByName silently resolve to
+	// the wrong index for one of them. Detect any such collision here, where the names
+	// are still available, and fail loud rather than ship an ambiguous atlas.
+	std::map<uint32_t, std::string> seenHashes; // nameHash -> first frame name seen
+
 	int curPage = -1;
 	int shelfX = 0, shelfY = 0, shelfH = 0;
 
@@ -380,9 +386,24 @@ bool packAtlas(std::vector<FrameInput> &frames, const Image &src, int cap,
 			placed.emplace(key, loc);
 		}
 
+		const uint32_t nameHash = hdatlas::fnv1a(fi.name.c_str());
+		auto seenIt = seenHashes.find(nameHash);
+		if (seenIt != seenHashes.end()) {
+			if (seenIt->second != fi.name) {
+				char buf[512];
+				std::snprintf(buf, sizeof(buf),
+				              "FNV-1a nameHash collision: '%s' and '%s' both hash to 0x%08x",
+				              seenIt->second.c_str(), fi.name.c_str(), nameHash);
+				err = buf;
+				return false;
+			}
+		} else {
+			seenHashes.emplace(nameHash, fi.name);
+		}
+
 		hdatlas::HdFrameRecord rec;
 		std::memset(&rec, 0, sizeof(rec));
-		rec.nameHash = hdatlas::fnv1a(fi.name.c_str());
+		rec.nameHash = nameHash;
 		rec.page = uint16_t(loc.page);
 		rec.sx = uint16_t(loc.x);
 		rec.sy = uint16_t(loc.y);
