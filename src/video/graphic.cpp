@@ -719,6 +719,23 @@ void CAtlasGraphic::DrawAtlasFrameClip(int frame, int anchorX, int anchorY) cons
 	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 }
 
+// World HD (P1): blit the whole frame's src rect scaled into the caller-supplied dst rect. Used by
+// the map terrain draw, which computes the exact on-screen tile rect itself; no canvas-centre/zoom
+// bookkeeping here (terrain frames are untrimmed 216px, so full frame == canvas).
+void CAtlasGraphic::DrawAtlasFrameFull(int frame, const SDL_Rect &dst) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
+	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
+}
+
 /**
 **  Lazily build and cache a small per-frame texture from mSurface, for RGBA HUD graphics whose
 **  whole sheet was too large for one GPU texture (mTexture == null, e.g. the tall icons_hd sheet).

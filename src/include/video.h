@@ -373,6 +373,12 @@ public:
 	// No-op if not loaded or frame out of range. Asserts record.rotated==0.
 	void DrawAtlasFrameClip(int frame, int anchorX, int anchorY) const;
 
+	// World HD (P1): draw the whole frame scaled into an explicit on-screen rect. Unlike
+	// DrawAtlasFrameClip there is NO canvas-centre and NO GpuWorldDrawZoom: the caller supplies
+	// the exact destination tile rect. Terrain frames are untrimmed (offx/offy==0, cw/ch==sw/sh)
+	// so the trimmed src rect is the full frame. No-op if not loaded or frame/page out of range.
+	void DrawAtlasFrameFull(int frame, const SDL_Rect &dst) const;
+
 private:
 	uint32_t cap = 0;
 	std::vector<hdatlas::HdFrameRecord> frames;

@@ -88,6 +88,66 @@ static void EnsureHDTileGraphic()
 	Map.HDTileGraphic->Load();
 }
 
+/**
+**  World HD (P1): lazily load the RAW Remastered terrain atlas for this map's tileset and precompute
+**  the megatile-index -> atlas-frame lookup used by the per-tile blit. The atlas is a .hdatlas (P0
+**  format) deployed beside the classic tileset image as tilesets/<dir>/terrain/<era>.hdatlas (its
+**  page PNGs sit in the same directory). The era key differs from the tileset directory name:
+**  summer->forest, winter->iceland, swamp->swamp, wasteland->xswamp (confirmed from the RAW bgs_*.json
+**  frame-name prefixes). Frame for megatile M = FrameByName("<era>_" + (M-16)); fog (M<16) and any M
+**  whose (M-16) is beyond the atlas map to -1 (classic path). If the file is absent Load() fails and
+**  HDTileAtlas stays null so the classic TileGraphic path draws unchanged. Attempted once per map.
+*/
+static void EnsureHDTileAtlas()
+{
+	if (Map.HDTileAtlasTried) {
+		return;
+	}
+	Map.HDTileAtlasTried = true;
+
+	const std::string &img = Map.Tileset.ImageFile;
+	const char *era = nullptr;
+	if (img.find("summer") != std::string::npos) {
+		era = "forest";
+	} else if (img.find("winter") != std::string::npos) {
+		era = "iceland";
+	} else if (img.find("wasteland") != std::string::npos) {
+		era = "xswamp";
+	} else if (img.find("swamp") != std::string::npos) {
+		era = "swamp";
+	}
+	if (!era) {
+		return;
+	}
+
+	// tilesets/<dir>/terrain/<era>.hdatlas, in the same directory as the classic tileset image.
+	const auto slash = img.rfind('/');
+	std::string path = (slash == std::string::npos ? std::string() : img.substr(0, slash + 1));
+	path += era;
+	path += ".hdatlas";
+
+	auto atlas = std::make_shared<CAtlasGraphic>();
+	if (!atlas->Load(path)) {
+		return; // absent/corrupt atlas -> classic path (graceful degradation, no crash)
+	}
+	Map.HDTileAtlas = std::move(atlas);
+
+	// Precompute megatile index -> atlas frame (O(1) in the hot loop; no per-tile string hashing).
+	// The megatile index M is the frame index into the classic TileGraphic sheet, so size the table
+	// to that sheet's frame count (fall back to the atlas span offset by the 16 fog slots if the
+	// classic sheet is somehow unavailable).
+	const int count = Map.TileGraphic ? Map.TileGraphic->NumFrames
+									   : Map.HDTileAtlas->NumFrames() + 16;
+	Map.HDTileAtlasFrameForTile.assign(count, -1);
+	std::string name;
+	for (int m = 16; m < count; ++m) {
+		name = era;
+		name += '_';
+		name += std::to_string(m - 16);
+		Map.HDTileAtlasFrameForTile[m] = Map.HDTileAtlas->FrameByName(name.c_str());
+	}
+}
+
 CViewport::~CViewport()
 {
 	this->Clean();
@@ -338,6 +398,10 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 	// (zoomed) extent, otherwise the native-stepping loop would iterate ~Zoom× too many columns/rows
 	// (the surplus fall off-screen and would only be discarded by the renderer clip). Capping to the
 	// render size makes the native tile count exactly fill the zoomed viewport.
+	// World HD (P1): ensure the HD terrain atlas (+ its megatile->frame lookup) is loaded once for
+	// this map before the tile loop; when present it replaces the per-tile blit in all paths below.
+	EnsureHDTileAtlas();
+
 	const bool gpuZoomTiles = (TheScreen != this->MapRenderSurface) && (drawZoom == 1.0f)
 	                          && (this->Zoom != 1.0f);
 	int ex = this->BottomRightPos.x;
@@ -433,6 +497,13 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 			} else {
 				tile = mf.playerInfo.SeenTile;
 			}
+			// World HD (P1): when the terrain atlas is loaded and this megatile has an HD frame,
+			// blit the base terrain from the atlas instead of the classic TileGraphic sheet. The
+			// atlas carries its own GPU textures, so it overrides all three classic paths; only the
+			// blit is replaced (flags, DEBUG overlay, grid, increments below are untouched). Fog
+			// (M<16) and out-of-range tiles map to -1 and fall through to the classic path.
+			const int hdFrame = (Map.HDTileAtlas && tile < Map.HDTileAtlasFrameForTile.size())
+									? Map.HDTileAtlasFrameForTile[tile] : -1;
 			if (drawZoom != 1.0f) {
 				// Crisp-zoom terrain: dx/dy are LOGICAL positions (this pass runs with
 				// origin 0 and Zoom-1 stepping, exactly like the classic path), so multiply
@@ -440,13 +511,18 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				// on-screen size. Deriving width/height from consecutive rounded tile edges
 				// makes adjacent tiles abut seamlessly (no 1px gaps from rounding position
 				// and size independently). Prefer the HD sheet; fall back to the 64px tiles.
-				CGraphic *const src = Map.HDTileGraphic ? Map.HDTileGraphic.get()
-													    : Map.TileGraphic.get();
 				const int sx0 = static_cast<int>(std::lround(dx * drawZoom));
 				const int sy0 = static_cast<int>(std::lround(dy * drawZoom));
 				const int sx1 = static_cast<int>(std::lround((dx + graphicTileSize.x) * drawZoom));
 				const int sy1 = static_cast<int>(std::lround((dy + graphicTileSize.y) * drawZoom));
-				src->DrawFrameClipScaled(tile, sx0, sy0, sx1 - sx0, sy1 - sy0);
+				if (hdFrame >= 0) {
+					const SDL_Rect dst = { sx0, sy0, sx1 - sx0, sy1 - sy0 };
+					Map.HDTileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+				} else {
+					CGraphic *const src = Map.HDTileGraphic ? Map.HDTileGraphic.get()
+														    : Map.TileGraphic.get();
+					src->DrawFrameClipScaled(tile, sx0, sy0, sx1 - sx0, sy1 - sy0);
+				}
 			} else if (gpuZoomTiles) {
 				// Zoomed GPU direct render: dx,dy are logical (native-stepped) screen positions.
 				// Derive both this tile's zoomed top-left AND its size from consecutive rounded grid
@@ -465,9 +541,18 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				const int zy1 = this->TopLeftPos.y
 				                + static_cast<int>(std::lround((dy + graphicTileSize.y - this->TopLeftPos.y) * z));
 				const SDL_Rect dst = { zx, zy, zx1 - zx, zy1 - zy };
-				Map.TileGraphic->DrawFrameClipTexDst(tile, dst);
+				if (hdFrame >= 0) {
+					Map.HDTileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+				} else {
+					Map.TileGraphic->DrawFrameClipTexDst(tile, dst);
+				}
 			} else {
-				Map.TileGraphic->DrawFrameClip(tile, dx, dy);
+				if (hdFrame >= 0) {
+					const SDL_Rect dst = { dx, dy, graphicTileSize.x, graphicTileSize.y };
+					Map.HDTileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+				} else {
+					Map.TileGraphic->DrawFrameClip(tile, dx, dy);
+				}
 			}
 #ifdef DEBUG
 			// AStar passability overlay

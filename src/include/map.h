@@ -98,6 +98,7 @@
 ----------------------------------------------------------------------------*/
 
 class CGraphic;
+class CAtlasGraphic;
 class CPlayer;
 class CFile;
 class CTileset;
@@ -263,6 +264,14 @@ public:
 	/// Null when the HD art is absent (crisp path then scales the 64px TileGraphic instead).
 	std::shared_ptr<CGraphic> HDTileGraphic;
 	bool HDTileGraphicTried = false; /// guards the one-shot lazy load attempt above
+	/// World HD (P1): atlas-backed HD terrain. When present, the map draw blits each base terrain
+	/// tile from this atlas (RAW 216px Remastered art) instead of the classic TileGraphic sheet.
+	/// Loaded lazily once per map; null when the .hdatlas is absent (classic path is the fallback).
+	std::shared_ptr<CAtlasGraphic> HDTileAtlas;
+	bool HDTileAtlasTried = false; /// guards the one-shot lazy load attempt of HDTileAtlas
+	/// Megatile index (CTile.tile / SeenTile) -> atlas frame index, or -1 when no HD frame exists
+	/// (fog M<16, or M-16 beyond the atlas). Precomputed once by the loader for O(1) hot-loop use.
+	std::vector<int> HDTileAtlasFrameForTile;
 	bool isMapInitialized = false ;
 
 	CMapInfo Info;             /// descriptive information
