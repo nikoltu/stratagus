@@ -40,12 +40,16 @@
 #include "stratagus.h"
 #include "vec2i.h"
 
+#include "../video/hd_atlas.h"
+
 #include <SDL.h>
 #include <guisan.hpp>
 #include <guisan/sdl/sdlimage.hpp>
 #include <map>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 class CFont;
@@ -336,6 +340,44 @@ public:
 	static std::shared_ptr<CPlayerColorGraphic> Get(const std::string &file);
 
 	std::shared_ptr<CPlayerColorGraphic> Clone(bool grayscale = false) const;
+};
+
+// World HD (P0): atlas-backed graphic. Loads a .hdatlas binary (see video/hd_atlas.h) plus its
+// packed RGBA PNG pages produced by the hd_atlas_import host tool, and draws a single trimmed
+// frame with correct src-rect / trim-offset / canvas placement through the existing GPU zoom path
+// (GpuWorldDrawZoom, matching CGraphic::DrawFrameClipTex). This is strictly ADDITIVE and shares
+// nothing with the uniform-grid sprite model (frame_map / GenFramesMap / DrawFrameClipTex).
+class CAtlasGraphic
+{
+public:
+	CAtlasGraphic() = default;
+	~CAtlasGraphic();
+	CAtlasGraphic(const CAtlasGraphic &) = delete;
+	CAtlasGraphic &operator=(const CAtlasGraphic &) = delete;
+
+	// Loads <path> (a .hdatlas) and its page PNGs (page filenames are stored in the .hdatlas,
+	// resolved relative to the .hdatlas file's directory). Returns false on any failure (missing
+	// file, bad magic, truncation, page load fail, or a record with rotated!=0). Safe to call once.
+	bool Load(const std::string &path);
+	bool IsLoaded() const { return !pages.empty(); }
+
+	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.
+	int FrameByName(const char *name) const;
+	int NumFrames() const { return (int)frames.size(); }
+	const hdatlas::HdFrameRecord &Frame(int i) const { return frames[i]; }
+
+	// Draw one frame so its untrimmed canvas is centred on (anchorX, anchorY):
+	//   dst.x = anchorX - cw/2 + offx ; dst.y = anchorY - ch/2 + offy
+	//   dst.w = sw * zoom ; dst.h = sh * zoom   (zoom = GpuWorldDrawZoom, as DrawFrameClipTex)
+	//   src  = { sx, sy, sw, sh } on pages[record.page]
+	// No-op if not loaded or frame out of range. Asserts record.rotated==0.
+	void DrawAtlasFrameClip(int frame, int anchorX, int anchorY) const;
+
+private:
+	uint32_t cap = 0;
+	std::vector<hdatlas::HdFrameRecord> frames;
+	std::vector<SDL_Texture *> pages;                 // one texture per page PNG
+	std::unordered_map<uint32_t, uint32_t> byHash;    // nameHash -> frame index
 };
 
 #ifdef USE_MNG

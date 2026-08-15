@@ -45,10 +45,12 @@
 
 #include <SDL_image.h>
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 
 /*----------------------------------------------------------------------------
 --  Variables
@@ -525,6 +527,167 @@ void CGraphic::DrawFrameClipTexX(unsigned frame, int x, int y) const
 	SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
 	SDL_Rect dst = {x, y, dw, dh};
 	SDL_RenderCopyEx(TheRenderer, mTexture, &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+}
+
+/*----------------------------------------------------------------------------
+--  CAtlasGraphic (World HD P0): atlas-backed frame draw
+----------------------------------------------------------------------------*/
+
+// The importer writes HdFrameRecord as a fixed 24-byte, naturally-aligned struct with no interior
+// padding, so records can be fread straight into the vector on the little-endian engine targets.
+static_assert(sizeof(hdatlas::HdFrameRecord) == 24, "HdFrameRecord must stay byte-packed at 24");
+
+CAtlasGraphic::~CAtlasGraphic()
+{
+	for (SDL_Texture *tex : pages) {
+		if (tex) {
+			SDL_DestroyTexture(tex);
+		}
+	}
+	pages.clear();
+	frames.clear();
+	byHash.clear();
+}
+
+// Load <path>.hdatlas + its page PNGs. See video/hd_atlas.h for the on-disk layout. Any failure
+// (missing/short file, bad magic, page decode fail, or a rotated record) leaves the object empty
+// and returns false, releasing anything already created. Little-endian target assumed (as elsewhere
+// in the engine's binary I/O).
+bool CAtlasGraphic::Load(const std::string &path)
+{
+	if (!pages.empty()) {
+		return true; // already loaded; Load is single-shot
+	}
+
+	const fs::path resolved = LibraryFileName(path);
+	if (resolved.empty()) {
+		return false;
+	}
+	auto fp = std::make_unique<CFile>();
+	if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+		return false;
+	}
+	// Read helper: returns true only on an exact-length read (guards against truncation).
+	auto readExact = [&fp](void *buf, size_t len) -> bool {
+		return len == 0 || (size_t) fp->read(buf, len) == len;
+	};
+
+	char magic[4];
+	uint32_t pageCount = 0;
+	uint32_t frameCount = 0;
+	if (!readExact(magic, 4) || memcmp(magic, hdatlas::kMagic, 4) != 0
+		|| !readExact(&cap, 4) || !readExact(&pageCount, 4) || !readExact(&frameCount, 4)) {
+		fp->close();
+		cap = 0;
+		return false;
+	}
+
+	// Page-name table: uint16 nameLen; char name[nameLen] (PNG filename, no path).
+	std::vector<std::string> pageNames;
+	pageNames.reserve(pageCount);
+	for (uint32_t i = 0; i < pageCount; ++i) {
+		uint16_t nameLen = 0;
+		if (!readExact(&nameLen, 2)) {
+			fp->close();
+			cap = 0;
+			return false;
+		}
+		std::string name(nameLen, '\0');
+		if (nameLen && !readExact(&name[0], nameLen)) {
+			fp->close();
+			cap = 0;
+			return false;
+		}
+		pageNames.push_back(std::move(name));
+	}
+
+	// Packed frame records (deterministic, name-sorted order — see hd_atlas.h).
+	frames.resize(frameCount);
+	if (frameCount && !readExact(frames.data(), (size_t) frameCount * sizeof(hdatlas::HdFrameRecord))) {
+		frames.clear();
+		cap = 0;
+		return false;
+	}
+	fp->close();
+
+	// P0 forbids rotated frames (the importer asserts rotated==0); reject defensively here too.
+	for (const hdatlas::HdFrameRecord &rec : frames) {
+		if (rec.rotated != 0) {
+			frames.clear();
+			cap = 0;
+			return false;
+		}
+	}
+
+	// Decode each page PNG (relative to the .hdatlas directory) and upload it as an RGBA texture,
+	// reusing the same SDL_image decode route as CGraphic::Load and the nearest+blend upload helper.
+	const fs::path dir = resolved.parent_path();
+	pages.reserve(pageCount);
+	for (uint32_t i = 0; i < pageCount; ++i) {
+		const fs::path pagePath = dir / pageNames[i];
+		auto pf = std::make_unique<CFile>();
+		if (pf->open(pagePath.string().c_str(), CL_OPEN_READ) == -1) {
+			goto pageFail;
+		}
+		{
+			SDL_Surface *surface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(pf)), 1);
+			if (!surface) {
+				goto pageFail;
+			}
+			SDL_Texture *tex = UploadSurfaceToTexture(surface);
+			SDL_FreeSurface(surface);
+			if (!tex) {
+				// Paletted (helper returns nullptr) or GPU upload failure: pages must be RGBA.
+				goto pageFail;
+			}
+			pages.push_back(tex);
+		}
+		continue;
+	pageFail:
+		for (SDL_Texture *tex : pages) {
+			if (tex) {
+				SDL_DestroyTexture(tex);
+			}
+		}
+		pages.clear();
+		frames.clear();
+		cap = 0;
+		return false;
+	}
+
+	// Name -> frame-index map for FrameByName lookups.
+	byHash.reserve(frames.size());
+	for (uint32_t i = 0; i < frames.size(); ++i) {
+		byHash.emplace(frames[i].nameHash, i);
+	}
+	return true;
+}
+
+// FNV-1a of the key -> frame index (or -1). Hash matches the importer and hd_atlas.h.
+int CAtlasGraphic::FrameByName(const char *name) const
+{
+	auto it = byHash.find(hdatlas::fnv1a(name));
+	return it != byHash.end() ? (int) it->second : -1;
+}
+
+// Draw one trimmed atlas frame with its untrimmed canvas centred on (anchorX, anchorY). Mirrors
+// CGraphic::DrawFrameClipTex for the zoom + RenderCopy: only the destination size scales by the
+// world zoom, so the GPU upscales the HD art in place (byte-identical to native at zoom==1).
+void CAtlasGraphic::DrawAtlasFrameClip(int frame, int anchorX, int anchorY) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	const int dw = (GpuWorldDrawZoom == 1.0f) ? rec.sw : (int) std::lround(rec.sw * GpuWorldDrawZoom);
+	const int dh = (GpuWorldDrawZoom == 1.0f) ? rec.sh : (int) std::lround(rec.sh * GpuWorldDrawZoom);
+	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
+	SDL_Rect dst = {anchorX - rec.cw / 2 + rec.offx, anchorY - rec.ch / 2 + rec.offy, dw, dh};
+	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 }
 
 /**
