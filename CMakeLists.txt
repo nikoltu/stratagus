@@ -1303,6 +1303,29 @@ endif()
 
 ########### next target ###############
 
+set(hd_atlas_import_SRCS
+	tools/hd_atlas_import.cpp
+	src/content/json.cpp
+)
+source_group(hd_atlas_import FILES ${hd_atlas_import_SRCS})
+add_executable(hd_atlas_import ${hd_atlas_import_SRCS})
+target_include_directories(hd_atlas_import PRIVATE src/content src/video src/include ${PNG_INCLUDE_DIR})
+target_compile_definitions(hd_atlas_import PRIVATE ${PNG_DEFINITIONS})
+target_link_libraries(hd_atlas_import ${PNG_LIBRARY} ${ZLIB_LIBRARIES})
+
+if(WIN32 AND MINGW AND ENABLE_STATIC)
+	set_target_properties(hd_atlas_import PROPERTIES LINK_FLAGS "${LINK_FLAGS} -static-libgcc -static-libstdc++")
+endif()
+
+if(BUILD_VENDORED_MEDIA_LIBS)
+	add_dependencies(hd_atlas_import zlib)
+	add_dependencies(hd_atlas_import png)
+endif()
+
+install(TARGETS hd_atlas_import DESTINATION ${BINDIR})
+
+########### next target ###############
+
 set(gameheaders_HDRS
 	gameheaders/stratagus-game-installer.nsi
 	gameheaders/stratagus-gameutils.h
