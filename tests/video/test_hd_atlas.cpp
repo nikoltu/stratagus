@@ -939,3 +939,395 @@ TEST_CASE("hd_atlas megatile->frame lookup mirrors the P1 map_draw.cpp naming ru
 	new (&g) CAtlasGraphic();
 	h.shutdown();
 }
+
+// ===========================================================================
+// Group 3 — DrawAtlasFrameClipScaled (HD building draw: canvas -> footprint)
+// ===========================================================================
+
+TEST_CASE("hd_atlas DrawAtlasFrameClipScaled maps trimmed canvas onto the footprint rect")
+{
+	// Building-draw case: the frame's untrimmed HD canvas (cw x ch) is scaled to fit the
+	// caller's footprint rect (dstW x dstH); the trimmed sub-frame (offx/offy, sw x sh) must
+	// land at a proportionally scaled offset/size inside that rect.
+	const int W = 320, H = 320;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("scaled_trim");
+
+	const int pw = 64, ph = 64;
+	std::vector<uint8_t> page = patternPixels(pw, ph);
+	// Overwrite the sub-rect (sx,sy,sw,sh) with a known solid colour so the block is
+	// unambiguous against the varying background pattern.
+	const uint16_t sx = 8, sy = 8, sw = 25, sh = 25;
+	const uint8_t br = 200, bg = 90, bb = 30;
+	for (int y = 0; y < sh; ++y) {
+		for (int x = 0; x < sw; ++x) {
+			uint8_t *p = page.data() + (static_cast<size_t>(sy + y) * pw + (sx + x)) * 4;
+			p[0] = br; p[1] = bg; p[2] = bb; p[3] = 255;
+		}
+	}
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, page));
+
+	// cw=ch=100, sw=sh=50 is the documented example, but the sub-rect must fit inside the
+	// page; here cw=ch=100 stays, sw=sh=25 with offx=offy=25 keeps the same trim ratios
+	// (offx/cw == 0.25, sw/cw == 0.25) while fitting inside a small synthetic page.
+	const uint16_t cw = 100, ch = 100;
+	const int16_t offx = 25, offy = 25;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("wall_0", 0, sx, sy, sw, sh, offx, offy, cw, ch),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("wall_0");
+	REQUIRE(frame >= 0);
+
+	const uint8_t sr = 51, sg = 52, sb = 53, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	// scale = 2x: dstW/cw = 200/100 = 2, dstH/ch = 200/100 = 2.
+	const int dstX = 10, dstY = 20, dstW = 200, dstH = 200;
+	g.DrawAtlasFrameClipScaled(frame, dstX, dstY, dstW, dstH, /*flip*/false);
+	SDL_RenderPresent(h.renderer);
+
+	const int blockX = dstX + offx * 2; // 10 + 50 = 60
+	const int blockY = dstY + offy * 2; // 20 + 50 = 70
+	const int blockW = sw * 2;          // 50
+	const int blockH = sh * 2;          // 50
+	REQUIRE(blockX + blockW < W);
+	REQUIRE(blockY + blockH < H);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	auto screenPx = [&](int x, int y) -> const uint8_t * {
+		return sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+	};
+	auto isBlock = [&](int x, int y) {
+		const uint8_t *p = screenPx(x, y);
+		return p[0] == br && p[1] == bg && p[2] == bb;
+	};
+	auto isSentinel = [&](int x, int y) {
+		const uint8_t *p = screenPx(x, y);
+		return p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa;
+	};
+
+	// The whole scaled block is the solid colour...
+	bool blockSolid = true;
+	for (int dy = 0; dy < blockH; ++dy) {
+		for (int dx = 0; dx < blockW; ++dx) {
+			if (!isBlock(blockX + dx, blockY + dy)) {
+				blockSolid = false;
+			}
+		}
+	}
+	CHECK(blockSolid);
+
+	// ...and the sentinel is untouched just outside its edges.
+	CHECK(isSentinel(blockX - 1, blockY));
+	CHECK(isSentinel(blockX, blockY - 1));
+	CHECK(isSentinel(blockX + blockW, blockY));
+	CHECK(isSentinel(blockX, blockY + blockH));
+
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas DrawAtlasFrameClipScaled downscales an oversized HD canvas into a small footprint")
+{
+	// The real building case: HD canvas (cw/ch) far larger than the on-screen footprint
+	// (dstW/dstH), i.e. scale < 1. Confirms the block still lands proportionally and stays
+	// fully within the footprint rect (no overflow from truncation/rounding).
+	const int W = 128, H = 128;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("scaled_down");
+
+	const int pw = 64, ph = 64;
+	std::vector<uint8_t> page = patternPixels(pw, ph);
+	const uint16_t sx = 4, sy = 4, sw = 40, sh = 40;
+	const uint8_t br = 10, bg = 210, bb = 60;
+	for (int y = 0; y < sh; ++y) {
+		for (int x = 0; x < sw; ++x) {
+			uint8_t *p = page.data() + (static_cast<size_t>(sy + y) * pw + (sx + x)) * 4;
+			p[0] = br; p[1] = bg; p[2] = bb; p[3] = 255;
+		}
+	}
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, page));
+
+	// cw=ch=200 (large HD canvas), sub-frame fills it (offx=offy=0, sw=sh=40 relative to a
+	// 200 canvas is a small trimmed region near the origin).
+	const uint16_t cw = 200, ch = 200;
+	const int16_t offx = 0, offy = 0;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("big_0", 0, sx, sy, sw, sh, offx, offy, cw, ch),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("big_0");
+	REQUIRE(frame >= 0);
+
+	const uint8_t sr = 61, sg = 62, sb = 63, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	// scale = 0.25: dstW/cw = 50/200 = 0.25.
+	const int dstX = 5, dstY = 6, dstW = 50, dstH = 50;
+	g.DrawAtlasFrameClipScaled(frame, dstX, dstY, dstW, dstH, /*flip*/false);
+	SDL_RenderPresent(h.renderer);
+
+	const int blockX = dstX; // offx*scale == 0
+	const int blockY = dstY;
+	const int blockW = static_cast<int>(std::lround(sw * 0.25)); // 10
+	const int blockH = static_cast<int>(std::lround(sh * 0.25)); // 10
+	REQUIRE(blockX + blockW <= dstX + dstW);
+	REQUIRE(blockY + blockH <= dstY + dstH);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	auto screenPx = [&](int x, int y) -> const uint8_t * {
+		return sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+	};
+	auto isBlock = [&](int x, int y) {
+		const uint8_t *p = screenPx(x, y);
+		return p[0] == br && p[1] == bg && p[2] == bb;
+	};
+	auto isSentinel = [&](int x, int y) {
+		const uint8_t *p = screenPx(x, y);
+		return p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa;
+	};
+
+	// The scaled block's top-left corner is painted with the solid colour...
+	CHECK(isBlock(blockX, blockY));
+	CHECK(isBlock(blockX + blockW - 1, blockY + blockH - 1));
+	// ...and stays inside the footprint: nothing painted at/after the footprint's far edge.
+	CHECK(isSentinel(dstX + dstW, dstY));
+	CHECK(isSentinel(dstX, dstY + dstH));
+	// Nothing painted before the footprint's near edge either.
+	CHECK(isSentinel(dstX - 1, dstY));
+	CHECK(isSentinel(dstX, dstY - 1));
+
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas DrawAtlasFrameClipScaled tints via colour-mod and resets it afterwards")
+{
+	const int W = 128, H = 128;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("scaled_tint");
+
+	// A fully white, opaque frame so the tint result is unambiguous.
+	const int pw = 32, ph = 32;
+	std::vector<uint8_t> page(static_cast<size_t>(pw) * ph * 4, 255);
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, page));
+
+	const uint16_t sx = 0, sy = 0, sw = 16, sh = 16;
+	const uint16_t cw = 16, ch = 16;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("tint_0", 0, sx, sy, sw, sh, 0, 0, cw, ch),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("tint_0");
+	REQUIRE(frame >= 0);
+
+	SDL_SetRenderDrawColor(h.renderer, 0, 0, 0, 255);
+	SDL_RenderClear(h.renderer);
+
+	const int dstX = 10, dstY = 10, dstW = 32, dstH = 32;
+	g.DrawAtlasFrameClipScaled(frame, dstX, dstY, dstW, dstH, /*flip*/false,
+	                           /*r*/128, /*g*/0, /*b*/0);
+	SDL_RenderPresent(h.renderer);
+
+	SDL_LockSurface(h.screen);
+	{
+		const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+		const int pitch = h.screen->pitch;
+		const uint8_t *p = sp + static_cast<size_t>(dstY + dstH / 2) * pitch
+		    + static_cast<size_t>(dstX + dstW / 2) * 4;
+		CHECK(p[0] == 128);
+		CHECK(p[1] == 0);
+		CHECK(p[2] == 0);
+	}
+	SDL_UnlockSurface(h.screen);
+
+	// A subsequent plain (default-colour) draw of the SAME page must NOT be tinted: proves
+	// the colour-mod is reset to (255,255,255) after the tinted draw.
+	SDL_SetRenderDrawColor(h.renderer, 0, 0, 0, 255);
+	SDL_RenderClear(h.renderer);
+	g.DrawAtlasFrameClipScaled(frame, dstX, dstY, dstW, dstH, /*flip*/false);
+	SDL_RenderPresent(h.renderer);
+
+	SDL_LockSurface(h.screen);
+	{
+		const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+		const int pitch = h.screen->pitch;
+		const uint8_t *p = sp + static_cast<size_t>(dstY + dstH / 2) * pitch
+		    + static_cast<size_t>(dstX + dstW / 2) * 4;
+		CHECK(p[0] == 255);
+		CHECK(p[1] == 255);
+		CHECK(p[2] == 255);
+	}
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas DrawAtlasFrameClipScaled flip=true mirrors the frame horizontally")
+{
+	const int W = 128, H = 128;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("scaled_flip");
+
+	// A horizontally-asymmetric 4x4 frame: left half red, right half blue, both opaque, so a
+	// horizontal mirror swaps which side is which.
+	const int pw = 8, ph = 8;
+	std::vector<uint8_t> page(static_cast<size_t>(pw) * ph * 4, 0);
+	for (int y = 0; y < ph; ++y) {
+		for (int x = 0; x < pw; ++x) {
+			uint8_t *p = page.data() + (static_cast<size_t>(y) * pw + x) * 4;
+			if (x < pw / 2) {
+				p[0] = 255; p[1] = 0; p[2] = 0; p[3] = 255; // red on the left
+			} else {
+				p[0] = 0; p[1] = 0; p[2] = 255; p[3] = 255; // blue on the right
+			}
+		}
+	}
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, page));
+
+	const uint16_t sx = 0, sy = 0, sw = 8, sh = 8;
+	const uint16_t cw = 8, ch = 8;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("flip_0", 0, sx, sy, sw, sh, 0, 0, cw, ch),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("flip_0");
+	REQUIRE(frame >= 0);
+
+	const int dstX = 10, dstY = 10, dstW = 8, dstH = 8; // scale 1x, keep pixel math exact
+
+	auto sampleAt = [&](int x, int y, uint8_t out[4]) {
+		SDL_LockSurface(h.screen);
+		const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+		const int pitch = h.screen->pitch;
+		const uint8_t *p = sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+		std::memcpy(out, p, 4);
+		SDL_UnlockSurface(h.screen);
+	};
+
+	// Unflipped: left quarter (near dstX) is red, right quarter (near dstX+dstW) is blue.
+	SDL_SetRenderDrawColor(h.renderer, 0, 0, 0, 255);
+	SDL_RenderClear(h.renderer);
+	g.DrawAtlasFrameClipScaled(frame, dstX, dstY, dstW, dstH, /*flip*/false);
+	SDL_RenderPresent(h.renderer);
+	uint8_t left[4], right[4];
+	sampleAt(dstX + 1, dstY + dstH / 2, left);
+	sampleAt(dstX + dstW - 2, dstY + dstH / 2, right);
+	CHECK(left[0] == 255); CHECK(left[2] == 0);   // left is red
+	CHECK(right[0] == 0);  CHECK(right[2] == 255); // right is blue
+
+	// Flipped: the colours swap sides.
+	SDL_SetRenderDrawColor(h.renderer, 0, 0, 0, 255);
+	SDL_RenderClear(h.renderer);
+	g.DrawAtlasFrameClipScaled(frame, dstX, dstY, dstW, dstH, /*flip*/true);
+	SDL_RenderPresent(h.renderer);
+	uint8_t leftF[4], rightF[4];
+	sampleAt(dstX + 1, dstY + dstH / 2, leftF);
+	sampleAt(dstX + dstW - 2, dstY + dstH / 2, rightF);
+	CHECK(leftF[0] == 0);   CHECK(leftF[2] == 255); // left is now blue
+	CHECK(rightF[0] == 255); CHECK(rightF[2] == 0);  // right is now red
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas DrawAtlasFrameClipScaled bounds safety: invalid frame indices are no-ops")
+{
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("scaled_bounds");
+
+	const int pw = 8, ph = 8;
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, patternPixels(pw, ph)));
+
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("tile_0", 0, 0, 0, 4, 4, 0, 0, 4, 4),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	REQUIRE(g.NumFrames() == 1);
+
+	const uint8_t sr = 15, sg = 16, sb = 17, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	// Negative index, exactly-out-of-range index, and far-out-of-range index: all no-ops.
+	g.DrawAtlasFrameClipScaled(-1, 2, 2, 20, 20, false);
+	g.DrawAtlasFrameClipScaled(1, 2, 2, 20, 20, false);
+	g.DrawAtlasFrameClipScaled(9999, 2, 2, 20, 20, false);
+	SDL_RenderPresent(h.renderer);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	bool allSentinel = true;
+	for (int y = 0; y < H; ++y) {
+		for (int x = 0; x < W; ++x) {
+			const uint8_t *p = sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+			if (!(p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa)) {
+				allSentinel = false;
+			}
+		}
+	}
+	CHECK(allSentinel);
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
