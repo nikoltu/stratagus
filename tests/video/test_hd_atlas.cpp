@@ -682,3 +682,260 @@ TEST_CASE("hd_atlas zoom=2 scales the destination block size")
 	GpuWorldDrawZoom = 1.0f;
 	h.shutdown();
 }
+
+TEST_CASE("hd_atlas DrawAtlasFrameFull byte-exact placement, no canvas-centre offset")
+{
+	// Untrimmed frame (offx=offy=0, cw==sw, ch==sh), like a terrain tile, but kept small
+	// (8x8) for a fast pixel-exact comparison. DrawAtlasFrameFull must blit it verbatim
+	// into the caller-supplied dst rect with no -cw/2 shift (contrast DrawAtlasFrameClip).
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("full_exact");
+
+	const int pw = 16, ph = 16;
+	std::vector<uint8_t> page = patternPixels(pw, ph);
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, page));
+
+	const uint16_t sx = 3, sy = 2, sw = 8, sh = 8;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("tile_0", 0, sx, sy, sw, sh, /*offx*/0, /*offy*/0, /*cw*/sw, /*ch*/sh),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("tile_0");
+	REQUIRE(frame >= 0);
+
+	const uint8_t sr = 41, sg = 42, sb = 43, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	const int dstX = 20, dstY = 25;
+	SDL_Rect dst = {dstX, dstY, sw, sh};
+	g.DrawAtlasFrameFull(frame, dst);
+	SDL_RenderPresent(h.renderer);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	auto screenPx = [&](int x, int y) -> const uint8_t * {
+		return sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+	};
+
+	bool blockExact = true;
+	for (int dy = 0; dy < sh; ++dy) {
+		for (int dx = 0; dx < sw; ++dx) {
+			const uint8_t *want = page.data()
+			    + (static_cast<size_t>(sy + dy) * pw + (sx + dx)) * 4;
+			const uint8_t *got = screenPx(dstX + dx, dstY + dy);
+			if (std::memcmp(want, got, 4) != 0) {
+				blockExact = false;
+			}
+		}
+	}
+	CHECK(blockExact);
+
+	auto isSentinel = [&](int x, int y) {
+		const uint8_t *p = screenPx(x, y);
+		return p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa;
+	};
+	// No canvas-centre shift: block starts exactly at dst.x/dst.y (were there a -cw/2
+	// shift like DrawAtlasFrameClip, the block would start at dstX - sw/2 instead).
+	CHECK(isSentinel(dstX - 1, dstY));
+	CHECK(isSentinel(dstX, dstY - 1));
+	CHECK(isSentinel(dstX + sw, dstY));
+	CHECK(isSentinel(dstX, dstY + sh));
+	// Were this centred like DrawAtlasFrameClip (dst.x = anchorX - cw/2), the block would
+	// start near (dstX - sw/2, dstY - sh/2) instead of at (dstX, dstY); that point is
+	// unpainted here, confirming DrawAtlasFrameFull does not apply any canvas-centre shift.
+	CHECK(isSentinel(dstX - sw / 2, dstY - sh / 2));
+
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas DrawAtlasFrameFull scales the source into a larger dst rect")
+{
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("full_scaled");
+
+	const int pw = 16, ph = 16;
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, patternPixels(pw, ph)));
+
+	const uint16_t sx = 1, sy = 1, sw = 6, sh = 6;
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("tile_0", 0, sx, sy, sw, sh, 0, 0, sw, sh),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	const int frame = g.FrameByName("tile_0");
+	REQUIRE(frame >= 0);
+
+	const uint8_t sr = 17, sg = 18, sb = 19, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	// dst is 2x the frame's native size: proves DrawAtlasFrameFull scales into whatever
+	// rect it is given rather than always drawing at native size.
+	const int dstX = 10, dstY = 12;
+	const int dw = 2 * sw, dh = 2 * sh;
+	SDL_Rect dst = {dstX, dstY, dw, dh};
+	g.DrawAtlasFrameFull(frame, dst);
+	SDL_RenderPresent(h.renderer);
+
+	REQUIRE(dstX + dw < W);
+	REQUIRE(dstY + dh < H);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	auto isSentinel = [&](int x, int y) {
+		const uint8_t *p = sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+		return p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa;
+	};
+
+	// All four corners of the (scaled) dst rect must be painted...
+	CHECK_FALSE(isSentinel(dstX, dstY));
+	CHECK_FALSE(isSentinel(dstX + dw - 1, dstY));
+	CHECK_FALSE(isSentinel(dstX, dstY + dh - 1));
+	CHECK_FALSE(isSentinel(dstX + dw - 1, dstY + dh - 1));
+	// ...and it stops exactly at the dst rect's edges.
+	CHECK(isSentinel(dstX + dw, dstY));
+	CHECK(isSentinel(dstX, dstY + dh));
+	CHECK(isSentinel(dstX - 1, dstY));
+	CHECK(isSentinel(dstX, dstY - 1));
+
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas DrawAtlasFrameFull bounds safety: invalid frame indices are no-ops")
+{
+	const int W = 32, H = 32;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("full_bounds");
+
+	const int pw = 8, ph = 8;
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, patternPixels(pw, ph)));
+
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("tile_0", 0, 0, 0, 4, 4, 0, 0, 4, 4),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+	REQUIRE(g.NumFrames() == 1);
+
+	const uint8_t sr = 5, sg = 6, sb = 7, sa = 255;
+	SDL_SetRenderDrawColor(h.renderer, sr, sg, sb, sa);
+	SDL_RenderClear(h.renderer);
+
+	SDL_Rect dst = {2, 2, 4, 4};
+	// Negative index, exactly-out-of-range index, and far-out-of-range index: all no-ops.
+	g.DrawAtlasFrameFull(-1, dst);
+	g.DrawAtlasFrameFull(1, dst);
+	g.DrawAtlasFrameFull(9999, dst);
+	SDL_RenderPresent(h.renderer);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	const int pitch = h.screen->pitch;
+	bool allSentinel = true;
+	for (int y = 0; y < H; ++y) {
+		for (int x = 0; x < W; ++x) {
+			const uint8_t *p = sp + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4;
+			if (!(p[0] == sr && p[1] == sg && p[2] == sb && p[3] == sa)) {
+				allSentinel = false;
+			}
+		}
+	}
+	CHECK(allSentinel);
+	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas megatile->frame lookup mirrors the P1 map_draw.cpp naming rule")
+{
+	// Replicates (without pulling in map_draw.cpp/CMap) the 3-line rule documented at
+	// src/map/map_draw.cpp EnsureHDTileAtlas(): for megatile index M >= 16, the frame is
+	// FrameByName("<era>_" + (M-16)); M < 16 (fog slots) and M beyond the atlas span are -1.
+	SdlHarness h;
+	if (!h.init(32, 32)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+
+	fs::path dir = caseDir("megatile_map");
+
+	// Synthetic atlas with frames named forest_0..forest_2 (mirrors a real era prefix).
+	const int pw = 8, ph = 8;
+	CHECK(writePagePng(dir / "atlas.p0.png", pw, ph, patternPixels(pw, ph)));
+	std::vector<hdatlas::HdFrameRecord> recs = {
+		makeRec("forest_0", 0, 0, 0, 2, 2, 0, 0, 2, 2),
+		makeRec("forest_1", 0, 2, 0, 2, 2, 0, 0, 2, 2),
+		makeRec("forest_2", 0, 4, 0, 2, 2, 0, 0, 2, 2),
+	};
+	writeBytes(dir / "atlas.hdatlas", buildHdAtlas(4096, {"atlas.p0.png"}, recs));
+
+	CAtlasGraphic g;
+	REQUIRE(g.Load((dir / "atlas.hdatlas").string()));
+
+	const char *era = "forest";
+	const int count = 16 + g.NumFrames() + 2; // a couple of megatile slots past the atlas span
+	std::vector<int> frameForTile(count, -1);
+	for (int m = 16; m < count; ++m) {
+		std::string name = era;
+		name += '_';
+		name += std::to_string(m - 16);
+		frameForTile[m] = g.FrameByName(name.c_str());
+	}
+
+	// M < 16 (fog slots) are left at -1; the loop never touches them.
+	CHECK(frameForTile[0] == -1);
+	CHECK(frameForTile[15] == -1);
+
+	// M == 16 -> forest_0, the first real frame.
+	REQUIRE(frameForTile[16] >= 0);
+	CHECK(frameForTile[16] == g.FrameByName("forest_0"));
+	CHECK(g.Frame(frameForTile[16]).sx == 0);
+
+	// M == 17, 18 -> forest_1, forest_2.
+	CHECK(frameForTile[17] == g.FrameByName("forest_1"));
+	CHECK(frameForTile[18] == g.FrameByName("forest_2"));
+
+	// M beyond the atlas span (forest_3 does not exist) -> -1 (classic-path fallback).
+	CHECK(frameForTile[19] == -1);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
