@@ -263,6 +263,10 @@ bool parseAtlas(const std::string &text, std::vector<FrameInput> &frames, int &m
 			return false;
 		}
 		const content::JsonValue *rot = f.find("rotated");
+		if (rot && !rot->isBool()) {
+			err = "frame '" + name + "' has a non-boolean 'rotated'";
+			return false;
+		}
 		fi.rotated = (rot && rot->asBool(false)) ? 1 : 0;
 		if (fi.rotated) {
 			err = "frame '" + name + "' is rotated; unsupported in P0";
@@ -271,8 +275,12 @@ bool parseAtlas(const std::string &text, std::vector<FrameInput> &frames, int &m
 
 		const content::JsonValue *sss = f.find("spriteSourceSize");
 		if (sss) {
-			req(sss, "x", fi.offx);
-			req(sss, "y", fi.offy);
+			// When present, both x and y must be numeric; a partial/malformed
+			// spriteSourceSize would silently corrupt trimmed-sprite placement.
+			if (!req(sss, "x", fi.offx) || !req(sss, "y", fi.offy)) {
+				err = "frame '" + name + "' has an invalid 'spriteSourceSize' (x/y must be numbers)";
+				return false;
+			}
 		}
 		const content::JsonValue *ss = f.find("sourceSize");
 		if (!req(ss, "w", fi.cw) || !req(ss, "h", fi.ch)) {
