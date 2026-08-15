@@ -373,6 +373,18 @@ public:
 	// No-op if not loaded or frame out of range. Asserts record.rotated==0.
 	void DrawAtlasFrameClip(int frame, int anchorX, int anchorY) const;
 
+	// Same canvas-centre placement as DrawAtlasFrameClip, but horizontally mirrored
+	// (SDL_RenderCopyEx + SDL_FLIP_HORIZONTAL). The destination rect is identical: for P2 the
+	// building frames' trim is symmetric enough that the mirror keeps the canvas centred on
+	// (anchorX, anchorY). Used for the frame<0 mirrored building facing.
+	void DrawAtlasFrameClipX(int frame, int anchorX, int anchorY) const;
+
+	// Draw one frame tinted by (r,g,b) via SDL_SetTextureColorMod on its page, then reset the mod
+	// to 255,255,255. Same dst-rect math as DrawAtlasFrameClip; `flip` selects RenderCopy vs
+	// RenderCopyEx(SDL_FLIP_HORIZONTAL). Used for the player-colour `_team` mask overlay.
+	void DrawAtlasFrameClipTinted(int frame, int anchorX, int anchorY,
+	                              uint8_t r, uint8_t g, uint8_t b, bool flip) const;
+
 	// World HD (P1): draw the whole frame scaled into an explicit on-screen rect. Unlike
 	// DrawAtlasFrameClip there is NO canvas-centre and NO GpuWorldDrawZoom: the caller supplies
 	// the exact destination tile rect. Terrain frames are untrimmed (offx/offy==0, cw/ch==sw/sh)

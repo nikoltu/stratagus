@@ -719,6 +719,54 @@ void CAtlasGraphic::DrawAtlasFrameClip(int frame, int anchorX, int anchorY) cons
 	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 }
 
+// Mirror of DrawAtlasFrameClip with a horizontal flip. Identical dst-rect math (canvas centred on
+// (anchorX, anchorY), only the size scaled by GpuWorldDrawZoom); the sole difference is
+// RenderCopyEx + SDL_FLIP_HORIZONTAL. See DrawAtlasFrameClipX in video.h for the P2 trim caveat.
+void CAtlasGraphic::DrawAtlasFrameClipX(int frame, int anchorX, int anchorY) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	const int dw = (GpuWorldDrawZoom == 1.0f) ? rec.sw : (int) std::lround(rec.sw * GpuWorldDrawZoom);
+	const int dh = (GpuWorldDrawZoom == 1.0f) ? rec.sh : (int) std::lround(rec.sh * GpuWorldDrawZoom);
+	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
+	SDL_Rect dst = {anchorX - rec.cw / 2 + rec.offx, anchorY - rec.ch / 2 + rec.offy, dw, dh};
+	SDL_RenderCopyEx(TheRenderer, pages[rec.page], &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+}
+
+// Draw one frame with a colour-mod tint (used for the `_team` player-colour mask atlas). Same
+// canvas-centre placement as DrawAtlasFrameClip; the page texture's colour mod is set to (r,g,b)
+// for the blit and reset to 255,255,255 afterwards so a later plain draw of the same page is not
+// left tinted (mirrors CPlayerColorGraphic::DrawPlayerColorFrameClipTex). `flip` picks the mirror.
+void CAtlasGraphic::DrawAtlasFrameClipTinted(int frame, int anchorX, int anchorY,
+                                             uint8_t r, uint8_t g, uint8_t b, bool flip) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	const int dw = (GpuWorldDrawZoom == 1.0f) ? rec.sw : (int) std::lround(rec.sw * GpuWorldDrawZoom);
+	const int dh = (GpuWorldDrawZoom == 1.0f) ? rec.sh : (int) std::lround(rec.sh * GpuWorldDrawZoom);
+	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
+	SDL_Rect dst = {anchorX - rec.cw / 2 + rec.offx, anchorY - rec.ch / 2 + rec.offy, dw, dh};
+	SDL_SetTextureColorMod(pages[rec.page], r, g, b);
+	if (flip) {
+		SDL_RenderCopyEx(TheRenderer, pages[rec.page], &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+	} else {
+		SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
+	}
+	SDL_SetTextureColorMod(pages[rec.page], 255, 255, 255);
+}
+
 // World HD (P1): blit the whole frame's src rect scaled into the caller-supplied dst rect. Used by
 // the map terrain draw, which computes the exact on-screen tile rect itself; no canvas-centre/zoom
 // bookkeeping here (terrain frames are untrimmed 216px, so full frame == canvas).

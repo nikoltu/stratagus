@@ -67,6 +67,7 @@
 ----------------------------------------------------------------------------*/
 
 class CAnimations;
+class CAtlasGraphic;
 class CPlayerColorGraphic;
 class CConstruction;
 class MissileType;
@@ -715,6 +716,14 @@ public:
 	std::shared_ptr<CPlayerColorGraphic> Sprite;     /// Sprite images
 	std::shared_ptr<CPlayerColorGraphic> AltSprite;  /// Alternative sprite images
 	std::shared_ptr<CGraphic> ShadowSprite;          /// Shadow sprite image
+
+	// World HD (P2): lazily-loaded per-building HD atlas drawn instead of the classic Sprite when a
+	// .hdatlas is deployed beside the classic PNG. HDSpriteTeam is the optional player-colour mask.
+	// HDSpriteTried gates the one-shot load attempt (kept even on failure -> classic path). Mutable
+	// so DrawUnitType (which takes a const CUnitType &) can populate the cache.
+	mutable std::shared_ptr<CAtlasGraphic> HDSprite;     /// HD base atlas (numeric frame names)
+	mutable std::shared_ptr<CAtlasGraphic> HDSpriteTeam; /// HD team-colour mask atlas (optional)
+	mutable bool HDSpriteTried = false;                  /// true once the HD load has been attempted
 };
 
 /*----------------------------------------------------------------------------

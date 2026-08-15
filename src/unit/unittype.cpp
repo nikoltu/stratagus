@@ -809,6 +809,40 @@ std::pair<CUnitType *, bool> NewUnitTypeSlot(std::string_view ident)
 **  @todo  Do screen position calculation in high level.
 **         Better way to handle in x mirrored sprites.
 */
+/**
+**  World HD (P2): lazily load a building's HD atlas beside its classic sprite PNG.
+**
+**  The classic sprite path is `type.File` (e.g. tilesets/summer/human/buildings/town_hall.png). The
+**  HD base atlas is baked alongside it with the same dir+basename and a `.hdatlas` extension; the
+**  optional player-colour mask is `<basename>_team.hdatlas`. Attempted once per type (guarded by
+**  `type.HDSpriteTried`); on any failure `type.HDSprite` stays null and the caller keeps the classic
+**  CPlayerColorGraphic path. CAtlasGraphic::Load resolves the path through LibraryFileName itself.
+*/
+static void EnsureHDUnitSprite(const CUnitType &type)
+{
+	if (type.HDSpriteTried) {
+		return;
+	}
+	type.HDSpriteTried = true;
+
+	const std::string &file = type.File;
+	if (file.size() < 4 || file.compare(file.size() - 4, 4, ".png") != 0) {
+		return; // only classic PNG-backed buildings have a sibling .hdatlas
+	}
+	const std::string base = file.substr(0, file.size() - 4);
+
+	auto atlas = std::make_shared<CAtlasGraphic>();
+	if (!atlas->Load(base + ".hdatlas")) {
+		return; // absent/corrupt -> classic path (graceful degradation)
+	}
+	type.HDSprite = std::move(atlas);
+
+	auto team = std::make_shared<CAtlasGraphic>();
+	if (team->Load(base + "_team.hdatlas")) {
+		type.HDSpriteTeam = std::move(team); // optional; buildings without team colour omit it
+	}
+}
+
 void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorIndex, int frame, const PixelPos &screenPos)
 {
 	PixelPos pos = screenPos;
@@ -826,6 +860,55 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 	}
 	pos.x += offX;
 	pos.y += offY;
+
+	// --- World HD (P2): draw from a per-building .hdatlas when one is deployed beside the classic
+	// PNG. Strictly additive: buildings without an atlas fall through to the unchanged classic path
+	// below. Only the pixel blit changes here; the frame index, centring and screenPos are the same
+	// values the classic path uses.
+	EnsureHDUnitSprite(type);
+	if (type.HDSprite && type.HDSprite->IsLoaded()) {
+		// Engine frame -> atlas frame is by numeric name; the atlas stores the absolute (unmirrored)
+		// frame, mirroring is applied at draw time via the flip variant (matching the classic path,
+		// which flips when type.Flip && frame < 0).
+		const int absFrame = (frame < 0) ? (-frame - 1) : frame;
+		const int f = type.HDSprite->FrameByName(std::to_string(absFrame).c_str());
+		if (f >= 0) {
+			const bool flip = (frame < 0) && type.Flip;
+			// Anchor mapping (the crux): DrawAtlasFrameClip centres the untrimmed canvas on
+			// (ax, ay): dst.x = ax - cw/2 + offx. The baked canvas cw/ch == the building's
+			// untrimmed sourceSize == the classic full frame footprint (type.Width/type.Height).
+			// The classic path draws that canvas by its top-left at `pos`. So choosing
+			// ax = pos.x + type.Width/2 makes ax - cw/2 == pos.x (cw/2 and Width/2 are the same
+			// integer since cw == Width), reproducing the classic on-screen top-left exactly.
+			// GpuWorldDrawZoom only scales the drawn size (both paths anchor by top-left and grow
+			// down/right), so this holds at every zoom without extra scaling of the anchor.
+			const int ax = pos.x + type.Width / 2;
+			const int ay = pos.y + type.Height / 2;
+			if (flip) {
+				type.HDSprite->DrawAtlasFrameClipX(f, ax, ay);
+			} else {
+				type.HDSprite->DrawAtlasFrameClip(f, ax, ay);
+			}
+			// Team-colour overlay: tint the `_team` mask to the player's canonical ramp colour
+			// (ramp[0], matching CPlayerColorGraphic::DrawPlayerColorFrameClipTex) and draw it over
+			// the base at the same anchor. Sparse: a building without team colour has no mask atlas.
+			if (type.HDSpriteTeam && type.HDSpriteTeam->IsLoaded()) {
+				const int tf = type.HDSpriteTeam->FrameByName(std::to_string(absFrame).c_str());
+				if (tf >= 0) {
+					Uint8 r = 255, g = 255, b = 255;
+					if (colorIndex >= 0 && colorIndex < (int) PlayerColorsRGB.size()
+						&& !PlayerColorsRGB[colorIndex].empty()) {
+						const CColor &c = PlayerColorsRGB[colorIndex][0];
+						r = c.R;
+						g = c.G;
+						b = c.B;
+					}
+					type.HDSpriteTeam->DrawAtlasFrameClipTinted(tf, ax, ay, r, g, b, flip);
+				}
+			}
+			return; // HD drawn; skip the classic blit for this unit
+		}
+	}
 
 	if (type.Flip) {
 		if (frame < 0) {
