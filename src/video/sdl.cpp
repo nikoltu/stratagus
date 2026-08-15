@@ -480,6 +480,18 @@ void InitVideoSdl()
 	{
 		int outW = 0, outH = 0;
 		SDL_GetRendererOutputSize(TheRenderer, &outW, &outH);
+		// This activity is sensorLandscape, but at startup the window can briefly report a portrait
+		// render size before the device orientation settles. The Lua UI, HUD and fonts are all
+		// authored against Video.Width/Height at script-load time (which happens right after this),
+		// so capturing a transient portrait size here lays the entire UI out portrait for the whole
+		// session. Pump events until the render size reports landscape (w >= h) or a ~1s timeout: a
+		// genuinely portrait device still proceeds after the timeout, while a landscape tablet gets
+		// its final landscape dimensions before any script runs.
+		for (int settle = 0; settle < 60 && outH > outW; ++settle) {
+			SDL_PumpEvents();
+			SDL_Delay(16);
+			SDL_GetRendererOutputSize(TheRenderer, &outW, &outH);
+		}
 		if (outW > 0 && outH > 0) {
 			// The window / GPU present target is always the device's native size.
 			Video.WindowWidth = outW;

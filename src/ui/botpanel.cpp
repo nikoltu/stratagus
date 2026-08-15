@@ -783,6 +783,13 @@ void CButtonPanel::Draw()
 		//
 		const PixelPos pos(UI.ButtonPanel.Buttons[i].X, UI.ButtonPanel.Buttons[i].Y);
 
+		// A button whose icon ident is not a registered icon leaves Icon.Icon null (IconConfig::Load
+		// only warns and does not remove the button); the draw calls below dereference it, so a build
+		// sub-menu containing such a button would crash on the next redraw. Skip drawing it instead.
+		if (!buttons[i].Icon.Icon) {
+			continue;
+		}
+
 		if (cooldownSpell) {
 			buttons[i].Icon.Icon->DrawCooldownSpellIcon(pos,
 														maxCooldown * 100 / SpellTypeTable[buttons[i].Value]->CoolDown);
