@@ -574,6 +574,7 @@ set(stratagus_tests_SRCS
 	tests/network/test_netconnect.cpp
 	tests/network/test_network.cpp
 	tests/network/test_udpsocket.cpp
+	tests/video/test_hd_atlas.cpp
 	tests/video/test_nineslice.cpp
 	tests/video/test_uianchor.cpp
 	tests/video/test_uiscale.cpp
