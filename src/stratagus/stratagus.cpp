@@ -165,6 +165,7 @@
 #endif
 
 #include <cctype>
+#include <fstream>
 
 #ifdef USE_BEOS
 #include <fcntl.h>
@@ -246,6 +247,7 @@ extern void beos_init(int argc, char **argv);
 ----------------------------------------------------------------------------*/
 
 std::string StratagusLibPath;        /// Path for data directory
+std::string WC2SourcePath;           /// User-selected Warcraft II: Remastered folder (Android first-run gate)
 
 /// Name, Version, Copyright
 const char NameLine[] = NAME " v" VERSION ", " COPYRIGHT;
@@ -758,6 +760,13 @@ try {
 	// of /sdcard/Android/data when files are staged by another user (e.g. adb).
 	if (const char *androidInternal = SDL_AndroidGetInternalStoragePath()) {
 		StratagusLibPath = std::string(androidInternal) + "/data";
+		// WargusHD first-run gate (SetupActivity) writes the user-selected Warcraft II: Remastered
+		// folder here; use it as an additional asset search root (see LibraryFileNameImpl) so the
+		// Remastered Data/... assets resolve from where the player installed them.
+		std::ifstream wc2src(std::string(androidInternal) + "/wc2_source.txt");
+		if (wc2src) {
+			std::getline(wc2src, WC2SourcePath);
+		}
 	}
 #endif
 #else

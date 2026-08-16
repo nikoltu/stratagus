@@ -217,6 +217,7 @@ extern const char NameLine[];
 ----------------------------------------------------------------------------*/
 
 extern std::string StratagusLibPath;        /// Location of stratagus data
+extern std::string WC2SourcePath;           /// User-selected Warcraft II: Remastered folder (first-run gate)
 extern std::string MenuRace;
 
 extern unsigned long GameCycle;             /// Game simulation cycle counter

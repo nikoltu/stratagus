@@ -599,6 +599,16 @@ static fs::path LibraryFileNameImpl(const std::string_view file)
 		return candidate;
 	}
 
+	// WargusHD: the user-selected Warcraft II: Remastered source folder (files/wc2_source.txt),
+	// so Remastered assets (e.g. Data/Backgrounds/*.png, Data/skins/*, Data/Font/*) resolve from
+	// where the player installed the game, chosen at the first-run gate (SetupActivity).
+	if (!WC2SourcePath.empty()) {
+		candidate = fs::path(WC2SourcePath) / file;
+		if (FindFileWithExtension(candidate)) {
+			return candidate;
+		}
+	}
+
 	// Support for graphics in default graphics dir.
 	// They could be anywhere now, but check if they haven't
 	// got full paths.
