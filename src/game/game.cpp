@@ -48,6 +48,7 @@
 #include "font.h"
 #include "interface.h"
 #include "iolib.h"
+#include "loadingscreen.h"
 #include "map.h"
 #include "minimap.h"
 #include "missile.h"
@@ -136,7 +137,14 @@ void StartMap(const std::string &filename, bool clean)
 	}
 	const auto [nc, rc] = GetDefaultTextColors();
 
+	// Remastered loading screen: cover the blocking CreateGame with the loadscreen still +
+	// animated spinner. Cheap no-op when the art is absent. CreateGame pumps it at coarse
+	// checkpoints (UpdateLoadingScreen) so the spinner ticks despite the blocking load.
+	ShowLoadingScreen();
+
 	CreateGame(filename, &Map);
+
+	HideLoadingScreen();
 
 	// Start with a clean status line in-game; the engine version/copyright (NameLine)
 	// belongs on the title/menu, not stamped across the HUD footer during play.
@@ -881,9 +889,13 @@ void CreateGame(const fs::path &filename, CMap *map)
 		//
 		// Load the map.
 		//
+		UpdateLoadingScreen();
 		InitUnitTypes(1);
+		UpdateLoadingScreen();
 		LoadMap(filename, *map);
+		UpdateLoadingScreen();
 		ApplyUpgrades();
+		UpdateLoadingScreen();
 	}
 	CclCommand("if (MapLoaded ~= nil) then MapLoaded() end");
 

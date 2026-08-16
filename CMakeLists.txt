@@ -171,6 +171,7 @@ source_group(editor FILES ${editor_SRCS})
 
 set(game_SRCS
 	src/game/game.cpp
+	src/game/loadingscreen.cpp
 	src/game/loadgame.cpp
 	src/game/replay.cpp
 	src/game/savegame.cpp
