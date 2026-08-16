@@ -1693,39 +1693,45 @@ void ImageListBox::draw(gcn::Graphics *graphics) /* override */
 	graphics->setColor(getForegroundColor());
 	graphics->setFont(getFont());
 
-	int i, fontHeight;
+	int i;
 	int y = 0;
-	CGraphic *img = itemImage.get();
-	img->Resize(getWidth(), img->getHeight());
-
-	fontHeight = std::max<int>(getFont()->getHeight(), img->getHeight());
+	CGraphic *base = itemImage.get();
+	const int rowH = base->getHeight();
+	const int fontHeight = std::max<int>(getFont()->getHeight(), rowH);
 
 	/**
 	* @todo Check cliprects so we do not have to iterate over elements in the list model
 	*/
 	for (i = 0; i < mListModel->getNumberOfElements(); ++i) {
-		graphics->drawImage(img, 0, 0, 0, y, getWidth(), img->getHeight());
+		// Locked campaign missions (index >= unlockedCount) draw a GRAYED row image (a real desaturated
+		// button, since gcn fillRectangle ignores alpha), dimmed text, and the padlock icon.
+		const bool locked = (unlockedCount >= 0 && i >= unlockedCount);
+		CGraphic *rowImg = (locked && lockedItemImage) ? lockedItemImage.get() : base;
+		rowImg->Resize(getWidth(), rowH);
+		graphics->drawImage(rowImg, 0, 0, 0, y, getWidth(), rowH);
+		rowImg->SetOriginalSize();
+
 		const int textY = y + (fontHeight - getFont()->getHeight()) / 2;
+		graphics->setColor(locked ? gcn::Color(150, 150, 150) : getForegroundColor());
 		if (i == mSelected) {
 			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", getWidth() / 2, textY, gcn::Graphics::Center);
 		} else {
 			graphics->drawText(mListModel->getElementAt(i), getWidth() / 2, textY, gcn::Graphics::Center);
 		}
 
-		// Locked campaign missions (index >= unlockedCount): draw the padlock icon at the row's right.
-		if (unlockedCount >= 0 && i >= unlockedCount && lockedIcon) {
+		if (locked && lockedIcon) {
 			CGraphic *lk = lockedIcon.get();
-			int lh = img->getHeight() - 12;
+			int lh = rowH - 20;
 			if (lh < 8) { lh = 8; }
 			const int lw = lk->getWidth() * lh / lk->getHeight();
 			lk->Resize(lw, lh);
-			graphics->drawImage(lk, 0, 0, getWidth() - lw - 24, y + (img->getHeight() - lh) / 2, lw, lh);
+			graphics->drawImage(lk, 0, 0, 24, y + (rowH - lh) / 2, lw, lh);
 			lk->SetOriginalSize();
 		}
+		graphics->setColor(getForegroundColor());
 
 		y += fontHeight;
 	}
-	img->SetOriginalSize();
 }
 
 void ImageListBox::drawFrame(gcn::Graphics *graphics) /* override */

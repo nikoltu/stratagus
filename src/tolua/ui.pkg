@@ -554,6 +554,7 @@ class ImageListBoxWidget : public ListBoxWidget
 	int getSelected();
 	void setItemImage(CGraphicPtr image);
 	void setLockedIcon(CGraphicPtr image);
+	void setLockedItemImage(CGraphicPtr image);
 	void setUnlockedCount(int n);
 	void setUpButtonImage(CGraphicPtr image);
 	void setUpPressedButtonImage(CGraphicPtr image);

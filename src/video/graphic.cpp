@@ -1570,15 +1570,20 @@ static void ApplyGrayScale(SDL_Surface *Surface, int Width, int Height)
 			break;
 		}
 		case 4: {
-			Uint32 *p;
-			for (int i = 0; i < Height; ++i) {
-				for (int j = 0; j < Width; ++j) {
-					p = static_cast<Uint32 *>(Surface->pixels) + (i * Surface->w + j);
-					const Uint32 gray = ((Uint8)((*p) * redGray) >> f->Rshift) +
-										((Uint8)(*(p + 1) * greenGray) >> f->Gshift) +
-										((Uint8)(*(p + 2) * blueGray) >> f->Bshift) +
-										((Uint8)(*(p + 3)) >> f->Ashift);
-					*p = gray;
+			// 32-bit RGBA (HD PNG skins). Decode each pixel via the surface format so the
+			// luminance weights hit the real R/G/B channels and the ORIGINAL alpha is preserved
+			// (transparent stays transparent). Iterate the whole surface, not just one frame
+			// cell, so every frame of a multi-frame sheet is desaturated. The previous version
+			// read *(p+1..3) as neighbouring PIXELS (not channels) and shifted nonsensically,
+			// which corrupted every HD graphic loaded grayscale (disabled buttons, gray icons).
+			Uint8 *base = static_cast<Uint8 *>(Surface->pixels);
+			for (int i = 0; i < Surface->h; ++i) {
+				Uint32 *row = reinterpret_cast<Uint32 *>(base + i * Surface->pitch);
+				for (int j = 0; j < Surface->w; ++j) {
+					Uint8 r, g, b, a;
+					SDL_GetRGBA(row[j], f, &r, &g, &b, &a);
+					const Uint8 gray = static_cast<Uint8>(redGray * r + greenGray * g + blueGray * b);
+					row[j] = SDL_MapRGBA(f, gray, gray, gray, a);
 				}
 			}
 			break;
@@ -1679,6 +1684,10 @@ void CGraphic::Load(bool grayscale)
 
 	NumFrames = GetGraphicWidth() / Width * GetGraphicHeight() / Height;
 
+	// Remember the grayscale request so SetOriginalSize() (which frees and reloads mSurface from
+	// file during a Resize cycle) re-applies it. Without this the graphic reverts to full colour on
+	// the second Resize, silently undoing a grayscale (disabled/locked) load.
+	Grayscale = grayscale;
 	if (grayscale) {
 		ApplyGrayScale(mSurface, Width, Height);
 	}
@@ -1977,7 +1986,7 @@ void CGraphic::SetOriginalSize()
 
 	this->Width = this->Height = 0;
 	this->mSurface = nullptr;
-	this->Load();
+	this->Load(this->Grayscale); // preserve a grayscale (disabled/locked) load across resize cycles
 
 	Resized = false;
 }

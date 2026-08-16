@@ -290,6 +290,7 @@ public:
 	int OriginWidth = 0;   /// Origin graphic width
 	int OriginHeight = 0;  /// Origin graphic height
 	bool Resized = false;  /// Image has been resized
+	bool Grayscale = false; /// Loaded as grayscale (must be re-applied when SetOriginalSize reloads)
 
 	friend class CFont;
 };

@@ -371,8 +371,9 @@ public:
 	void logic() override;                          // adjustSize() + momentum fling
 
 	void setItemImage(std::shared_ptr<CGraphic> image) { itemImage = image; }
-	// Campaign locking: rows with index >= unlockedCount get the padlock icon drawn on them.
+	// Campaign locking: rows with index >= unlockedCount get the grayed row image + padlock icon.
 	void setLockedIcon(std::shared_ptr<CGraphic> image) { lockedIcon = image; }
+	void setLockedItemImage(std::shared_ptr<CGraphic> image) { lockedItemImage = image; }
 	void setUnlockedCount(int n) { unlockedCount = n; }
 	void adjustSize();
 	void setSelected(int selected);
@@ -381,8 +382,9 @@ private:
 	int rowHeight() const;
 
 	std::shared_ptr<CGraphic> itemImage = nullptr;
-	std::shared_ptr<CGraphic> lockedIcon = nullptr; /// padlock drawn on rows >= unlockedCount
-	int unlockedCount = -1;                          /// -1 = no locking (all rows unlocked)
+	std::shared_ptr<CGraphic> lockedIcon = nullptr;      /// padlock drawn on rows >= unlockedCount
+	std::shared_ptr<CGraphic> lockedItemImage = nullptr; /// grayed row image for rows >= unlockedCount
+	int unlockedCount = -1;                               /// -1 = no locking (all rows unlocked)
 	// Finger drag-to-scroll state. Inert for mouse users (a click still selects); a press
 	// that moves more than a few pixels scrolls the parent ScrollArea instead of selecting.
 	bool mDragScrolling = false; /// a left press is in progress on the list content
@@ -430,6 +432,7 @@ public:
 		listbox.setItemImage(image);
 	}
 	void setLockedIcon(std::shared_ptr<CGraphic> image) { listbox.setLockedIcon(image); }
+	void setLockedItemImage(std::shared_ptr<CGraphic> image) { listbox.setLockedItemImage(image); }
 	void setUnlockedCount(int n) { listbox.setUnlockedCount(n); }
 	void setUpButtonImage(std::shared_ptr<CGraphic> image) { upButtonImage = image; }
 	void setUpPressedButtonImage(std::shared_ptr<CGraphic> image) { upPressedButtonImage = image; }
