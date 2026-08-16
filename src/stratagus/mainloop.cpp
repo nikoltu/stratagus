@@ -349,6 +349,7 @@ void UpdateDisplay()
 			UI.StatusLine.Draw();
 			UI.StatusLine.DrawCosts();
 			UI.ButtonPanel.Draw();
+			DrawObjectives();
 			FrameProfEnd(FP_HUD_PANELS);
 		}
 

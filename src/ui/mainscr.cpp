@@ -40,6 +40,7 @@
 #include "action/action_research.h"
 #include "action/action_train.h"
 #include "action/action_upgradeto.h"
+#include "editor.h"
 #include "font.h"
 #include "icons.h"
 #include "interface.h"
@@ -47,12 +48,15 @@
 #include "menus.h"
 #include "network.h"
 #include "player.h"
+#include "script.h"
 #include "settings.h"
 #include "sound.h"
 #include "spells.h"
 #include "translate.h"
 #include "trigger.h"
 #include "ui/contenttype.h"
+#include "uianchor.h"
+#include "uiscale.h"
 #include "ui.h"
 #include "unit.h"
 #include "unitsound.h"
@@ -1253,6 +1257,68 @@ void DrawTimer()
 
 	int sec = GameTimer.Cycles / CYCLES_PER_SECOND;
 	UI.Timer.Draw(sec);
+}
+
+/**
+**  Draw the current mission objectives as a persistent text block overlaid on
+**  the top-left of the world area.
+**
+**  The objectives are read from the Lua global `Objectives` (an array of
+**  strings), the same source the in-game objectives menu reads. The block is
+**  placed at the Remastered HUD objectives rectangle, authored at 3840x2160 and
+**  mapped to the screen with the aspect-preserving uniform fit the rest of the
+**  HD HUD uses. Nothing is drawn when there are no objectives.
+*/
+void DrawObjectives()
+{
+	if (!GameRunning || Editor.Running == EditorEditing) {
+		return;
+	}
+
+	// Read the Lua global `Objectives` (array of strings) into a newline-joined
+	// block, exactly as the objectives menu builds it.
+	std::string text;
+	lua_getglobal(Lua, "Objectives");
+	if (lua_istable(Lua, -1)) {
+		const size_t n = lua_rawlen(Lua, -1);
+		for (size_t i = 1; i <= n; ++i) {
+			lua_rawgeti(Lua, -1, i);
+			if (lua_isstring(Lua, -1)) {
+				if (!text.empty()) {
+					text += '\n';
+				}
+				text += lua_tostring(Lua, -1);
+			}
+			lua_pop(Lua, 1);
+		}
+	}
+	lua_pop(Lua, 1);
+
+	if (text.empty()) {
+		return;
+	}
+
+	// Objectives rectangle authored at 3840x2160 (Remastered HUD layout),
+	// mapped to the screen with the HUD's uniform aspect-preserving fit.
+	const SDL_Rect logical = {849, 126, 540, 111};
+	const SDL_Rect screen = {0, 0, Video.Width, Video.Height};
+	const UniformScale scale = ComputeUniformScale(3840, 2160, screen);
+	const SDL_Rect r = AnchorScaleRect(logical, 3840, 2160, screen,
+	                                   AnchorX::Left, AnchorY::Top,
+	                                   scale.num, scale.den);
+
+	CFont &font = GetSmallFont();
+	CLabel label(font);
+	const int lineHeight = font.Height() + 2;
+	int y = r.y;
+	std::string_view line;
+	for (unsigned int i = 1; (line = GetLineFont(i, text, r.w, &font)).length(); ++i) {
+		if (y + font.Height() > r.y + r.h) {
+			break; // clip to the authored objectives height
+		}
+		label.DrawClip(r.x, y, line);
+		y += lineHeight;
+	}
 }
 
 /**

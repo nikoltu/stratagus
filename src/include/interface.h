@@ -392,6 +392,8 @@ extern void SetMaxMessageCount(int newMax);
 
 /// Draw the timer
 extern void DrawTimer();
+/// Draw the current mission objectives overlay
+extern void DrawObjectives();
 /// Update the timer
 extern void UpdateTimer();
 /// Update the status line with hints from the button
