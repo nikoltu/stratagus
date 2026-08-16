@@ -37,7 +37,7 @@ class CFile;
 
 extern void LoadGame(const fs::path &filename); /// Load saved game
 extern int SaveGame(const std::string &filename); /// Save game
-extern void DeleteSaveGame(const std::string &filename); /// Delete save game
+extern bool DeleteSaveGame(const std::string &filename); /// Delete save game (guarded)
 extern bool SaveGameLoading;                 /// Save game is in progress of loading
 
 extern void InitModules();              /// Initialize all modules

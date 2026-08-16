@@ -177,21 +177,69 @@ int SaveGame(const std::string &filename)
 }
 
 /**
-**  Delete save game
+**  Delete a single save game file, with strict guards.
 **
-**  @param filename  Name of file to delete
+**  Only a bare filename (no path components) inside the save directory may be
+**  deleted. Any name that could escape the save directory is rejected without
+**  touching the filesystem. The resolved target must be a regular file whose
+**  parent directory is exactly the save directory.
+**
+**  @param filename  Bare name of the save file to delete
+**  @return  true if the file was deleted, false otherwise (rejected or error)
 */
-void DeleteSaveGame(const std::string &filename)
+bool DeleteSaveGame(const std::string &filename)
 {
-	// Security check
+	// Guard 1: bare filename only.
+	if (filename.empty()) {
+		return false;
+	}
 	if (filename.find_first_of("/\\") != std::string::npos) {
-		return;
+		return false; // no path separators
+	}
+	if (filename.find("..") != std::string::npos) {
+		return false; // no parent-directory traversal
+	}
+	if (filename.find(':') != std::string::npos) {
+		return false; // no drive letter / alternate data stream
+	}
+	{
+		fs::path candidate(filename);
+		if (candidate.is_absolute() || candidate.has_root_name()
+			|| candidate.has_root_directory()) {
+			return false; // must be relative, no root
+		}
+		if (candidate.filename() != candidate) {
+			return false; // exactly one path component
+		}
 	}
 
-	fs::path fullpath = GetSaveDir() / filename;
-	if (!fs::remove(fullpath)) {
-		ErrorPrint("delete failed for '%s'", fullpath.u8string().c_str());
+	std::error_code ec;
+	const fs::path saveDir = GetSaveDir();
+	const fs::path fullpath = saveDir / filename;
+
+	// Guard 2: resolved parent must equal the save dir, and the target must be
+	// an existing regular file inside it (no traversal escape, no directories).
+	const fs::path canonSaveDir = fs::weakly_canonical(saveDir, ec);
+	if (ec) {
+		return false;
 	}
+	const fs::path canonTarget = fs::weakly_canonical(fullpath, ec);
+	if (ec) {
+		return false;
+	}
+	if (canonTarget.parent_path() != canonSaveDir) {
+		return false; // escaped the save directory
+	}
+	if (!fs::is_regular_file(canonTarget, ec) || ec) {
+		return false; // not a plain file (missing / dir / symlink target etc.)
+	}
+
+	// Guard 3: only now delete, and only the verified file.
+	if (!fs::remove(canonTarget, ec) || ec) {
+		ErrorPrint("delete failed for '%s'", canonTarget.u8string().c_str());
+		return false;
+	}
+	return true;
 }
 
 void StartSavedGame(const std::string &filename)

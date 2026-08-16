@@ -90,7 +90,7 @@ $pfile "upgrade.pkg"
 $pfile "video.pkg"
 
 extern int SaveGame(const std::string filename);
-extern void DeleteSaveGame(const std::string filename);
+extern bool DeleteSaveGame(const std::string filename);
 
 extern std::string Translate @ _(const std::string str);
 
