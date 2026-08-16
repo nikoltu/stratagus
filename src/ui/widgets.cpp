@@ -1712,6 +1712,17 @@ void ImageListBox::draw(gcn::Graphics *graphics) /* override */
 			graphics->drawText(mListModel->getElementAt(i), getWidth() / 2, textY, gcn::Graphics::Center);
 		}
 
+		// Locked campaign missions (index >= unlockedCount): draw the padlock icon at the row's right.
+		if (unlockedCount >= 0 && i >= unlockedCount && lockedIcon) {
+			CGraphic *lk = lockedIcon.get();
+			int lh = img->getHeight() - 12;
+			if (lh < 8) { lh = 8; }
+			const int lw = lk->getWidth() * lh / lk->getHeight();
+			lk->Resize(lw, lh);
+			graphics->drawImage(lk, 0, 0, getWidth() - lw - 24, y + (img->getHeight() - lh) / 2, lw, lh);
+			lk->SetOriginalSize();
+		}
+
 		y += fontHeight;
 	}
 	img->SetOriginalSize();
