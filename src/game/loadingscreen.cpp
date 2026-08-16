@@ -185,6 +185,11 @@ void UpdateLoadingScreen()
 	PaintLoadingScreen();
 }
 
+bool IsLoadingScreenActive()
+{
+	return LoadingActive;
+}
+
 void HideLoadingScreen()
 {
 	if (!LoadingActive && !LoadingBackground && !LoadingAnimation) {

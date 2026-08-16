@@ -41,6 +41,7 @@
 #include "font.h"
 #include "interface.h"
 #include "iolib.h"
+#include "loadingscreen.h"
 #include "map.h"
 #include "menus.h"
 #include "title.h"
@@ -79,6 +80,13 @@ void ShowLoadProgress(const char *fmt, ...)
 {
 	va_list va;
 	char temp[4096];
+
+	// The Remastered map-load screen owns the framebuffer during a blocking load; suppress the
+	// legacy progress text so it does not overpaint the loading art.
+	if (IsLoadingScreenActive()) {
+		return;
+	}
+
 	static unsigned int lastProgressUpdate = SDL_GetTicks();
 	if (SDL_GetTicks() < lastProgressUpdate + 500) {
 		// Only show progress updates every half second, otherwise we're waiting for the screen too much

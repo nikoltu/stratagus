@@ -41,6 +41,11 @@ extern void ShowLoadingScreen();
 /// loading screen is not active.
 extern void UpdateLoadingScreen();
 
+/// True while the loading screen owns the framebuffer (between Show and Hide). Other
+/// blocking-load painters (e.g. ShowLoadProgress) suppress their own output while active
+/// so they do not overpaint the loading art.
+extern bool IsLoadingScreenActive();
+
 /// Free the loading-screen art. Safe to call when the screen was never shown.
 extern void HideLoadingScreen();
 
