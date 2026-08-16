@@ -1699,34 +1699,35 @@ void ImageListBox::draw(gcn::Graphics *graphics) /* override */
 	const int rowH = base->getHeight();
 	const int fontHeight = std::max<int>(getFont()->getHeight(), rowH);
 
+	// Rows fill the VISIBLE list width -- the ScrollArea's children area, which already excludes the
+	// vertical scrollbar -- flush left. Using getWidth() (the text-driven listbox width from
+	// adjustSize) left a gap on one side and clipped the row art under the scrollbar on the other.
+	int rowW = getWidth();
+	if (auto *sa = dynamic_cast<gcn::ScrollArea *>(getParent())) {
+		const int cw = sa->getChildrenArea().width;
+		if (cw > 0) {
+			rowW = cw;
+		}
+	}
+
 	/**
 	* @todo Check cliprects so we do not have to iterate over elements in the list model
 	*/
 	for (i = 0; i < mListModel->getNumberOfElements(); ++i) {
-		// Locked campaign missions (index >= unlockedCount) draw a GRAYED row image (a real desaturated
-		// button, since gcn fillRectangle ignores alpha), dimmed text, and the padlock icon.
+		// Locked campaign missions (index >= unlockedCount) draw a GRAYED row image (the real row
+		// sprite desaturated in the engine, since gcn fillRectangle ignores alpha) and dimmed text.
 		const bool locked = (unlockedCount >= 0 && i >= unlockedCount);
 		CGraphic *rowImg = (locked && lockedItemImage) ? lockedItemImage.get() : base;
-		rowImg->Resize(getWidth(), rowH);
-		graphics->drawImage(rowImg, 0, 0, 0, y, getWidth(), rowH);
+		rowImg->Resize(rowW, rowH);
+		graphics->drawImage(rowImg, 0, 0, 0, y, rowW, rowH);
 		rowImg->SetOriginalSize();
 
 		const int textY = y + (fontHeight - getFont()->getHeight()) / 2;
 		graphics->setColor(locked ? gcn::Color(150, 150, 150) : getForegroundColor());
 		if (i == mSelected) {
-			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", getWidth() / 2, textY, gcn::Graphics::Center);
+			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", rowW / 2, textY, gcn::Graphics::Center);
 		} else {
-			graphics->drawText(mListModel->getElementAt(i), getWidth() / 2, textY, gcn::Graphics::Center);
-		}
-
-		if (locked && lockedIcon) {
-			CGraphic *lk = lockedIcon.get();
-			int lh = rowH - 20;
-			if (lh < 8) { lh = 8; }
-			const int lw = lk->getWidth() * lh / lk->getHeight();
-			lk->Resize(lw, lh);
-			graphics->drawImage(lk, 0, 0, 24, y + (rowH - lh) / 2, lw, lh);
-			lk->SetOriginalSize();
+			graphics->drawText(mListModel->getElementAt(i), rowW / 2, textY, gcn::Graphics::Center);
 		}
 		graphics->setColor(getForegroundColor());
 
