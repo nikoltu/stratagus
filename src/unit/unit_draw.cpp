@@ -972,7 +972,14 @@ void CUnit::Draw(const CViewport &vp) const
 		if (this->CurrentAction() == UnitAction::Built) {
 			COrder_Built &order = *static_cast<COrder_Built *>(this->CurrentOrder());
 
-			cframe = &type->Construction->Frames[order.GetFrameIndex()];
+			// WargusHD: bounds-guard the construction-frame index (mirrors the Seen.CFrame != -1 guard
+			// below). GetFrameIndex() defaults to SIZE_MAX and can also carry a stale/unvalidated value
+			// from a save or a construction-table edit; indexing Frames[] with it read out of bounds and
+			// drew garbage (the "floating artifact" during construction).
+			const size_t cfi = order.GetFrameIndex();
+			cframe = (type->Construction && cfi < type->Construction->Frames.size())
+			             ? &type->Construction->Frames[cfi]
+			             : nullptr;
 		} else {
 			cframe = nullptr;
 		}

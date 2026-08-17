@@ -582,6 +582,7 @@ static void DrawUnitInfo(CUnit &unit)
 **  @todo FIXME : make DrawResources more configurable (format, font).
 */
 CFont *ResourcesFont = nullptr;   /// optional larger font for the resource line (set from Lua)
+CFont *ObjectivesFont = nullptr;  /// optional HD font for the in-game objectives text (set from Lua)
 
 void DrawResources()
 {
@@ -1307,7 +1308,10 @@ void DrawObjectives()
 	                                   AnchorX::Left, AnchorY::Top,
 	                                   scale.num, scale.den);
 
-	CFont &font = GetSmallFont();
+	// WargusHD: the classic small bitmap font never scales with resolution, so on an HD screen the
+	// objectives text is tiny. Use the Lua-set HD font (SetObjectivesFont "remaster_small") when
+	// present, matching how the resource line uses ResourcesFont; fall back to the classic font.
+	CFont &font = ObjectivesFont ? *ObjectivesFont : GetSmallFont();
 	CLabel label(font);
 	const int lineHeight = font.Height() + 2;
 	int y = r.y;

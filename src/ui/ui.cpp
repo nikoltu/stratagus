@@ -164,6 +164,16 @@ CPopup &PopupByIdent(std::string_view ident)
 	ExitFatal(1);
 }
 
+// Magnification applied to the in-game map viewports on touch devices, where the native framebuffer
+// is very high resolution and the default tile count is far too wide to be playable. Only the play
+// area is scaled; the HUD, menus, fonts and cursors stay at native resolution. Used both when the map
+// area is centred (InitUserInterface) and when the viewport zoom is set (FinishViewportModeConfiguration).
+#ifdef __ANDROID__
+static constexpr float MapViewportZoom = 2.0f;
+#else
+static constexpr float MapViewportZoom = 1.0f;
+#endif
+
 /**
 **  Initialize the user interface.
 */
@@ -182,8 +192,13 @@ void InitUserInterface()
 	//
 	if (Map.Info.MapWidth) {
 		/// Align UI map area if at least one of the map dimensions fits completely into it.
-		const uint16_t mapWidthInPixels = Map.Info.MapWidth * PixelTileSize.x;
-		const uint16_t mapHeightInPixels = Map.Info.MapHeight * PixelTileSize.y;
+		// WargusHD: the viewport renders each tile at PixelTileSize * MapViewportZoom (2x on touch
+		// devices), so the ON-SCREEN map is twice as wide/tall as the raw tile maths. Using the
+		// unscaled size made the engine think a small map was half its rendered width and shift
+		// UI.MapArea.X right -- overwriting the Lua-set flush X (= sidebar width) and leaving a black
+		// gap between the HUD and the map. Fold the zoom in so the centring matches what is drawn.
+		const uint16_t mapWidthInPixels = (uint16_t)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom);
+		const uint16_t mapHeightInPixels = (uint16_t)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom);
 		const uint16_t uiMapAreaWidth = UI.MapArea.EndX - UI.MapArea.X;
 		const uint16_t uiMapAreaHeight = UI.MapArea.EndY - UI.MapArea.Y;
 		uint16_t xAlign = 0;
@@ -198,8 +213,8 @@ void InitUserInterface()
 			UI.MapArea.Y += yAlign;
 		}
 
-		UI.MapArea.EndX = std::min<int>(UI.MapArea.EndX - xAlign, UI.MapArea.X + Map.Info.MapWidth * PixelTileSize.x - 1);
-		UI.MapArea.EndY = std::min<int>(UI.MapArea.EndY - yAlign, UI.MapArea.Y + Map.Info.MapHeight * PixelTileSize.y - 1);
+		UI.MapArea.EndX = std::min<int>(UI.MapArea.EndX - xAlign, UI.MapArea.X + (int)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom) - 1);
+		UI.MapArea.EndY = std::min<int>(UI.MapArea.EndY - yAlign, UI.MapArea.Y + (int)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom) - 1);
 	}
 
 	UI.SelectedViewport = UI.Viewports;
@@ -402,16 +417,6 @@ CViewport *GetViewport(const PixelPos &screenPos)
 **  @param new_vps  The array of the new viewports
 **  @param num_vps  The number of elements in the new_vps[] array.
 */
-#ifdef __ANDROID__
-// Magnification applied to the in-game map viewports on touch devices, where the
-// native framebuffer is very high resolution and the default tile count is far
-// too wide to be playable. Only the play area is scaled; the HUD, menus, fonts
-// and cursors stay at native resolution. Tune this to trade tiles-in-view for
-// on-screen tile size (2.0 ~= 23 tiles across on a ~2960 px framebuffer).
-static constexpr float MapViewportZoom = 2.0f;
-#else
-static constexpr float MapViewportZoom = 1.0f;
-#endif
 
 static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int num_vps)
 {
