@@ -110,20 +110,28 @@ static void EnsureHDTileAtlas()
 	// resolved from the player's folder) with no offline conversion. Its frames are group-prefixed
 	// (e.g. "Forest/forest_0"). Fall back to a legacy pre-imported .hdatlas (frames "<era>_N") only
 	// if the native atlas is unavailable.
-	const char *atlasName = nullptr;    // Remastered classic_<x>
-	const char *nativePrefix = nullptr; // "<Group>/<prefix>" for native frame names
+	const char *atlasName = nullptr;    // Remastered classic_<x> (fallback, classic-resolution 32px)
+	const char *nativePrefix = nullptr; // "<Group>/<prefix>" for classic frame names
 	const char *era = nullptr;          // legacy .hdatlas frame prefix + filename stem
+	// D3: TRUE HD terrain is the bgs_* multi-pack (216px/megatile), which the classic_* path only mirrors
+	// at classic 32px. Prefer bgs_* (Remastered), fall back to classic_* then to a legacy .hdatlas.
+	const char *bgsAtlas = nullptr;     // Data/Art/hd/bgs/bgs_<X>.json (Forest/Ice/Swamp/XSwamp)
+	const char *bgsPrefix = nullptr;    // bare frame prefix (forest/iceland/swamp/xswamp)
 	if (img.find("summer") != std::string::npos) {
+		bgsAtlas = "Forest"; bgsPrefix = "forest";
 		atlasName = "classic_forest"; nativePrefix = "Forest/forest"; era = "forest";
 	} else if (img.find("winter") != std::string::npos) {
+		bgsAtlas = "Ice"; bgsPrefix = "iceland";
 		atlasName = "classic_ice"; nativePrefix = "Iceland/iceland"; era = "iceland";
 	} else if (img.find("wasteland") != std::string::npos) {
 		// NG-TERR1: classic "wasteland" tileset == Remastered SWAMP atlas (verified: wasteland.lua CV4
 		// groups match Oracle Swamp). The mapping used to be reversed, drawing wrong-era terrain.
+		bgsAtlas = "Swamp"; bgsPrefix = "swamp";
 		atlasName = "classic_swamp"; nativePrefix = "Swamp/swamp"; era = "swamp";
 	} else if (img.find("swamp") != std::string::npos) {
 		// NG-TERR1: classic "swamp" tileset == Remastered XSWAMP atlas (swamp.lua CV4 groups match Oracle
 		// XSwamp; megatile IDs run to 383 which only classic_xswamp's 368 frames cover).
+		bgsAtlas = "XSwamp"; bgsPrefix = "xswamp";
 		atlasName = "classic_xswamp"; nativePrefix = "XSwamp/xswamp"; era = "xswamp";
 	}
 	if (!atlasName) {
@@ -132,8 +140,11 @@ static void EnsureHDTileAtlas()
 
 	auto atlas = std::make_shared<CAtlasGraphic>();
 	std::string prefix;
-	if (atlas->LoadTexturePacker(std::string("Data/Art/hd/classic/") + atlasName + ".json")) {
-		prefix = nativePrefix;
+	if (bgsAtlas
+		&& atlas->LoadTexturePacker(std::string("Data/Art/hd/bgs/bgs_") + bgsAtlas + ".json")) {
+		prefix = bgsPrefix; // TRUE HD terrain (216px)
+	} else if (atlas->LoadTexturePacker(std::string("Data/Art/hd/classic/") + atlasName + ".json")) {
+		prefix = nativePrefix; // classic-resolution native atlas (32px)
 	} else {
 		// Legacy fallback: <era>.hdatlas beside the classic tileset image.
 		const auto slash = img.rfind('/');
