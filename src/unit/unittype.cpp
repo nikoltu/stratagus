@@ -907,12 +907,21 @@ static void EnsureHDUnitSprite(const CUnitType &type)
 	auto mit = g_hdUnitMap.find(key);
 	if (mit != g_hdUnitMap.end()) {
 		auto sprites = GetSharedNativeAtlas(mit->second.atlas + "_sprites");
+		// NG8 diagnostic (one-shot per type): report how buildings resolve their HD atlas so a
+		// classic-scale fallback can be traced to a map miss vs an atlas-load miss vs a frame miss.
+		if (key.find("buildings/") != std::string::npos) {
+			DebugPrint("NG8 building file='%s' -> atlas='%s_sprites' prefix='%s' loaded=%d\n",
+			           key.c_str(), mit->second.atlas.c_str(), mit->second.prefix.c_str(),
+			           (int) (sprites && sprites->IsLoaded()));
+		}
 		if (sprites && sprites->IsLoaded()) {
 			type.HDSprite = sprites;
 			type.HDSpritePrefix = mit->second.prefix;
 			type.HDSpriteTeam = GetSharedNativeAtlas(mit->second.atlas + "_masks", /*teamMask=*/true); // optional
 			return;
 		}
+	} else if (key.find("buildings/") != std::string::npos) {
+		DebugPrint("NG8 building file='%s' NOT found in hd_units_map\n", key.c_str());
 	}
 
 	// Legacy fallback: a per-unit .hdatlas baked beside the classic PNG (numeric frame names).
