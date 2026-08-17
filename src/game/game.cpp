@@ -561,6 +561,32 @@ static void LoadMap(const fs::path &filename, CMap &map)
 		name.replace_extension();
 	}
 #endif
+	// Native PUD load (no .smp/.sms files, no cache): a campaign levelNN.smp request or a custom .pud is
+	// resolved to its source .PUD and built directly via the engine. Presentation may already have run at
+	// CreateGame (Map.Info.Filename set); otherwise run it here. On a clean pre-Create failure fall back to
+	// the classic converter below. (Genuine editor-made .smp maps resolve to {} here -> untouched.)
+	{
+		const fs::path pud = ResolveMapPud(name.string());
+		if (!pud.empty()) {
+			bool nativeOk = true;
+			if (map.Info.Filename.empty()) {
+				if (LoadPudMapNative(pud, 0)) {
+					map.Info.Filename = filename.string();
+				} else {
+					nativeOk = false;
+				}
+			}
+			if (nativeOk) {
+				map.Create();
+				if (LoadPudMapNative(pud, 1)) {
+					return;
+				}
+				ErrorPrint("Native PUD setup failed for '%s'\n", filename.u8string().c_str());
+				ExitFatal(-1);
+			}
+		}
+	}
+
 	if (name.extension() == ".smp") {
 		if (map.Info.Filename.empty()) {
 			// The map info hasn't been loaded yet => do it now
@@ -572,8 +598,7 @@ static void LoadMap(const fs::path &filename, CMap &map)
 		return;
 	}
 
-	// MAP-4: custom / multiplayer classic maps ship as raw .PUD. Convert on demand to the Stratagus
-	// cache (same converter the campaign path uses) and load the resulting cached .smp.gz.
+	// Fallback: convert a raw .PUD to the cache and load it (used only if the native path above failed).
 	{
 		const std::string ext = name.extension().string();
 		if (ext == ".pud" || ext == ".PUD" || ext == ".Pud") {
@@ -838,9 +863,16 @@ void CreateGame(const fs::path &filename, CMap *map)
 		InitSyncRand();
 	}
 
-	if (Map.Info.Filename.empty() && has_any_extension(filename, {".smp", ".SMP"})) {
-		const std::string path = LibraryFileName(filename.string());
-		LuaLoadFile(path);
+	if (Map.Info.Filename.empty()) {
+		// Native: PUD-backed maps load their presentation (Map.Info + player types) directly from the
+		// original .PUD before the player-setup loop below. Fall back to the classic .smp file path.
+		const fs::path pud = ResolveMapPud(filename.string());
+		if (!pud.empty() && LoadPudMapNative(pud, 0)) {
+			Map.Info.Filename = filename.string();
+		} else if (has_any_extension(filename, {".smp", ".SMP"})) {
+			const std::string path = LibraryFileName(filename.string());
+			LuaLoadFile(path);
+		}
 	}
 
 	for (int i = 0; i < PlayerMax; ++i) {
