@@ -269,6 +269,10 @@ public:
 	/// Loaded lazily once per map; null when the .hdatlas is absent (classic path is the fallback).
 	std::shared_ptr<CAtlasGraphic> HDTileAtlas;
 	bool HDTileAtlasTried = false; /// guards the one-shot lazy load attempt of HDTileAtlas
+	/// NG1: the Tileset.ImageFile the current HDTileAtlas was derived for. The lazy load re-runs whenever
+	/// the tileset changes (e.g. summer preview -> winter map) so the atlas is a pure function of the
+	/// current tileset, instead of latching to whatever tileset was first drawn.
+	std::string HDTileAtlasImageFile;
 	/// Megatile index (CTile.tile / SeenTile) -> atlas frame index, or -1 when no HD frame exists
 	/// (fog M<16, or M-16 beyond the atlas). Precomputed once by the loader for O(1) hot-loop use.
 	std::vector<int> HDTileAtlasFrameForTile;

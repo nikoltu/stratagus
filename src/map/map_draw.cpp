@@ -100,10 +100,18 @@ static void EnsureHDTileGraphic()
 */
 static void EnsureHDTileAtlas()
 {
-	if (Map.HDTileAtlasTried) {
+	// NG1: winter maps used to render summer terrain. The one-shot latch (HDTileAtlasTried) latched true on
+	// the FIRST draw -- often a menu/preview still holding the previous tileset's ImageFile -- and a later
+	// winter map load never cleared it, so the summer atlas stuck. Key the lazy load to the CURRENT tileset
+	// identity instead: re-derive whenever Tileset.ImageFile changes, making the atlas a pure function of the
+	// active tileset. Re-latch on the same image so a classic install (load fails) doesn't retry every frame.
+	if (Map.HDTileAtlasTried && Map.HDTileAtlasImageFile == Map.Tileset.ImageFile) {
 		return;
 	}
 	Map.HDTileAtlasTried = true;
+	Map.HDTileAtlasImageFile = Map.Tileset.ImageFile;
+	Map.HDTileAtlas = nullptr;             // drop any atlas derived for the previous tileset
+	Map.HDTileAtlasFrameForTile.clear();
 
 	const std::string &img = Map.Tileset.ImageFile;
 	// WargusHD: prefer the NATIVE Remastered terrain atlas (Data/Art/hd/classic/classic_<x>.json,

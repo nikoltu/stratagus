@@ -355,11 +355,12 @@ void CMap::Clean(const bool isHardClean /* = false*/)
 	// Drop any lazily-loaded crisp-zoom HD tile graphic so the next map re-derives it.
 	this->HDTileGraphic = nullptr;
 	this->HDTileGraphicTried = false;
-	// NG1: also drop the HD terrain ATLAS one-shot state. Without this the first map's tileset atlas
-	// (e.g. classic_forest) is reused for every later map because EnsureHDTileAtlas early-returns on
-	// HDTileAtlasTried -> a winter map keeps drawing summer terrain. Force a per-map re-derive.
+	// NG1: also drop the HD terrain ATLAS state on teardown. The primary guard is now tileset-identity
+	// keying in EnsureHDTileAtlas (re-derives when Tileset.ImageFile changes), so a winter map no longer
+	// inherits a summer atlas even without this reset; keep it as clean teardown between games.
 	this->HDTileAtlas = nullptr;
 	this->HDTileAtlasTried = false;
+	this->HDTileAtlasImageFile.clear();
 	this->HDTileAtlasFrameForTile.clear();
 
 	FlagRevealMap = MapRevealModes::cHidden;
