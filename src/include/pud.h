@@ -97,9 +97,6 @@ public:
 	void BuildPresentation(std::string &out) const;
 	void BuildSetup(std::string &out) const;
 
-	void WriteSMP(gzFile smpout, const char *smsname) const;
-	void WriteSMS(gzFile smsout) const;
-
 private:
 	char Description[32];
 
@@ -122,8 +119,6 @@ private:
 	int StartX[PLAYERMAX];
 	int StartY[PLAYERMAX];
 };
-
-int PudToStratagus(const unsigned char *puddata, size_t size, const char *name, const char *outdir);
 
 /// PUD unit-type index -> Stratagus unit ident (0..104; empty "" for the unused nothing-* slots).
 /// Shared with the native gameplay-data reader (wc2data.cpp).

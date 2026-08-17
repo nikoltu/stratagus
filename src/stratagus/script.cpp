@@ -245,6 +245,21 @@ int LuaLoadFile(const fs::path &file, const std::string &strArg, bool exitOnErro
 {
 	DebugPrint("Loading '%s'\n", file.u8string().c_str());
 
+	// WargusHD native PUD loader: this is the single choke point every Lua file load passes through (Load(),
+	// map presentation at CreateGame, LoadStratagusMap setup, ...). A PLAIN campaign map file
+	// (campaigns/<race>/levelNN.smp | .sms) is served in-memory straight from the original .PUD via
+	// BuildPresentation/BuildSetup -- no .smp/.sms conversion, no cache. The _c.sms/_c2.sms briefing+trigger
+	// wrappers are NOT PUD-backed (ResolveMapPud rejects the "_c" stems) and load as normal files, so the
+	// campaign briefing, victory/defeat triggers and tech restrictions still run.
+	{
+		const fs::path pud = ResolveMapPud(file.string());
+		if (!pud.empty()) {
+			const std::string ext = file.extension().string();
+			const int phase = (ext == ".sms" || ext == ".SMS") ? 1 : 0; // .smp/.pud -> presentation, .sms -> setup
+			return LoadPudMapNative(pud, phase) ? 0 : -1;
+		}
+	}
+
 	const auto content = GetFileContent(file);
 	if (!content) {
 		return -1;
@@ -300,25 +315,8 @@ static int CclLoad(lua_State *l)
 	if (arg < 1 || arg > 2) {
 		LuaError(l, "incorrect argument");
 	}
-	const std::string request{LuaToString(l, 1)};
+	const fs::path filename = LibraryFileName(std::string{LuaToString(l, 1)});
 	bool exitOnError = arg == 2 ? LuaToBoolean(l, 2) : true;
-
-	// WargusHD native PUD loader: a PLAIN campaign map file (campaigns/<race>/levelNN.smp | .sms) is served
-	// in-memory straight from the original .PUD -- no .smp/.sms conversion, no cache. The _c.sms / _c2.sms
-	// briefing+trigger wrappers are NOT PUD-backed (ResolveMapPud rejects the "_c" stems) and load normally,
-	// so the campaign briefing, victory/defeat triggers and tech restrictions still run; the wrapper's own
-	// Load() of the plain .sms lands back here and is served natively. Falls back to the file path on failure.
-	const fs::path pud = ResolveMapPud(request);
-	if (!pud.empty()) {
-		const std::string ext = fs::path(request).extension().string();
-		const int phase = (ext == ".sms" || ext == ".SMS") ? 1 : 0; // .smp/.pud -> presentation, .sms -> setup
-		if (LoadPudMapNative(pud, phase)) {
-			return 0;
-		}
-		// native load failed -> fall through to the classic converter path below
-	}
-
-	const fs::path filename = LibraryFileName(request);
 	if (LuaLoadFile(filename, "", exitOnError) == -1) {
 		ErrorPrint("Load failed: '%s'\n", filename.u8string().c_str());
 	}

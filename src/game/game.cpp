@@ -572,21 +572,10 @@ static void LoadMap(const fs::path &filename, CMap &map)
 		return;
 	}
 
-	// MAP-4: custom / multiplayer classic maps ship as raw .PUD. Convert on demand to the Stratagus
-	// cache (same converter the campaign path uses) and load the resulting cached .smp.gz.
-	{
-		const std::string ext = name.extension().string();
-		if (ext == ".pud" || ext == ".PUD" || ext == ".Pud") {
-			const fs::path cached = ConvertPudFileToCache(filename);
-			if (!cached.empty()) {
-				LoadMap(cached, map);
-				return;
-			}
-			ErrorPrint("Failed to convert PUD map '%s'\n", filename.u8string().c_str());
-			ExitFatal(-1);
-		}
-	}
-
+	// Campaign maps load natively via the Lua Load() path (CclLoad -> the in-memory PUD loader); their
+	// .smp branch above runs the _c.sms wrapper. Custom / multiplayer raw .PUD maps (no wrapper) are not yet
+	// reachable (the Custom Scenario browser doesn't list them yet) and will get their own native
+	// presentation+setup path when that menu is built. Until then an unknown extension is an error.
 	ErrorPrint("Unrecognized map format\n");
 	ExitFatal(-1);
 }

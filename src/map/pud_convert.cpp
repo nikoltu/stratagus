@@ -324,35 +324,6 @@ void PudData::BuildSetup(std::string &out) const
 	}
 }
 
-void PudData::WriteSMP(gzFile smpout, const char *smsname) const
-{
-	std::string s;
-	BuildPresentation(s);
-	gzprintf(smpout, "%s", s.c_str());
-
-	// hack for campaigns: point the presentation at the _c.sms setup wrapper (file path only).
-	if (smsname) {
-		char buf[512];
-		buf[0] = '\0';
-		for (const char *c = strstr(smsname, "./campaigns"); *c != '\0'; ++c) {
-			if (*c == '\\') {
-				strcat(buf, "/");
-			} else {
-				strncat(buf, c, 1);
-			}
-		}
-		strcpy(strstr(buf, ".sms"), "_c.sms");
-		gzprintf(smpout, "DefineMapSetup(\"%s\")\n", buf);
-	}
-}
-
-void PudData::WriteSMS(gzFile smsout) const
-{
-	std::string s;
-	BuildSetup(s);
-	gzprintf(smsout, "%s", s.c_str());
-}
-
 static int PudReadHeader(const unsigned char *puddata, char *header, int *len)
 {
 	unsigned int tmp;
@@ -473,48 +444,4 @@ bool PudData::Parse(const unsigned char *puddata, size_t size)
 }
 
 // Convert pud to native stratagus format
-int PudToStratagus(const unsigned char *puddata, size_t size, const char *name, const char *outdir)
-{
-	PudData pdata;
-
-	if (pdata.Parse(puddata, size) == false) {
-		fprintf(stderr, "invalid pud data\n");
-		return -1;
-	}
-	gzFile smpout;
-	gzFile smsout;
-	char smpname[PATH_MAX];
-	char smsname[PATH_MAX];
-
-	strcpy(smpname, outdir);
-	strcat(smpname, "/");
-	strcat(smpname, name);
-	strcat(smpname, ".smp.gz");
-
-	strcpy(smsname, outdir);
-	strcat(smsname, "/");
-	strcat(smsname, name);
-	strcat(smsname, ".sms.gz");
-
-	if (!(smpout = gzopen(smpname, "wb"))) {
-		fprintf(stderr, "cannot open smpfile\n");
-		return -1;
-	}
-	if (!(smsout = gzopen(smsname, "wb"))) {
-		fprintf(stderr, "cannot open smsfile\n");
-		return -1;
-	}
-
-	if (strstr(smsname, "campaigns")) {
-		pdata.WriteSMP(smpout, smsname);
-	} else {
-		pdata.WriteSMP(smpout, NULL);
-	}
-	pdata.WriteSMS(smsout);
-
-	gzclose(smpout);
-	gzclose(smsout);
-	return 0;
-}
-
 } // namespace wc2pud
