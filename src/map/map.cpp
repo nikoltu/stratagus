@@ -755,14 +755,6 @@ void CMap::Clamp(Vec2i &pos) const
 */
 bool LoadStratagusMapInfo(const fs::path &mapname)
 {
-	// Native: a PUD-backed request (custom .pud or campaign levelNN.smp) runs the presentation Lua directly
-	// from the original .PUD, no .smp file. Falls back to the classic file path if resolution/native fails.
-	const fs::path pud = ResolveMapPud(mapname.string());
-	if (!pud.empty() && LoadPudMapNative(pud, 0)) {
-		Map.Info.Filename = mapname.string();
-		return true;
-	}
-
 	// Set the default map setup by replacing .smp with .sms
 	size_t loc = mapname.string().find(".smp");
 	if (loc != std::string::npos) {

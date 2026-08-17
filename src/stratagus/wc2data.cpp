@@ -45,7 +45,6 @@
 #include "upgrade_structs.h"
 
 #include <array>
-#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -237,40 +236,12 @@ static bool LoadSidecar(const std::string &stem, const char *ext, size_t minSize
 	return ok;
 }
 
-// Get a PUD chunk (UDTA/UGRD) for the current map: from the in-memory native PUD if one is loaded (native
-// loader path), else from the cached sidecar the fallback converter wrote. Returns false if unavailable.
-static bool GetMapPudChunk(const std::string &stem, const char *tag, const char *sidecarExt,
-                           size_t minSize, std::string &out)
-{
-	if (const std::string *pud = CurrentNativePudBytes()) {
-		const std::string &p = *pud;
-		size_t off = 0;
-		while (off + 8 <= p.size()) {
-			const uint32_t len = (uint8_t) p[off + 4] | ((uint32_t)(uint8_t) p[off + 5] << 8)
-			                   | ((uint32_t)(uint8_t) p[off + 6] << 16) | ((uint32_t)(uint8_t) p[off + 7] << 24);
-			const size_t payload = off + 8;
-			if (payload + len > p.size()) {
-				break;
-			}
-			if (memcmp(&p[off], tag, 4) == 0) {
-				if (len >= minSize) {
-					out.assign(p, payload, len);
-					return true;
-				}
-				break; // chunk present but too short
-			}
-			off = payload + len;
-		}
-	}
-	return LoadSidecar(stem, sidecarExt, minSize, out);
-}
-
 // Per-map UDTA: overwrite unit stats for THIS map, but only when the chunk's use_default flag is 0 (a
 // use_default==1 map keeps the D2 Remastered baseline). Field table follows a 2-byte flag prefix (base 2).
 static void ApplyMapUdta(const std::string &stem)
 {
 	std::string d;
-	if (!GetMapPudChunk(stem, "UDTA", ".udta", 5254, d)) {
+	if (!LoadSidecar(stem, ".udta", 5254, d)) {
 		return;
 	}
 	if (rdU16(d, 0) != 0) {
@@ -305,7 +276,7 @@ static void ApplyMapUdta(const std::string &stem)
 static void ApplyMapUgrd(const std::string &stem)
 {
 	std::string d;
-	if (!GetMapPudChunk(stem, "UGRD", ".ugrd", 782, d)) { // 2-byte flag + 780-byte body
+	if (!LoadSidecar(stem, ".ugrd", 782, d)) { // 2-byte flag + 780-byte body
 		return;
 	}
 	std::unordered_map<std::string, CUpgrade *> byIdent;
