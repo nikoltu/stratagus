@@ -308,6 +308,7 @@ set(stratagusmain_SRCS
 	src/stratagus/title.cpp
 	src/stratagus/translate.cpp
 	src/stratagus/util.cpp
+	src/stratagus/wc2data.cpp
 )
 source_group(stratagusmain FILES ${stratagus_SRCS})
 

@@ -119,6 +119,10 @@ private:
 
 int PudToStratagus(const unsigned char *puddata, size_t size, const char *name, const char *outdir);
 
+/// PUD unit-type index -> Stratagus unit ident (0..104; empty "" for the unused nothing-* slots).
+/// Shared with the native gameplay-data reader (wc2data.cpp).
+extern const char *UnitScriptNames[];
+
 } // namespace wc2pud
 
 #endif

@@ -1608,6 +1608,8 @@ void LuaRegisterModules()
 	TriggerCclRegister();
 	UnitCclRegister();
 	UnitTypeCclRegister();
+	extern void WC2DataCclRegister(); // D2: native Data/Rez/unitdata.dat stat override (wc2data.cpp)
+	WC2DataCclRegister();
 	UpgradesCclRegister();
 	UserInterfaceCclRegister();
 	VideoCclRegister();
