@@ -596,8 +596,15 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	if (dot == std::string::npos) { return {}; }
 	const std::string stem = base.substr(0, dot);       // level01h
 	if (stem.compare(0, 5, "level") != 0) { return {}; }
+	// CAMP-1: Beyond-the-Dark-Portal maps are requested as "levelx01h" (an 'x' before the number, from
+	// the -exp campaign dirs). The digit scan used to start at index 5, hit that 'x', find no digits and
+	// bail -> every one of the 24 expansion missions failed to load. Skip the optional 'x' first.
+	size_t digitStart = 5;
+	if (digitStart < stem.size() && (stem[digitStart] == 'x' || stem[digitStart] == 'X')) {
+		++digitStart;
+	}
 	std::string num;
-	for (size_t i = 5; i < stem.size() && std::isdigit((unsigned char)stem[i]); ++i) { num += stem[i]; }
+	for (size_t i = digitStart; i < stem.size() && std::isdigit((unsigned char)stem[i]); ++i) { num += stem[i]; }
 	if (num.empty()) { return {}; }
 	if (num.size() == 1) { num = "0" + num; }
 	const bool exp = dir.find("-exp") != std::string::npos;
