@@ -166,8 +166,14 @@ void DrawUnitSelection(const CViewport &vp, const CUnit &unit)
 
 	const CUnitType &type = *unit.Type;
 	const PixelPos screenPos = vp.MapToScreenPixelPos(unit.GetMapPixelPosCenter());
-	const int x = screenPos.x - type.BoxWidth / 2 - (type.Width - (type.Sprite ? type.Sprite->Width : 0)) / 2;
-	const int y = screenPos.y - type.BoxHeight / 2 - (type.Height - (type.Sprite ? type.Sprite->Height : 0)) / 2;
+	// WargusHD: the sprite is drawn at its footprint scaled by the viewport zoom (MapViewportZoom, 2x
+	// on touch), but the selection box (BoxWidth/BoxHeight/BoxOffset) is authored in classic pixels.
+	// Scale the box maths by the same zoom so the rectangle wraps the visible HD unit instead of a tiny
+	// classic-sized box. Identity on non-touch (zoom==1), so classic behaviour is unchanged there.
+	const float z = GpuWorldDrawZoom;
+	const auto sc = [z](int v) { return (int) std::lround(v * z); };
+	const int x = screenPos.x - sc(type.BoxWidth) / 2 - sc(type.Width - (type.Sprite ? type.Sprite->Width : 0)) / 2;
+	const int y = screenPos.y - sc(type.BoxHeight) / 2 - sc(type.Height - (type.Sprite ? type.Sprite->Height : 0)) / 2;
 
 	if (color2 && Preference.SelectionRectangleIndicatesDamage) {
 		float fraction = (float)unit.Variable[HP_INDEX].Value / unit.Variable[HP_INDEX].Max;
@@ -175,10 +181,10 @@ void DrawUnitSelection(const CViewport &vp, const CUnit &unit)
 	}
 
 	DrawSelection(color,
-	              x + type.BoxOffset.x,
-	              y + type.BoxOffset.y,
-	              x + type.BoxOffset.x + type.BoxWidth,
-	              y + type.BoxOffset.y + type.BoxHeight);
+	              x + sc(type.BoxOffset.x),
+	              y + sc(type.BoxOffset.y),
+	              x + sc(type.BoxOffset.x) + sc(type.BoxWidth),
+	              y + sc(type.BoxOffset.y) + sc(type.BoxHeight));
 }
 
 /**
