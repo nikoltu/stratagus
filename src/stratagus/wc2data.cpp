@@ -332,9 +332,75 @@ static int CclApplyRemasteredUnitData(lua_State *l)
 	return 0;
 }
 
+// D1b: return the real Remastered campaign objective text for a 0-based mission index, read natively from
+// Data/Rez/objctivs.tbl (no conversion, no hardcoding). Replaces the placeholder "-Destroy the enemy".
+//
+// Mission index (from the EXE mission-init, VERIFIED): base campaigns Human/Orc level N=1..14 -> 2*(N-1)+race;
+// expansion XHuman/XOrc N=1..12 -> 28 + 2*(N-1)+race (race: human=0, orc=1). The objective string index ==
+// the mission index; the engine shows exactly one string per mission (fallback = string 58). objctivs.tbl:
+// u16 count, then count u16 absolute byte-offsets, then NUL-terminated latin1 strings (multi-line via '\n').
+// Lua receives the whole string and splits on '\n' for bullet lines. Returns nil if the file is absent.
+static int CclGetRemasteredObjective(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const int missionIndex = LuaToNumber(l, 1);
+
+	const fs::path resolved = LibraryFileName("Data/Rez/objctivs.tbl");
+	if (resolved.empty()) {
+		lua_pushnil(l);
+		return 1;
+	}
+	std::error_code ec;
+	const uintmax_t sz = fs::file_size(resolved, ec);
+	if (ec || sz < 4) {
+		lua_pushnil(l);
+		return 1;
+	}
+	std::string d;
+	{
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+			lua_pushnil(l);
+			return 1;
+		}
+		d.resize((size_t) sz);
+		const bool ok = (size_t) fp->read(&d[0], (size_t) sz) == (size_t) sz;
+		fp->close();
+		if (!ok) {
+			lua_pushnil(l);
+			return 1;
+		}
+	}
+
+	const uint32_t count = rdU16(d, 0);
+	// Missions map to string indices 0..51; anything outside that range shows the generic default (58).
+	uint32_t idx = (missionIndex >= 0 && missionIndex < 52) ? (uint32_t) missionIndex : 58u;
+	if (idx >= count) {
+		lua_pushnil(l);
+		return 1;
+	}
+	const size_t offPos = 2 + (size_t) idx * 2;
+	if (offPos + 1 >= d.size()) {
+		lua_pushnil(l);
+		return 1;
+	}
+	const size_t strOff = rdU16(d, offPos);
+	if (strOff >= d.size()) {
+		lua_pushnil(l);
+		return 1;
+	}
+	size_t end = strOff;
+	while (end < d.size() && d[end] != '\0') {
+		++end;
+	}
+	lua_pushlstring(l, d.data() + strOff, end - strOff);
+	return 1;
+}
+
 void WC2DataCclRegister()
 {
 	lua_register(Lua, "ApplyRemasteredUnitData", CclApplyRemasteredUnitData);
+	lua_register(Lua, "GetRemasteredObjective", CclGetRemasteredObjective);
 }
 
 //@}
