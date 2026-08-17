@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <zlib.h>
 
@@ -236,12 +237,24 @@ PudData::PudData()
 	memset(StartY, 0, sizeof(StartY));
 }
 
-void PudData::WriteSMP(gzFile smpout, const char *smsname) const
+// Append a printf-formatted line to a std::string.
+static void AppendLine(std::string &out, const char *fmt, ...)
+{
+	char buf[600];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	out += buf;
+}
+
+// Build the map PRESENTATION as Lua (DefinePlayerTypes + PresentMap). Sets Map.Info when run. This is the
+// same content WriteSMP emits, minus the campaign DefineMapSetup file redirect (the native loader runs the
+// setup phase directly, so no file reference is needed).
+void PudData::BuildPresentation(std::string &out) const
 {
 	const PudData &pdata = *this;
-	gzprintf(smpout, "-- Stratagus Map Presentation\n");
-	gzprintf(smpout, "-- File generated automatically from pudconvert V" VERSION "\n");
-	gzprintf(smpout, "\n");
+	out += "-- Stratagus Map Presentation (native)\n\n";
 
 	char buf[512];
 	strcpy(buf, "DefinePlayerTypes(");
@@ -253,13 +266,73 @@ void PudData::WriteSMP(gzFile smpout, const char *smsname) const
 		}
 	}
 	strcpy(&buf[strlen(buf) - 1], ")\n");
-	gzprintf(smpout, buf);
+	out += buf;
 
-	gzprintf(smpout, "PresentMap(\"%s\", %d, %d, %d, %d)\n", pdata.Description,
+	AppendLine(out, "PresentMap(\"%s\", %d, %d, %d, %d)\n", pdata.Description,
 		playerCount, pdata.MapSizeX, pdata.MapSizeY, 1);
+}
 
-	// hack for campaigns
+// Build the map SETUP as Lua (players, tileset, terrain tiles, units). Run after Map.Create().
+void PudData::BuildSetup(std::string &out) const
+{
+	const PudData &pdata = *this;
+	out += "-- Stratagus Map Setup (native)\n\n";
+
+	for (int i = 0; i != PLAYERMAX - 1; ++i) {
+		if (pdata.Players[i] == PlayerNobody) {
+			continue;
+		}
+		AppendLine(out, "SetStartView(%d, %d, %d)\n", i, pdata.StartX[i], pdata.StartY[i]);
+		AppendLine(out, "SetPlayerData(%d, \"Resources\", \"gold\", %d)\n", i, pdata.StartGold[i]);
+		AppendLine(out, "SetPlayerData(%d, \"Resources\", \"wood\", %d)\n", i, pdata.StartLumber[i]);
+		AppendLine(out, "SetPlayerData(%d, \"Resources\", \"oil\", %d)\n", i, pdata.StartOil[i]);
+		AppendLine(out, "SetPlayerData(%d, \"RaceName\", \"%s\")\n", i, RaceNames[pdata.Races[i]]);
+		if (pdata.Players[i] != PlayerNeutral) {
+			AppendLine(out, "SetAiType(%d, \"%s\")\n", i, AiTypeNames[pdata.AiType[i]]);
+		}
+	}
+	AppendLine(out, "SetPlayerData(%d, \"RaceName\", \"neutral\")\n", PLAYERMAX - 1);
+	out += "\n";
+
+	AppendLine(out, "LoadTileModels(\"scripts/tilesets/%s.lua\")\n\n", TilesetTypeStrings[pdata.Tileset]);
+
+	for (int y = 0; y < pdata.MapSizeY; ++y) {
+		for (int x = 0; x < pdata.MapSizeX; ++x) {
+			const int mapOffset = y * pdata.MapSizeX + x;
+			AppendLine(out, "SetTile(%d, %d, %d, %d)\n", pdata.Tiles[mapOffset], x, y, pdata.Value[mapOffset]);
+		}
+	}
+
+	out += "\nlocal unit\n";
+
+	for (size_t i = 0; i < pdata.Units.size(); ++i) {
+		if (pdata.Units[i].Type == UnitHumanStart
+			|| pdata.Units[i].Type == UnitOrcStart) {
+			continue;
+		}
+		if (strlen(UnitScriptNames[pdata.Units[i].Type]) <= 1) {
+			fprintf(stderr, "Skipping unknown unit type %d for player %d at [%d, %d]\n", pdata.Units[i].Type, pdata.Units[i].Player, pdata.Units[i].X, pdata.Units[i].Y);
+			continue;
+		}
+		AppendLine(out, "unit = CreateUnit(\"%s\", %d, {%d, %d})\n",
+			UnitScriptNames[pdata.Units[i].Type], pdata.Units[i].Player,
+			pdata.Units[i].X, pdata.Units[i].Y);
+		if (pdata.Units[i].Type == UnitHumanOilPlatform || pdata.Units[i].Type == UnitOrcOilPlatform ||
+				pdata.Units[i].Type == UnitGoldMine || pdata.Units[i].Type == UnitOilPatch) {
+			AppendLine(out, "SetResourcesHeld(unit, %d)\n", pdata.Units[i].Data * 2500);
+		}
+	}
+}
+
+void PudData::WriteSMP(gzFile smpout, const char *smsname) const
+{
+	std::string s;
+	BuildPresentation(s);
+	gzprintf(smpout, "%s", s.c_str());
+
+	// hack for campaigns: point the presentation at the _c.sms setup wrapper (file path only).
 	if (smsname) {
+		char buf[512];
 		buf[0] = '\0';
 		for (const char *c = strstr(smsname, "./campaigns"); *c != '\0'; ++c) {
 			if (*c == '\\') {
@@ -275,60 +348,9 @@ void PudData::WriteSMP(gzFile smpout, const char *smsname) const
 
 void PudData::WriteSMS(gzFile smsout) const
 {
-	const PudData &pdata = *this;
-	gzprintf(smsout, "-- Stratagus Map Setup\n");
-	gzprintf(smsout, "-- File generated automatically from pudconvert V" VERSION "\n");
-	gzprintf(smsout, "\n");
-
-	for (int i = 0; i != PLAYERMAX - 1; ++i) {
-		if (pdata.Players[i] == PlayerNobody) {
-			continue;
-		}
-		gzprintf(smsout, "SetStartView(%d, %d, %d)\n", i, pdata.StartX[i], pdata.StartY[i]);
-		gzprintf(smsout, "SetPlayerData(%d, \"Resources\", \"gold\", %d)\n",
-			i, pdata.StartGold[i]);
-		gzprintf(smsout, "SetPlayerData(%d, \"Resources\", \"wood\", %d)\n",
-			i, pdata.StartLumber[i]);
-		gzprintf(smsout, "SetPlayerData(%d, \"Resources\", \"oil\", %d)\n",
-			i, pdata.StartOil[i]);
-		gzprintf(smsout, "SetPlayerData(%d, \"RaceName\", \"%s\")\n", i, RaceNames[pdata.Races[i]]);
-		if (pdata.Players[i] != PlayerNeutral) {
-			gzprintf(smsout, "SetAiType(%d, \"%s\")\n", i, AiTypeNames[pdata.AiType[i]]);
-		}
-	}
-	gzprintf(smsout, "SetPlayerData(%d, \"RaceName\", \"neutral\")\n", PLAYERMAX - 1);
-	gzprintf(smsout, "\n");
-
-	gzprintf(smsout, "LoadTileModels(\"scripts/tilesets/%s.lua\")\n\n",
-		TilesetTypeStrings[pdata.Tileset]);
-
-	for (int y = 0; y < pdata.MapSizeY; ++y) {
-		for (int x = 0; x < pdata.MapSizeX; ++x) {
-			const int mapOffset = y * pdata.MapSizeX + x;
-			gzprintf(smsout, "SetTile(%d, %d, %d, %d)\n",
-				pdata.Tiles[mapOffset], x, y, pdata.Value[mapOffset]);
-		}
-	}
-
-	gzprintf(smsout, "\nlocal unit\n");
-
-	for (size_t i = 0; i < pdata.Units.size(); ++i) {
-		if (pdata.Units[i].Type == UnitHumanStart
-			|| pdata.Units[i].Type == UnitOrcStart) {
-			continue;
-		}
-		if (strlen(UnitScriptNames[pdata.Units[i].Type]) <= 1) {
-			fprintf(stderr, "Skipping unknown unit type %d for player %d at [%d, %d]\n", pdata.Units[i].Type, pdata.Units[i].Player, pdata.Units[i].X, pdata.Units[i].Y);
-			continue;
-		}
-		gzprintf(smsout, "unit = CreateUnit(\"%s\", %d, {%d, %d})\n",
-			UnitScriptNames[pdata.Units[i].Type], pdata.Units[i].Player,
-			pdata.Units[i].X, pdata.Units[i].Y);
-		if (pdata.Units[i].Type == UnitHumanOilPlatform || pdata.Units[i].Type == UnitOrcOilPlatform ||
-				pdata.Units[i].Type == UnitGoldMine || pdata.Units[i].Type == UnitOilPatch) {
-			gzprintf(smsout, "SetResourcesHeld(unit, %d)\n", pdata.Units[i].Data * 2500);
-		}
-	}
+	std::string s;
+	BuildSetup(s);
+	gzprintf(smsout, "%s", s.c_str());
 }
 
 static int PudReadHeader(const unsigned char *puddata, char *header, int *len)

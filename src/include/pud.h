@@ -30,6 +30,7 @@
 #define PUD_H
 
 #include <zlib.h>
+#include <string>
 #include <vector>
 
 
@@ -90,6 +91,11 @@ public:
 	PudData();
 
 	bool Parse(const unsigned char *puddata, size_t size);
+
+	// Native in-memory loader: build the map presentation (DefinePlayerTypes/PresentMap) and setup
+	// (SetPlayerData/SetTile/CreateUnit) as Lua the engine runs directly, no .smp/.sms files.
+	void BuildPresentation(std::string &out) const;
+	void BuildSetup(std::string &out) const;
 
 	void WriteSMP(gzFile smpout, const char *smsname) const;
 	void WriteSMS(gzFile smsout) const;
