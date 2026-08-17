@@ -41,14 +41,18 @@
 #include "game.h"
 #include "map.h"
 #include "parameters.h"
+#include "stratagus.h"
 #include "util.h"
+#include "pud.h"
 
 #include <SDL.h>
 
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <map>
 #include <unordered_map>
+#include <vector>
 
 #ifdef USE_ZLIB
 #include <zlib.h>
@@ -562,6 +566,75 @@ static bool FindFileWithExtension(fs::path &fullpath)
 **  @param file        Filename to open.
 **  return generated filename.
 */
+// WargusHD: the classic WC2 campaign maps are the player's own original .PUD files. When a campaign
+// presentation map (campaigns/<race>[-exp]/levelNN<r>.smp) is requested but not present as a
+// Stratagus map, convert the matching source .PUD -- from the user-selected Warcraft II folder
+// (WC2SourcePath) -- to a Stratagus .smp/.sms in a writable cache and return that. This makes the
+// engine read the original campaign maps directly, with no external extractor: the converter is
+// built into the app, so a single APK reads the original + Remastered files on its own.
+static fs::path TryConvertCampaignPud(const std::string_view fileview)
+{
+	if (WC2SourcePath.empty()) {
+		return {};
+	}
+	std::string f(fileview);
+	for (char &c : f) { if (c == '\\') { c = '/'; } }
+	const auto pos = f.find("campaigns/");
+	if (pos == std::string::npos) {
+		return {};
+	}
+	std::string rest = f.substr(pos + 10);              // "human/level01h.smp" | "orc-exp/level01o.smp"
+	const auto slash = rest.find('/');
+	if (slash == std::string::npos) { return {}; }
+	const std::string dir  = rest.substr(0, slash);     // human | orc | human-exp | orc-exp
+	const std::string base = rest.substr(slash + 1);    // level01h.smp
+	const auto dot = base.find(".smp");
+	if (dot == std::string::npos) { return {}; }
+	const std::string stem = base.substr(0, dot);       // level01h
+	if (stem.compare(0, 5, "level") != 0) { return {}; }
+	std::string num;
+	for (size_t i = 5; i < stem.size() && std::isdigit((unsigned char)stem[i]); ++i) { num += stem[i]; }
+	if (num.empty()) { return {}; }
+	if (num.size() == 1) { num = "0" + num; }
+	const bool exp = dir.find("-exp") != std::string::npos;
+	const bool orc = dir.compare(0, 3, "orc") == 0;
+	std::string sub, prefix;
+	if (!orc && !exp)      { sub = "Human";  prefix = "HUMAN"; }
+	else if (orc && !exp)  { sub = "Orc";    prefix = "ORC"; }
+	else if (!orc && exp)  { sub = "XHuman"; prefix = "2XHUM"; }
+	else                   { sub = "XOrc";   prefix = "2XORC"; }
+	std::error_code ec;
+	fs::path pud = fs::path(WC2SourcePath) / "Data" / "Campaign" / sub / (prefix + num + ".PUD");
+	if (!fs::exists(pud, ec)) {
+		return {};
+	}
+	// Cache dir deliberately has no "campaigns" in its path so PudToStratagus emits a plain .sms
+	// (no _c.sms DefineMapSetup hack); the engine then auto-derives <map>.sms from <map>.smp.
+	fs::path cacheDir = Parameters::Instance.GetUserDirectory() / "wc2mapcache";
+	fs::create_directories(cacheDir, ec);
+	fs::path outSmp = cacheDir / (stem + ".smp.gz");
+	if (fs::exists(outSmp, ec)) {
+		return outSmp;
+	}
+	FILE *fp = fopen(pud.string().c_str(), "rb");
+	if (!fp) { return {}; }
+	fseek(fp, 0, SEEK_END);
+	const long sz = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (sz <= 0) { fclose(fp); return {}; }
+	std::vector<unsigned char> buf((size_t)sz);
+	const size_t rd = fread(buf.data(), 1, (size_t)sz, fp);
+	fclose(fp);
+	if (rd != (size_t)sz) { return {}; }
+	if (wc2pud::PudToStratagus(buf.data(), buf.size(), stem.c_str(), cacheDir.string().c_str()) != 0) {
+		return {};
+	}
+	if (fs::exists(outSmp, ec)) {
+		return outSmp;
+	}
+	return {};
+}
+
 static fs::path LibraryFileNameImpl(const std::string_view file)
 {
 	// Absolute path or in current directory.
@@ -641,6 +714,14 @@ static fs::path LibraryFileNameImpl(const std::string_view file)
 	candidate = fs::path(StratagusLibPath) / "scripts" / file;
 	if (FindFileWithExtension(candidate)) {
 		return candidate;
+	}
+
+	// WargusHD: last resort -- convert the player's original campaign .PUD from their WC2 folder.
+	{
+		fs::path converted = TryConvertCampaignPud(file);
+		if (!converted.empty()) {
+			return converted;
+		}
 	}
 
 	DebugPrint("File '%s' not found\n", file.data());

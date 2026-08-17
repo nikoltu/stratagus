@@ -204,6 +204,7 @@ set(map_SRCS
 	src/map/map_wall.cpp
 	src/map/mapfield.cpp
 	src/map/minimap.cpp
+	src/map/pud_convert.cpp
 	src/map/script_map.cpp
 	src/map/script_tileset.cpp
 	src/map/tileset.cpp
