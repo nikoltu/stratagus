@@ -195,6 +195,11 @@ static void CaptureStatBaseline()
 	if (g_baselineCaptured) {
 		return;
 	}
+	// D2 integration: apply the global Remastered unit table (Data/Rez/unitdata.dat) ONCE, in the engine's
+	// own flow, so the Remastered stats are active even without the (now-redundant) units.lua Lua hook. This
+	// runs from ApplyMapUnitData -> CreateGame, before InitUnitTypes(1) fans the stats out to every player.
+	// The snapshot below therefore captures the post-D2 values as the baseline per-map overrides revert to.
+	ApplyRemasteredUnitData();
 	for (CUnitType *t : getUnitTypes()) {
 		if (t) {
 			g_statBaseline[t] = t->DefaultStat;
