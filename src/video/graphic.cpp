@@ -34,6 +34,7 @@
 --  Includes
 ----------------------------------------------------------------------------*/
 #include "video.h"
+#include "json.h"
 
 #include "intern_video.h"
 #include "iolib.h"
@@ -688,6 +689,131 @@ bool CAtlasGraphic::Load(const std::string &path)
 	byHash.reserve(frames.size());
 	for (uint32_t i = 0; i < frames.size(); ++i) {
 		byHash.emplace(frames[i].nameHash, i);
+	}
+	return true;
+}
+
+// WargusHD: load a native Remastered TexturePacker atlas (<name>.json + its meta.image PNG page)
+// directly, with NO offline .hdatlas conversion step. Builds the same frames/pages/byHash model as
+// Load() so every draw method + FrameByName work unchanged. Frame keys keep their full TexturePacker
+// name (e.g. "Forest/forest_0"). Single page (meta.image). Returns false on any failure.
+bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath)
+{
+	if (!pages.empty()) {
+		return true; // already loaded; single-shot
+	}
+	const fs::path resolved = LibraryFileName(jsonPath);
+	if (resolved.empty()) {
+		return false;
+	}
+	std::error_code ec;
+	const uintmax_t sz = fs::file_size(resolved, ec);
+	if (ec || sz == 0 || sz > (uintmax_t) 64 * 1024 * 1024) {
+		return false; // absent or implausibly large
+	}
+	std::string text;
+	{
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+			return false;
+		}
+		text.resize((size_t) sz);
+		const bool ok = (size_t) fp->read(&text[0], (size_t) sz) == (size_t) sz;
+		fp->close();
+		if (!ok) {
+			return false;
+		}
+	}
+
+	content::JsonValue root;
+	std::string jerr;
+	if (!content::parseJson(text, root, jerr)) {
+		return false;
+	}
+	const content::JsonValue *framesNode = root.find("frames");
+	const content::JsonValue *meta = root.find("meta");
+	if (!framesNode || !framesNode->isObject() || !framesNode->object || !meta) {
+		return false;
+	}
+	(void) meta; // meta.image holds the packing machine's absolute dev path (e.g. "C:/Projects/..."),
+	// which is useless on-device -- derive the page PNG from the .json filename instead (sibling
+	// <name>.png), which is how the Remastered atlases are actually laid out.
+	fs::path pagePath = resolved;
+	pagePath.replace_extension(".png");
+	{
+		auto pf = std::make_unique<CFile>();
+		if (pf->open(pagePath.string().c_str(), CL_OPEN_READ) == -1) {
+			return false;
+		}
+		SDL_Surface *surface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(pf)), 1);
+		if (!surface) {
+			return false;
+		}
+		// The classic_* terrain atlases are 8-bit PALETTED PNGs; UploadSurfaceToTexture only accepts
+		// RGBA. Convert to RGBA32 (applies the palette) before upload.
+		if (!surface->format || surface->format->BytesPerPixel != 4) {
+			SDL_Surface *conv = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+			SDL_FreeSurface(surface);
+			if (!conv) {
+				return false;
+			}
+			surface = conv;
+		}
+		SDL_Texture *tex = UploadSurfaceToTexture(surface);
+		SDL_FreeSurface(surface);
+		if (!tex) {
+			return false;
+		}
+		pages.push_back(tex);
+	}
+
+	auto reqInt = [](const content::JsonValue *o, const char *k, int &out) -> bool {
+		const content::JsonValue *v = o ? o->find(k) : nullptr;
+		if (!v) {
+			return false;
+		}
+		out = (int) v->asInt(0);
+		return true;
+	};
+	for (const auto &kv : *framesNode->object) {
+		const std::string &name = kv.first;
+		const content::JsonValue &f = kv.second;
+		const content::JsonValue *frameRect = f.find("frame");
+		int fx = 0, fy = 0, fw = 0, fh = 0;
+		if (!reqInt(frameRect, "x", fx) || !reqInt(frameRect, "y", fy)
+			|| !reqInt(frameRect, "w", fw) || !reqInt(frameRect, "h", fh)) {
+			continue;
+		}
+		const content::JsonValue *rot = f.find("rotated");
+		if (rot && rot->asBool(false)) {
+			continue; // rotated frames unsupported (parity with P0)
+		}
+		int offx = 0, offy = 0;
+		if (const content::JsonValue *sss = f.find("spriteSourceSize")) {
+			reqInt(sss, "x", offx);
+			reqInt(sss, "y", offy);
+		}
+		int cw = fw, ch = fh;
+		if (const content::JsonValue *ss = f.find("sourceSize")) {
+			reqInt(ss, "w", cw);
+			reqInt(ss, "h", ch);
+		}
+		hdatlas::HdFrameRecord rec{};
+		rec.nameHash = hdatlas::fnv1a(name.c_str());
+		rec.page = 0;
+		rec.sx = (uint16_t) fx; rec.sy = (uint16_t) fy; rec.sw = (uint16_t) fw; rec.sh = (uint16_t) fh;
+		rec.offx = (int16_t) offx; rec.offy = (int16_t) offy;
+		rec.cw = (uint16_t) cw; rec.ch = (uint16_t) ch;
+		rec.rotated = 0;
+		byHash.emplace(rec.nameHash, (uint32_t) frames.size());
+		frames.push_back(rec);
+	}
+	if (frames.empty()) {
+		for (SDL_Texture *tex : pages) {
+			if (tex) { SDL_DestroyTexture(tex); }
+		}
+		pages.clear();
+		return false;
 	}
 	return true;
 }

@@ -106,42 +106,55 @@ static void EnsureHDTileAtlas()
 	Map.HDTileAtlasTried = true;
 
 	const std::string &img = Map.Tileset.ImageFile;
-	const char *era = nullptr;
+	// WargusHD: prefer the NATIVE Remastered terrain atlas (Data/Art/hd/classic/classic_<x>.json,
+	// resolved from the player's folder) with no offline conversion. Its frames are group-prefixed
+	// (e.g. "Forest/forest_0"). Fall back to a legacy pre-imported .hdatlas (frames "<era>_N") only
+	// if the native atlas is unavailable.
+	const char *atlasName = nullptr;    // Remastered classic_<x>
+	const char *nativePrefix = nullptr; // "<Group>/<prefix>" for native frame names
+	const char *era = nullptr;          // legacy .hdatlas frame prefix + filename stem
 	if (img.find("summer") != std::string::npos) {
-		era = "forest";
+		atlasName = "classic_forest"; nativePrefix = "Forest/forest"; era = "forest";
 	} else if (img.find("winter") != std::string::npos) {
-		era = "iceland";
+		atlasName = "classic_ice"; nativePrefix = "Iceland/iceland"; era = "iceland";
 	} else if (img.find("wasteland") != std::string::npos) {
-		era = "xswamp";
+		atlasName = "classic_xswamp"; nativePrefix = "XSwamp/xswamp"; era = "xswamp";
 	} else if (img.find("swamp") != std::string::npos) {
-		era = "swamp";
+		atlasName = "classic_swamp"; nativePrefix = "Swamp/swamp"; era = "swamp";
 	}
-	if (!era) {
+	if (!atlasName) {
 		return;
 	}
 
-	// tilesets/<dir>/terrain/<era>.hdatlas, in the same directory as the classic tileset image.
-	const auto slash = img.rfind('/');
-	std::string path = (slash == std::string::npos ? std::string() : img.substr(0, slash + 1));
-	path += era;
-	path += ".hdatlas";
-
 	auto atlas = std::make_shared<CAtlasGraphic>();
-	if (!atlas->Load(path)) {
-		return; // absent/corrupt atlas -> classic path (graceful degradation, no crash)
+	std::string prefix;
+	if (atlas->LoadTexturePacker(std::string("Data/Art/hd/classic/") + atlasName + ".json")) {
+		prefix = nativePrefix;
+	} else {
+		// Legacy fallback: <era>.hdatlas beside the classic tileset image.
+		const auto slash = img.rfind('/');
+		std::string path = (slash == std::string::npos ? std::string() : img.substr(0, slash + 1));
+		path += era;
+		path += ".hdatlas";
+		if (!atlas->Load(path)) {
+			return; // neither available -> classic path (graceful degradation, no crash)
+		}
+		prefix = era;
 	}
 	Map.HDTileAtlas = std::move(atlas);
 
 	// Precompute megatile index -> atlas frame (O(1) in the hot loop; no per-tile string hashing).
-	// The megatile index M is the frame index into the classic TileGraphic sheet, so size the table
-	// to that sheet's frame count (fall back to the atlas span offset by the 16 fog slots if the
-	// classic sheet is somehow unavailable).
-	const int count = Map.TileGraphic ? Map.TileGraphic->NumFrames
-									   : Map.HDTileAtlas->NumFrames() + 16;
+	// The megatile index M maps to atlas frame <prefix>_<M-16> (the first 16 megatiles are fog slots).
+	// Size the table to cover the atlas span offset by those 16 slots, or the classic sheet's frame
+	// count if larger; out-of-range M just resolve to -1.
+	int count = Map.HDTileAtlas->NumFrames() + 16;
+	if (Map.TileGraphic && Map.TileGraphic->NumFrames > count) {
+		count = Map.TileGraphic->NumFrames;
+	}
 	Map.HDTileAtlasFrameForTile.assign(count, -1);
 	std::string name;
 	for (int m = 16; m < count; ++m) {
-		name = era;
+		name = prefix;
 		name += '_';
 		name += std::to_string(m - 16);
 		Map.HDTileAtlasFrameForTile[m] = Map.HDTileAtlas->FrameByName(name.c_str());

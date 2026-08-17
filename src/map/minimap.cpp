@@ -186,6 +186,16 @@ void CMinimap::UpdateTerrain()
 
 	const int tilepitch = Map.TileGraphic->getSurface()->w / PixelTileSize.x;
 
+	// WargusHD: when terrain is drawn from the native Remastered HD atlas, the classic tileset sheet
+	// is a 1-frame placeholder (missing classic PNG). Sampling per-tile pixels from it (tile indices
+	// run into the hundreds) reads far past the 64x64 placeholder -> SIGSEGV, and tilepitch could be
+	// 0. Detect the placeholder by its frame count and bail to a blank minimap-terrain layer instead
+	// of crashing. Real HD minimap colours are a later step (Remastered *_mapColors.bin).
+	if (tilepitch <= 0 || Map.TileGraphic->NumFrames <= 1) {
+		SDL_FillRect(MinimapTerrainSurface, nullptr, 0);
+		return;
+	}
+
 	Assert(SDL_MUSTLOCK(MinimapTerrainSurface) == 0);
 	Assert(SDL_MUSTLOCK(Map.TileGraphic->getSurface()) == 0);
 

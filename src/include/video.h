@@ -360,6 +360,11 @@ public:
 	// resolved relative to the .hdatlas file's directory). Returns false on any failure (missing
 	// file, bad magic, truncation, page load fail, or a record with rotated!=0). Safe to call once.
 	bool Load(const std::string &path);
+	// WargusHD: load a NATIVE Remastered TexturePacker atlas (<name>.json + its meta.image PNG page)
+	// directly from the user's folder -- no offline .hdatlas conversion. Populates the same
+	// frame/page/byHash model as Load(), so every draw method and FrameByName work unchanged. Frame
+	// keys keep their full TexturePacker name (e.g. "Forest/forest_0"). Returns false on any failure.
+	bool LoadTexturePacker(const std::string &jsonPath);
 	bool IsLoaded() const { return !pages.empty(); }
 
 	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.
