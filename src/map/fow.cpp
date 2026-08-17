@@ -102,6 +102,19 @@ void CFogOfWar::Init()
 
     VisTable_Index0 = VisTableWidth + 1;
 
+    // NG10: the Remastered ships no classic tiled fog tiles. If a tiled fog type is selected but the
+    // classic fog graphic is missing (HD build -> a 1-frame placeholder), the tiled renderer samples a
+    // bogus surface and stamps hard black artifacts. Fall back to the smooth enhanced fog, which needs
+    // no classic asset and matches the Remastered's feathered fog.
+    if (Settings.Type == FogOfWarTypes::cTiled || Settings.Type == FogOfWarTypes::cTiledLegacy) {
+        if (TiledFogSrc) {
+            TiledFogSrc->Load();
+        }
+        if (!TiledFogSrc || TiledFogSrc->NumFrames < 16) {
+            Settings.Type = FogOfWarTypes::cEnhanced;
+        }
+    }
+
     switch (Settings.Type) {
         case FogOfWarTypes::cTiled:
         case FogOfWarTypes::cTiledLegacy:
