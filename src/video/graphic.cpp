@@ -741,6 +741,7 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 	// <name>.png), which is how the Remastered atlases are actually laid out.
 	fs::path pagePath = resolved;
 	pagePath.replace_extension(".png");
+	SDL_Surface *pageSurface = nullptr; // D0: kept alive past frame parsing for possible re-pack
 	{
 		auto pf = std::make_unique<CFile>();
 		if (pf->open(pagePath.string().c_str(), CL_OPEN_READ) == -1) {
@@ -791,12 +792,11 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 			}
 			SDL_UnlockSurface(surface);
 		}
-		SDL_Texture *tex = UploadSurfaceToTexture(surface);
-		SDL_FreeSurface(surface);
-		if (!tex) {
-			return false;
-		}
-		pages.push_back(tex);
+		// D0: defer the GPU upload. An atlas page can exceed GL_MAX_TEXTURE_SIZE (baseline phones cap at
+		// 4096, but native unit atlases reach ~8000px) -> a single-texture upload would fail and drop the
+		// whole atlas to the classic path. Keep the CPU surface and, after frames are parsed, either upload
+		// it whole (fits) or re-pack it frame-by-frame into <=cap sub-textures (see below).
+		pageSurface = surface;
 	}
 
 	auto reqInt = [](const content::JsonValue *o, const char *k, int &out) -> bool {
@@ -840,7 +840,89 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		byHash.emplace(rec.nameHash, (uint32_t) frames.size());
 		frames.push_back(rec);
 	}
-	if (frames.empty()) {
+	if (frames.empty() || !pageSurface) {
+		if (pageSurface) { SDL_FreeSurface(pageSurface); }
+		for (SDL_Texture *tex : pages) {
+			if (tex) { SDL_DestroyTexture(tex); }
+		}
+		pages.clear();
+		return false;
+	}
+
+	// D0: upload the page. If it fits within GL_MAX_TEXTURE_SIZE, one texture (unchanged behaviour on
+	// desktop/emulator where the cap is large). Otherwise re-pack the frames -- each <= ~900px, so none
+	// straddles -- into maxDim x maxDim shelf pages so every frame lives wholly inside one sub-texture.
+	// Page count is bounded (~atlas_area / maxDim^2); no per-frame textures, no eviction needed.
+	int maxDim = 4096;
+	{
+		SDL_RendererInfo info;
+		if (TheRenderer && SDL_GetRendererInfo(TheRenderer, &info) == 0
+			&& info.max_texture_width > 0 && info.max_texture_height > 0) {
+			maxDim = std::min(info.max_texture_width, info.max_texture_height);
+		}
+	}
+	bool uploadOk = true;
+	if (pageSurface->w <= maxDim && pageSurface->h <= maxDim) {
+		SDL_Texture *tex = UploadSurfaceToTexture(pageSurface);
+		if (tex) {
+			pages.push_back(tex);
+		} else {
+			uploadOk = false;
+		}
+	} else {
+		SDL_Surface *page = SDL_CreateRGBSurfaceWithFormat(0, maxDim, maxDim, 32, SDL_PIXELFORMAT_RGBA32);
+		if (!page) {
+			uploadOk = false;
+		} else {
+			int shelfX = 0, shelfY = 0, shelfH = 0, pageIdx = 0;
+			auto flushPage = [&]() -> bool {
+				SDL_Texture *tex = UploadSurfaceToTexture(page);
+				if (!tex) {
+					return false;
+				}
+				pages.push_back(tex);
+				return true;
+			};
+			SDL_SetSurfaceBlendMode(pageSurface, SDL_BLENDMODE_NONE);
+			for (size_t i = 0; uploadOk && i < frames.size(); ++i) {
+				hdatlas::HdFrameRecord &rec = frames[i];
+				const int fw = rec.sw, fh = rec.sh;
+				if (fw > maxDim || fh > maxDim) {
+					continue; // a single frame larger than the cap (never happens for Remastered atlases)
+				}
+				if (shelfX + fw > maxDim) { // wrap to the next shelf row
+					shelfX = 0;
+					shelfY += shelfH;
+					shelfH = 0;
+				}
+				if (shelfY + fh > maxDim) { // page full -> upload it, start a fresh page
+					if (!flushPage()) {
+						uploadOk = false;
+						break;
+					}
+					SDL_FillRect(page, nullptr, SDL_MapRGBA(page->format, 0, 0, 0, 0));
+					++pageIdx;
+					shelfX = shelfY = shelfH = 0;
+				}
+				SDL_Rect s = {rec.sx, rec.sy, rec.sw, rec.sh};
+				SDL_Rect d = {shelfX, shelfY, rec.sw, rec.sh};
+				SDL_BlitSurface(pageSurface, &s, page, &d);
+				rec.page = (uint16_t) pageIdx;
+				rec.sx = (uint16_t) shelfX;
+				rec.sy = (uint16_t) shelfY;
+				shelfX += fw;
+				if (fh > shelfH) {
+					shelfH = fh;
+				}
+			}
+			if (uploadOk && !flushPage()) { // upload the last (partial) page
+				uploadOk = false;
+			}
+			SDL_FreeSurface(page);
+		}
+	}
+	SDL_FreeSurface(pageSurface);
+	if (!uploadOk) {
 		for (SDL_Texture *tex : pages) {
 			if (tex) { SDL_DestroyTexture(tex); }
 		}
