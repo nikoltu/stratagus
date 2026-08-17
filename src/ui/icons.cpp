@@ -286,7 +286,7 @@ void CIcon::SetPaletteSwaps(std::vector<PaletteSwap> &newSwaps)
 **  to a placeholder (NumFrames != FRAME_STATES); we then draw nothing so classic installs are
 **  untouched. Frame order: 0 default,1 hovered,2 active,3 highlight,4 highlight_hovered,5 highlight_active.
 */
-static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos)
+static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos, int w, int h)
 {
 	static int state = 0;   // 0 = untried, 1 = active, -1 = disabled
 	static std::shared_ptr<CGraphic> frameG;
@@ -304,7 +304,15 @@ static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos)
 	} else if (flags & IconActive) {
 		idx += 1;                                // ..._hovered
 	}
-	frameG->DrawFrameClip(idx, pos.x, pos.y);
+	// NG3: draw the frame scaled to the button's on-screen size (so a resolution-scaled / Oracle-sized
+	// command cell keeps a matching frame). DrawNineSlice with zero insets is a GPU-aware pure stretch;
+	// the icon (this->G) is likewise stretched to the button size by DrawUIButton, so they stay paired.
+	if (w <= 0 || h <= 0) {
+		w = hdicon::CELL_W;
+		h = hdicon::CELL_H;
+	}
+	const SDL_Rect dst = {pos.x, pos.y, w, h};
+	frameG->DrawNineSlice(dst, 0, 0, 0, 0, (unsigned) idx);
 }
 
 /**
@@ -318,7 +326,7 @@ static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos)
 void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 						 const PixelPos &pos, const std::string &text, int player) const
 {
-	DrawHDCommandFrame(flags, pos);
+	DrawHDCommandFrame(flags, pos, style.Width, style.Height);
 
 	ButtonStyle s(style);
 

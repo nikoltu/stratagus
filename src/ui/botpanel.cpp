@@ -811,11 +811,10 @@ void CButtonPanel::Draw()
 	for (int i = 0; i < (int) UI.ButtonPanel.Buttons.size(); ++i) {
 		if (ButtonAreaUnderCursor == ButtonArea::Button &&
 			ButtonUnderCursor == i && KeyState != EKeyState::Input) {
-				if (!Preference.NoStatusLineTooltips) {
-					UpdateStatusLineForButton(buttons[i]);
-				}
-				DrawPopup(buttons[i], UI.ButtonPanel.Buttons[i], UI.ButtonPanel.Buttons[i].X,
-					UI.ButtonPanel.Buttons[i].Y);
+				// NG13: WC2 shows command-button hints in the bottom status bar, not as a floating
+				// StarCraft-style popup. Route the hint (title + costs) to UI.StatusLine and suppress
+				// the floating DrawPopup for the command panel.
+				UpdateStatusLineForButton(buttons[i]);
 		}
 	}
 }

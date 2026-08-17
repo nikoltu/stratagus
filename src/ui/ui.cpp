@@ -204,10 +204,10 @@ void InitUserInterface()
 		uint16_t xAlign = 0;
 		uint16_t yAlign = 0;
 
-		if (mapWidthInPixels < uiMapAreaWidth) {
-			xAlign = (uiMapAreaWidth - mapWidthInPixels) / 2;
-			UI.MapArea.X += xAlign;
-		}
+		// NG4: never re-centre horizontally. Shifting UI.MapArea.X right for a narrow map overwrote the
+		// Lua-set flush edge (= sidebar width) and left a black gap between the HUD and the map. Keep X
+		// flush against the HUD; a map narrower than the area just letterboxes on the FAR right (EndX
+		// clamp below), never between the HUD and the map. Vertical centring is unaffected (no HUD there).
 		if (mapHeightInPixels < uiMapAreaHeight) {
 			yAlign = (uiMapAreaHeight - mapHeightInPixels) / 2;
 			UI.MapArea.Y += yAlign;
