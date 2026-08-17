@@ -148,6 +148,9 @@ private:
 /// Build library path name
 extern std::string LibraryFileName(const std::string &file);
 
+/// MAP-4: convert an arbitrary classic .PUD map to the Stratagus cache; returns cached .smp.gz path or {}
+extern fs::path ConvertPudFileToCache(const fs::path &pudPath);
+
 extern bool CanAccessFile(const char *filename);
 
 /// Read the contents of a directory

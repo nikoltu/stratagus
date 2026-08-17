@@ -572,6 +572,21 @@ static void LoadMap(const fs::path &filename, CMap &map)
 		return;
 	}
 
+	// MAP-4: custom / multiplayer classic maps ship as raw .PUD. Convert on demand to the Stratagus
+	// cache (same converter the campaign path uses) and load the resulting cached .smp.gz.
+	{
+		const std::string ext = name.extension().string();
+		if (ext == ".pud" || ext == ".PUD" || ext == ".Pud") {
+			const fs::path cached = ConvertPudFileToCache(filename);
+			if (!cached.empty()) {
+				LoadMap(cached, map);
+				return;
+			}
+			ErrorPrint("Failed to convert PUD map '%s'\n", filename.u8string().c_str());
+			ExitFatal(-1);
+		}
+	}
+
 	ErrorPrint("Unrecognized map format\n");
 	ExitFatal(-1);
 }

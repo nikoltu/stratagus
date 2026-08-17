@@ -647,6 +647,43 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	return {};
 }
 
+// MAP-4: convert an ARBITRARY classic .PUD map file (custom / multiplayer, e.g. Data/Maps/foo.pud or a
+// user-picked scenario) to the Stratagus cache and return the cached .smp.gz path. Same conversion the
+// campaign path uses, but keyed off the real file rather than a campaigns/ level number, so the ~233
+// custom/MP maps the Remastered ships become loadable. Returns {} on any failure.
+fs::path ConvertPudFileToCache(const fs::path &pudPath)
+{
+	std::error_code ec;
+	if (!fs::exists(pudPath, ec)) {
+		return {};
+	}
+	const std::string stem = pudPath.stem().string();
+	fs::path cacheDir = Parameters::Instance.GetUserDirectory() / "wc2mapcache";
+	fs::create_directories(cacheDir, ec);
+	const fs::path wanted = cacheDir / (stem + ".smp.gz");
+	if (fs::exists(wanted, ec)) {
+		return wanted; // already converted
+	}
+	FILE *fp = fopen(pudPath.string().c_str(), "rb");
+	if (!fp) {
+		return {};
+	}
+	fseek(fp, 0, SEEK_END);
+	const long sz = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (sz <= 0) { fclose(fp); return {}; }
+	std::vector<unsigned char> buf((size_t) sz);
+	const size_t rd = fread(buf.data(), 1, (size_t) sz, fp);
+	fclose(fp);
+	if (rd != (size_t) sz) {
+		return {};
+	}
+	if (wc2pud::PudToStratagus(buf.data(), buf.size(), stem.c_str(), cacheDir.string().c_str()) != 0) {
+		return {};
+	}
+	return fs::exists(wanted, ec) ? wanted : fs::path{};
+}
+
 static fs::path LibraryFileNameImpl(const std::string_view file)
 {
 	// Absolute path or in current directory.
