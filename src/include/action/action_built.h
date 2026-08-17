@@ -76,7 +76,8 @@ protected:
 	CUnitPtr Worker = nullptr; /// Worker building this unit
 	int ProgressCounter = 0;   /// Progress counter, in 1/100 cycles.
 	bool IsCancelled = false;  /// Cancel construction
-	std::size_t Frame = -1;    /// Construction frame
+	std::size_t Frame = 0;     /// Construction frame (NG9: start at 0 so the first tick draws the
+	                           /// scaffold frame 0 instead of a null/SIZE_MAX cframe)
 };
 
 //@}

@@ -752,12 +752,25 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		}
 		// The classic_* terrain atlases are 8-bit PALETTED PNGs and the team masks are 8-bit LUMINANCE;
 		// UploadSurfaceToTexture only accepts RGBA. Convert to RGBA32 first.
+		// NG6: those paletted PNGs carry NO tRNS chunk and use the classic convention that palette
+		// index 0 is the transparent key (magenta 255,0,255). A plain SDL_ConvertSurfaceFormat keeps
+		// index-0 pixels OPAQUE, so tree/scenery/fog frames upload a red/pink halo. Colour-key index 0
+		// and colour-key-blit onto a transparent RGBA32 target so keyed pixels become alpha 0.
 		if (!surface->format || surface->format->BytesPerPixel != 4) {
-			SDL_Surface *conv = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
-			SDL_FreeSurface(surface);
+			const bool paletted = surface->format && surface->format->BytesPerPixel == 1;
+			if (paletted) {
+				SDL_SetColorKey(surface, SDL_TRUE, 0);
+			}
+			SDL_Surface *conv =
+			    SDL_CreateRGBSurfaceWithFormat(0, surface->w, surface->h, 32, SDL_PIXELFORMAT_RGBA32);
 			if (!conv) {
+				SDL_FreeSurface(surface);
 				return false;
 			}
+			SDL_FillRect(conv, nullptr, SDL_MapRGBA(conv->format, 0, 0, 0, 0));
+			SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_NONE); // straight copy; colour-key still skips keyed pixels
+			SDL_BlitSurface(surface, nullptr, conv, nullptr);
+			SDL_FreeSurface(surface);
 			surface = conv;
 		}
 		if (teamMask) {
@@ -884,8 +897,12 @@ void CAtlasGraphic::DrawAtlasFrameClipScaled(int frame, int dstX, int dstY, int 
 	}
 	const double sxScale = (rec.cw != 0) ? (double) dstW / rec.cw : 1.0;
 	const double syScale = (rec.ch != 0) ? (double) dstH / rec.ch : 1.0;
+	// NG7: the trimmed content lives at [offx, offx+sw] inside the cw-wide canvas. When mirroring the
+	// frame the content must be re-anchored to [cw-offx-sw, cw-offx]; otherwise the flipped sprite (and
+	// its independently-trimmed `_team` mask) drift sideways off the unit centre. Mirror the x offset.
+	const int offxEff = flip ? (rec.cw - rec.offx - rec.sw) : rec.offx;
 	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
-	SDL_Rect dst = {dstX + (int) std::lround(rec.offx * sxScale),
+	SDL_Rect dst = {dstX + (int) std::lround(offxEff * sxScale),
 	                dstY + (int) std::lround(rec.offy * syScale),
 	                (int) std::lround(rec.sw * sxScale),
 	                (int) std::lround(rec.sh * syScale)};

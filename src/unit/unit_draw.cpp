@@ -907,6 +907,9 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 {
 	PixelPos pos = screenPos;
 	if (cframe.File == ConstructionFileType::Construction) {
+		if (!type.Construction) {
+			return; // NG9: null-guard -- a construction frame with no CConstruction crashed on deref
+		}
 		CConstruction &construction = *type.Construction;
 		pos.x -= construction.Width / 2;
 		pos.y -= construction.Height / 2;
@@ -915,6 +918,9 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 			construction.Load(true);
 		}
 #endif
+		if (!construction.Sprite) {
+			return; // NG9: construction sprite not resident (e.g. HD-only deploy) -> skip, don't crash
+		}
 		if (frame < 0) {
 			construction.Sprite->DrawPlayerColorFrameClipX(player, -frame - 1, pos.x, pos.y);
 		} else {
@@ -926,6 +932,9 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 		pos.y -= type.Height / 2;
 		if (frame < 0) {
 			frame = -frame - 1;
+		}
+		if (!type.Sprite) {
+			return; // NG9: building classic sprite not resident -> skip rather than null-deref
 		}
 		type.Sprite->DrawPlayerColorFrameClip(player, frame, pos.x, pos.y);
 	}
@@ -998,7 +1007,13 @@ void CUnit::Draw(const CViewport &vp) const
 		type = this->Seen.Type;
 		constructed = this->Seen.Constructed;
 		state = this->Seen.State;
-		cframe = this->Seen.CFrame != -1 && type->Construction ? &type->Construction->Frames[this->Seen.CFrame] : nullptr;
+		// NG9: bounds-guard the Seen-path construction frame the same way as the live path above; an
+		// out-of-range Seen.CFrame (stale fog/save value) indexing Frames[] crashed on the
+		// construction->completion transition.
+		cframe = (type->Construction && this->Seen.CFrame >= 0
+		          && (size_t) this->Seen.CFrame < type->Construction->Frames.size())
+		             ? &type->Construction->Frames[this->Seen.CFrame]
+		             : nullptr;
 	}
 
 #ifdef DYNAMIC_LOAD
