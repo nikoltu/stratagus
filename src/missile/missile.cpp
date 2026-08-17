@@ -52,8 +52,10 @@
 #include "unitsound.h"
 #include "unittype.h"
 #include "video.h"
+#include "json.h"
 
 #include <cmath>
+#include <unordered_map>
 
 /*----------------------------------------------------------------------------
 --  Declarations
@@ -460,6 +462,110 @@ static bool MissileVisibleInViewport(const CViewport &vp, const Missile &missile
 **  @param frame  Animation frame
 **  @param pos    Screen pixel position
 */
+// WargusHD: missile/effect sprite path -> native Remastered effect-atlas frame prefix (e.g.
+// "missiles/green_cross.png" -> "blackx"). Baked into hd_missiles_map.json; all effects live in the
+// per-tileset units_common_<tileset> atlas, so only the prefix is stored. Loaded once, lazily.
+static std::unordered_map<std::string, std::string> g_hdMissileMap; // File -> prefix
+static bool g_hdMissileMapTried = false;
+
+static void LoadHDMissileMap()
+{
+	if (g_hdMissileMapTried) {
+		return;
+	}
+	g_hdMissileMapTried = true;
+	const fs::path resolved = LibraryFileName("hd_missiles_map.json");
+	if (resolved.empty()) {
+		return;
+	}
+	std::error_code ec;
+	const uintmax_t sz = fs::file_size(resolved, ec);
+	if (ec || sz == 0 || sz > (uintmax_t) 4 * 1024 * 1024) {
+		return;
+	}
+	std::string text;
+	{
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+			return;
+		}
+		text.resize((size_t) sz);
+		const bool ok = (size_t) fp->read(&text[0], (size_t) sz) == (size_t) sz;
+		fp->close();
+		if (!ok) {
+			return;
+		}
+	}
+	content::JsonValue root;
+	std::string jerr;
+	if (!content::parseJson(text, root, jerr) || !root.isObject() || !root.object) {
+		return;
+	}
+	for (const auto &kv : *root.object) {
+		const content::JsonValue *p = kv.second.find("prefix");
+		if (p) {
+			g_hdMissileMap[kv.first] = p->asString();
+		}
+	}
+}
+
+// Current map's tileset name in the UNIT/effect atlas namespace (summer->forest, winter->winter,
+// wasteland->xswamp, swamp->swamp). Empty when unknown.
+static std::string CurrentEffectTileset()
+{
+	const std::string &img = Map.Tileset.ImageFile;
+	if (img.find("summer") != std::string::npos) { return "forest"; }
+	if (img.find("winter") != std::string::npos) { return "winter"; }
+	if (img.find("wasteland") != std::string::npos) { return "xswamp"; }
+	if (img.find("swamp") != std::string::npos) { return "swamp"; }
+	return "";
+}
+
+static std::shared_ptr<CAtlasGraphic> GetSharedEffectAtlas(const std::string &stem)
+{
+	static std::unordered_map<std::string, std::shared_ptr<CAtlasGraphic>> cache;
+	auto it = cache.find(stem);
+	if (it != cache.end()) {
+		return it->second;
+	}
+	auto atlas = std::make_shared<CAtlasGraphic>();
+	if (!atlas->LoadTexturePacker("Data/Art/hd/unit/" + stem + ".json")) {
+		atlas.reset();
+	}
+	cache[stem] = atlas;
+	return atlas;
+}
+
+static void EnsureHDMissileSprite(const MissileType &type)
+{
+	if (type.HDTried) {
+		return;
+	}
+	type.HDTried = true;
+	if (!type.G) {
+		return;
+	}
+	LoadHDMissileMap();
+	std::string key = type.G->File.string();
+	for (char &c : key) {
+		if (c == '\\') { c = '/'; }
+		c = (char) std::tolower((unsigned char) c);
+	}
+	auto mit = g_hdMissileMap.find(key);
+	if (mit == g_hdMissileMap.end()) {
+		return;
+	}
+	const std::string ts = CurrentEffectTileset();
+	if (ts.empty()) {
+		return;
+	}
+	auto atlas = GetSharedEffectAtlas("units_common_" + ts + "_sprites");
+	if (atlas && atlas->IsLoaded()) {
+		type.HDG = atlas;
+		type.HDPrefix = mit->second;
+	}
+}
+
 void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 {
 #ifdef DYNAMIC_LOAD
@@ -467,6 +573,25 @@ void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 		((MissileType*)this)->LoadMissileSprite();
 	}
 #endif
+
+	// WargusHD: draw the effect from the native Remastered atlas when one is mapped. The HD frame is
+	// scaled to the classic footprint (size * viewport zoom) and re-centred on the same spot, so the
+	// effect matches the zoomed world instead of drawing at a tiny native size.
+	EnsureHDMissileSprite(*this);
+	if (this->HDG && this->HDG->IsLoaded() && !this->HDPrefix.empty()) {
+		const int absFrame = (frame < 0) ? (-frame - 1) : frame;
+		const std::string name = this->HDPrefix + "_" + std::to_string(absFrame);
+		const int f = this->HDG->FrameByName(name.c_str());
+		if (f >= 0) {
+			const float z = GpuWorldDrawZoom;
+			const int dw = (int) std::lround(this->size.x * z);
+			const int dh = (int) std::lround(this->size.y * z);
+			const int dx = pos.x - (int) std::lround(this->size.x * (z - 1.0f) / 2.0f);
+			const int dy = pos.y - (int) std::lround(this->size.y * (z - 1.0f) / 2.0f);
+			this->HDG->DrawAtlasFrameClipScaled(f, dx, dy, dw, dh, frame < 0 && this->Flip);
+			return;
+		}
+	}
 
 	if (this->Flip) {
 		if (frame < 0) {

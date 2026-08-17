@@ -309,6 +309,7 @@
 ----------------------------------------------------------------------------*/
 
 class CGraphic;
+class CAtlasGraphic;
 class CUnit;
 class CViewport;
 class CFile;
@@ -406,6 +407,11 @@ public:
 
 	// --- FILLED UP ---
 	std::shared_ptr<CGraphic> G; /// missile graphic
+	// WargusHD: native Remastered effect atlas (units_common_<tileset>). HDPrefix is the atlas frame
+	// prefix (e.g. "blackx" for the move/attack cross); empty => no native atlas, classic G path.
+	mutable std::shared_ptr<CAtlasGraphic> HDG;
+	mutable std::string HDPrefix;
+	mutable bool HDTried = false;
 };
 
 /*----------------------------------------------------------------------------
