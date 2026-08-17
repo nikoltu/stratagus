@@ -151,6 +151,13 @@ extern std::string LibraryFileName(const std::string &file);
 /// MAP-4: convert an arbitrary classic .PUD map to the Stratagus cache; returns cached .smp.gz path or {}
 extern fs::path ConvertPudFileToCache(const fs::path &pudPath);
 
+/// Native in-memory PUD loader: resolve a map request to its source .PUD (direct .pud or campaign .smp), {} if none.
+extern fs::path ResolveMapPud(const std::string &request);
+/// Load a PUD map natively via the engine (no .smp/.sms files). phase 0 = presentation, 1 = setup. false on failure.
+extern bool LoadPudMapNative(const fs::path &pudPath, int phase);
+/// Raw bytes of the currently-loaded native PUD (for the per-map UDTA/UGRD reader), or nullptr.
+extern const std::string *CurrentNativePudBytes();
+
 extern bool CanAccessFile(const char *filename);
 
 /// Read the contents of a directory

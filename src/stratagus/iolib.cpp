@@ -41,6 +41,7 @@
 #include "game.h"
 #include "map.h"
 #include "parameters.h"
+#include "script.h"
 #include "stratagus.h"
 #include "util.h"
 #include "pud.h"
@@ -614,6 +615,131 @@ static void EnsurePudStatSidecars(const fs::path &pud, const fs::path &cacheDir,
 		}
 		off = payload + len;
 	}
+}
+
+// Resolve a campaigns/<race>[-exp]/levelNN.smp request to its source .PUD in the user's WC2 folder, or {}.
+// (Parse logic shared with TryConvertCampaignPud, which remains as the fallback converter for now.)
+static fs::path ResolveCampaignPud(const std::string_view fileview)
+{
+	if (WC2SourcePath.empty()) {
+		return {};
+	}
+	std::string f(fileview);
+	for (char &c : f) { if (c == '\\') { c = '/'; } }
+	const auto pos = f.find("campaigns/");
+	if (pos == std::string::npos) {
+		return {};
+	}
+	std::string rest = f.substr(pos + 10);
+	const auto slash = rest.find('/');
+	if (slash == std::string::npos) { return {}; }
+	const std::string dir = rest.substr(0, slash);
+	const std::string base = rest.substr(slash + 1);
+	auto dot = base.find(".smp");
+	if (dot == std::string::npos) { dot = base.find(".sms"); }
+	if (dot == std::string::npos) { return {}; }
+	const std::string stem = base.substr(0, dot);
+	if (stem.compare(0, 5, "level") != 0) { return {}; }
+	size_t digitStart = 5;
+	if (digitStart < stem.size() && (stem[digitStart] == 'x' || stem[digitStart] == 'X')) {
+		++digitStart;
+	}
+	std::string num;
+	for (size_t i = digitStart; i < stem.size() && std::isdigit((unsigned char) stem[i]); ++i) { num += stem[i]; }
+	if (num.empty()) { return {}; }
+	if (num.size() == 1) { num = "0" + num; }
+	const bool exp = dir.find("-exp") != std::string::npos;
+	const bool orc = dir.compare(0, 3, "orc") == 0;
+	std::string sub, prefix;
+	if (!orc && !exp)      { sub = "Human";  prefix = "HUMAN"; }
+	else if (orc && !exp)  { sub = "Orc";    prefix = "ORC"; }
+	else if (!orc && exp)  { sub = "XHuman"; prefix = "2XHUM"; }
+	else                   { sub = "XOrc";   prefix = "2XORC"; }
+	std::error_code ec;
+	fs::path pud = fs::path(WC2SourcePath) / "Data" / "Campaign" / sub / (prefix + num + ".PUD");
+	if (!fs::exists(pud, ec)) {
+		return {};
+	}
+	return pud;
+}
+
+// ---- Native in-memory PUD map loader (no .smp/.sms files, no wc2mapcache) ----
+// Reads the original .PUD and runs the SAME map-construction Lua the converter emitted, directly via the
+// engine. The classic PudToStratagus path is retained as a fallback until this is device-verified.
+static fs::path g_nativePudPath;
+static std::string g_nativePudBytes;
+static wc2pud::PudData g_nativePudData;
+static bool g_nativePudReady = false;
+
+// Read + parse a .PUD once; cache bytes + parsed data for the two load phases + the UDTA/UGRD reader.
+static bool EnsureNativePud(const fs::path &pudPath)
+{
+	if (g_nativePudReady && g_nativePudPath == pudPath) {
+		return true;
+	}
+	g_nativePudReady = false;
+	FILE *fp = fopen(pudPath.string().c_str(), "rb");
+	if (!fp) {
+		return false;
+	}
+	fseek(fp, 0, SEEK_END);
+	const long sz = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (sz <= 0) { fclose(fp); return false; }
+	std::string bytes;
+	bytes.resize((size_t) sz);
+	const size_t rd = fread(&bytes[0], 1, (size_t) sz, fp);
+	fclose(fp);
+	if (rd != (size_t) sz) {
+		return false;
+	}
+	wc2pud::PudData pd;
+	if (!pd.Parse((const unsigned char *) bytes.data(), bytes.size())) {
+		return false;
+	}
+	g_nativePudPath = pudPath;
+	g_nativePudBytes = std::move(bytes);
+	g_nativePudData = std::move(pd);
+	g_nativePudReady = true;
+	return true;
+}
+
+// Resolve any map request to its source .PUD (direct .pud path or campaign levelNN.smp), or {}.
+fs::path ResolveMapPud(const std::string &request)
+{
+	fs::path p(request);
+	const std::string ext = p.extension().string();
+	if (ext == ".pud" || ext == ".PUD" || ext == ".Pud") {
+		const fs::path r = fs::path(LibraryFileName(request));
+		std::error_code ec;
+		if (!r.empty() && fs::exists(r, ec)) {
+			return r;
+		}
+		return {};
+	}
+	return ResolveCampaignPud(request);
+}
+
+// Load a PUD map natively. phase 0 = presentation (Map.Info); 1 = setup (players/tiles/units).
+// Returns false on any failure so the caller can fall back to the converter.
+bool LoadPudMapNative(const fs::path &pudPath, int phase)
+{
+	if (!EnsureNativePud(pudPath)) {
+		return false;
+	}
+	std::string lua;
+	if (phase == 0) {
+		g_nativePudData.BuildPresentation(lua);
+	} else {
+		g_nativePudData.BuildSetup(lua);
+	}
+	return CclCommand(lua, false) == 0;
+}
+
+// Raw bytes of the currently-loaded native PUD (for the per-map UDTA/UGRD reader), or nullptr.
+const std::string *CurrentNativePudBytes()
+{
+	return g_nativePudReady ? &g_nativePudBytes : nullptr;
 }
 
 static fs::path TryConvertCampaignPud(const std::string_view fileview)
