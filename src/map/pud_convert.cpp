@@ -248,9 +248,8 @@ static void AppendLine(std::string &out, const char *fmt, ...)
 	out += buf;
 }
 
-// Build the map PRESENTATION as Lua (DefinePlayerTypes + PresentMap). Sets Map.Info when run. This is the
-// same content WriteSMP emits, minus the campaign DefineMapSetup file redirect (the native loader runs the
-// setup phase directly, so no file reference is needed).
+// Build the map PRESENTATION as Lua (DefinePlayerTypes + PresentMap). Sets Map.Info when run. The native
+// loader runs the setup phase directly afterwards, so no DefineMapSetup file redirect is emitted here.
 void PudData::BuildPresentation(std::string &out) const
 {
 	const PudData &pdata = *this;

@@ -1286,26 +1286,6 @@ endif()
 
 ########### next target ###############
 
-set(png2stratagus_SRCS
-	tools/png2stratagus.cpp
-)
-source_group(png2stratagus FILES ${png2stratagus_SRCS})
-
-set_source_files_properties(png2stratagus_SRCS PROPERTIES INCLUDE_DIRECTORIES "${PNG_INCLUDE_DIR}")
-set_source_files_properties(png2stratagus_SRCS PROPERTIES COMPILE_DEFINITIONS "${PNG_DEFINITIONS}")
-
-add_executable(png2stratagus ${png2stratagus_SRCS})
-target_link_libraries(png2stratagus ${PNG_LIBRARY} ${ZLIB_LIBRARIES})
-
-if(WIN32 AND MINGW AND ENABLE_STATIC)
-	set_target_properties(png2stratagus PROPERTIES LINK_FLAGS "${LINK_FLAGS} -static-libgcc -static-libstdc++")
-endif()
-
-if(BUILD_VENDORED_MEDIA_LIBS)
-	add_dependencies(png2stratagus zlib)
-	add_dependencies(png2stratagus png)
-endif()
-
 ########### next target ###############
 
 set(hd_atlas_import_SRCS
@@ -1348,7 +1328,6 @@ set(doxygen_FILES
 	${stratagus_SRCS}
 	${stratagus_HDRS}
 	${gameheaders_HDRS}
-	${png2stratagus_SRCS}
 )
 
 if(ENABLE_DOC AND DOXYGEN_FOUND)
@@ -1380,7 +1359,6 @@ endmacro()
 
 if(ENABLE_UPX AND SELF_PACKER_FOR_EXECUTABLE)
 	self_packer(stratagus)
-	self_packer(png2stratagus)
 endif()
 
 ########### next target ###############
@@ -1415,7 +1393,6 @@ endif()
 ########### install files ###############
 
 install(TARGETS stratagus DESTINATION ${GAMEDIR})
-install(TARGETS png2stratagus DESTINATION ${BINDIR})
 if (WIN32)
 	install(TARGETS midiplayer DESTINATION ${GAMEDIR})
 endif()

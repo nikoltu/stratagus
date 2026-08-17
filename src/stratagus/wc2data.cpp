@@ -218,59 +218,37 @@ static void CaptureStatBaseline()
 	g_baselineCaptured = true;
 }
 
-// Read a cached PUD chunk sidecar (<stem>.udta / <stem>.ugrd) into `out`. false if absent/too short.
-static bool LoadSidecar(const std::string &stem, const char *ext, size_t minSize, std::string &out)
+// Get a PUD chunk (UDTA/UGRD) for the current map from the in-memory native PUD (the only map-load path).
+// Returns false if no PUD is loaded (e.g. an editor-made .smp map) or the chunk is absent/too short.
+static bool GetMapPudChunk(const char *tag, size_t minSize, std::string &out)
 {
-	const fs::path sc = Parameters::Instance.GetUserDirectory() / "wc2mapcache" / (stem + ext);
-	std::error_code ec;
-	const uintmax_t sz = fs::file_size(sc, ec);
-	if (ec || sz < minSize) {
+	const std::string *pud = CurrentNativePudBytes();
+	if (!pud) {
 		return false;
 	}
-	auto fp = std::make_unique<CFile>();
-	if (fp->open(sc.string().c_str(), CL_OPEN_READ) == -1) {
-		return false;
-	}
-	out.resize((size_t) sz);
-	const bool ok = (size_t) fp->read(&out[0], (size_t) sz) == (size_t) sz;
-	fp->close();
-	return ok;
-}
-
-// Get a PUD chunk (UDTA/UGRD) for the current map: from the in-memory native PUD if one is loaded (native
-// loader path), else from the cached sidecar the fallback converter wrote. Returns false if unavailable.
-static bool GetMapPudChunk(const std::string &stem, const char *tag, const char *sidecarExt,
-                           size_t minSize, std::string &out)
-{
-	if (const std::string *pud = CurrentNativePudBytes()) {
-		const std::string &p = *pud;
-		size_t off = 0;
-		while (off + 8 <= p.size()) {
-			const uint32_t len = (uint8_t) p[off + 4] | ((uint32_t)(uint8_t) p[off + 5] << 8)
-			                   | ((uint32_t)(uint8_t) p[off + 6] << 16) | ((uint32_t)(uint8_t) p[off + 7] << 24);
-			const size_t payload = off + 8;
-			if (payload + len > p.size()) {
-				break;
-			}
-			if (memcmp(&p[off], tag, 4) == 0) {
-				if (len >= minSize) {
-					out.assign(p, payload, len);
-					return true;
-				}
-				break; // chunk present but too short
-			}
-			off = payload + len;
+	const std::string &p = *pud;
+	size_t off = 0;
+	while (off + 8 <= p.size()) {
+		const uint32_t len = (uint8_t) p[off + 4] | ((uint32_t)(uint8_t) p[off + 5] << 8)
+		                   | ((uint32_t)(uint8_t) p[off + 6] << 16) | ((uint32_t)(uint8_t) p[off + 7] << 24);
+		const size_t payload = off + 8;
+		if (payload + len > p.size()) {
+			break;
 		}
+		if (memcmp(&p[off], tag, 4) == 0) {
+			return len >= minSize ? (out.assign(p, payload, len), true) : false;
+		}
+		off = payload + len;
 	}
-	return LoadSidecar(stem, sidecarExt, minSize, out);
+	return false;
 }
 
 // Per-map UDTA: overwrite unit stats for THIS map, but only when the chunk's use_default flag is 0 (a
 // use_default==1 map keeps the D2 Remastered baseline). Field table follows a 2-byte flag prefix (base 2).
-static void ApplyMapUdta(const std::string &stem)
+static void ApplyMapUdta()
 {
 	std::string d;
-	if (!GetMapPudChunk(stem, "UDTA", ".udta", 5254, d)) {
+	if (!GetMapPudChunk("UDTA", 5254, d)) {
 		return;
 	}
 	if (rdU16(d, 0) != 0) {
@@ -302,10 +280,10 @@ static void ApplyMapUdta(const std::string &stem)
 // map (the standalone upgrades.dat has zero/partial spell costs, so the PUD UGRD body is the authoritative
 // complete table). Body follows a 2-byte prefix; field-major per record (base 2): time u8 @0, gold u16
 // @52, lumber u16 @156, oil u16 @260. Record i -> UpgradeScriptNames[i] (VERIFIED order).
-static void ApplyMapUgrd(const std::string &stem)
+static void ApplyMapUgrd()
 {
 	std::string d;
-	if (!GetMapPudChunk(stem, "UGRD", ".ugrd", 782, d)) { // 2-byte flag + 780-byte body
+	if (!GetMapPudChunk("UGRD", 782, d)) { // 2-byte flag + 780-byte body
 		return;
 	}
 	std::unordered_map<std::string, CUpgrade *> byIdent;
@@ -349,14 +327,11 @@ void ApplyMapUnitData(const fs::path &mapPath)
 		}
 	}
 
-	// Sidecar stem = map filename up to the first '.', matching the stem the PUD converters write.
-	const std::string leaf = mapPath.filename().string();
-	const std::string stem = leaf.substr(0, leaf.find('.'));
-	if (stem.empty()) {
-		return;
-	}
-	ApplyMapUdta(stem);
-	ApplyMapUgrd(stem);
+	// The per-map UDTA/UGRD come from the in-memory PUD the native loader parsed for THIS map (keyed inside
+	// CurrentNativePudBytes), so mapPath is not needed here. A map with no PUD (editor .smp) keeps the baseline.
+	(void) mapPath;
+	ApplyMapUdta();
+	ApplyMapUgrd();
 }
 
 static int CclApplyRemasteredUnitData(lua_State *l)

@@ -622,9 +622,9 @@ static fs::path ResolveCampaignPud(const std::string_view fileview)
 	return pud;
 }
 
-// ---- Native in-memory PUD map loader (no .smp/.sms files, no wc2mapcache) ----
-// Reads the original .PUD and runs the SAME map-construction Lua the converter emitted, directly via the
-// engine. The classic PudToStratagus path is retained as a fallback until this is device-verified.
+// ---- Native in-memory PUD map loader (no .smp/.sms files, no cache) ----
+// Reads the original .PUD and runs the map-construction Lua directly via the engine (BuildPresentation/
+// BuildSetup). This is the ONLY map-load path; there is no PUD->file conversion.
 static fs::path g_nativePudPath;
 static std::string g_nativePudBytes;
 static wc2pud::PudData g_nativePudData;
