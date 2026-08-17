@@ -640,6 +640,10 @@ static fs::path ResolveCampaignPud(const std::string_view fileview)
 	if (dot == std::string::npos) { return {}; }
 	const std::string stem = base.substr(0, dot);
 	if (stem.compare(0, 5, "level") != 0) { return {}; }
+	// Only the PLAIN map files (levelNN.smp / .sms) are PUD-backed. The campaign briefing/trigger wrappers
+	// (levelNN_c.sms, levelNN_c2.sms) are real script files -> reject them so they load normally and their
+	// own Load() of the plain .sms lands back on the native path.
+	if (stem.find('_') != std::string::npos) { return {}; }
 	size_t digitStart = 5;
 	if (digitStart < stem.size() && (stem[digitStart] == 'x' || stem[digitStart] == 'X')) {
 		++digitStart;
