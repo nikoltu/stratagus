@@ -44,6 +44,7 @@
 #include "unittype.h"
 #include "upgrade_structs.h"
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -107,6 +108,32 @@ inline void applyUdtaRecord(CUnitType &t, const std::string &d, int i, size_t ba
 std::unordered_map<CUnitType *, CUnitStats> g_statBaseline;
 bool g_baselineCaptured = false;
 
+// PUD UGRD record index (0..51) -> engine upgrade ident. Order VERIFIED (Oracle + real upgrades.dat
+// icon_id -> icons.lua -> upgrade.lua ident chain, cost-corroborated across both races): see
+// .wargushd/RE_UGRD_UPGRADE_ORDER_2026-08-17.md. Unlike unitdata.dat (complete), the standalone
+// upgrades.dat carries ZERO/partial spell costs (recs 34..51); the authoritative complete table is the
+// PUD UGRD body itself (all campaign maps agree), so the body is applied for EVERY map, not gated by the
+// use_default flag.
+const char *const UpgradeScriptNames[52] = {
+	"upgrade-sword1", "upgrade-sword2", "upgrade-battle-axe1", "upgrade-battle-axe2",
+	"upgrade-arrow1", "upgrade-arrow2", "upgrade-throwing-axe1", "upgrade-throwing-axe2",
+	"upgrade-human-shield1", "upgrade-human-shield2", "upgrade-orc-shield1", "upgrade-orc-shield2",
+	"upgrade-human-ship-cannon1", "upgrade-human-ship-cannon2", "upgrade-orc-ship-cannon1",
+	"upgrade-orc-ship-cannon2", "upgrade-human-ship-armor1", "upgrade-human-ship-armor2",
+	"upgrade-orc-ship-armor1", "upgrade-orc-ship-armor2", "upgrade-catapult1", "upgrade-catapult2",
+	"upgrade-ballista1", "upgrade-ballista2", "upgrade-ranger", "upgrade-longbow",
+	"upgrade-ranger-scouting", "upgrade-ranger-marksmanship", "upgrade-berserker", "upgrade-light-axes",
+	"upgrade-berserker-scouting", "upgrade-berserker-regeneration", "upgrade-ogre-mage",
+	"upgrade-paladin", "upgrade-holy-vision", "upgrade-healing", "upgrade-exorcism",
+	"upgrade-flame-shield", "upgrade-fireball", "upgrade-slow", "upgrade-invisibility",
+	"upgrade-polymorph", "upgrade-blizzard", "upgrade-eye-of-kilrogg", "upgrade-bloodlust",
+	"upgrade-raise-dead", "upgrade-death-coil", "upgrade-whirlwind", "upgrade-haste",
+	"upgrade-unholy-armor", "upgrade-runes", "upgrade-death-and-decay",
+};
+
+// Baseline snapshot of every listed upgrade's Costs, same lifecycle as g_statBaseline.
+std::unordered_map<CUpgrade *, std::array<int, MaxCosts>> g_upgradeBaseline;
+
 } // namespace
 
 // Read Data/Rez/unitdata.dat and overwrite the numeric stats of every already-defined unit type.
@@ -161,7 +188,8 @@ static void ApplyRemasteredUnitData()
 	           applied);
 }
 
-// Capture (once) the current DefaultStat of every unit type as the baseline to revert per-map overrides to.
+// Capture (once) the current DefaultStat of every unit type + Costs of every upgrade as the baseline to
+// revert per-map overrides to (types/upgrades persist across games; CreateGame does not re-run their Lua).
 static void CaptureStatBaseline()
 {
 	if (g_baselineCaptured) {
@@ -172,56 +200,48 @@ static void CaptureStatBaseline()
 			g_statBaseline[t] = t->DefaultStat;
 		}
 	}
+	for (auto &up : AllUpgrades) {
+		if (up) {
+			std::array<int, MaxCosts> costs;
+			for (int k = 0; k < MaxCosts; ++k) {
+				costs[k] = up->Costs[k];
+			}
+			g_upgradeBaseline[up.get()] = costs;
+		}
+	}
 	g_baselineCaptured = true;
 }
 
-// D1 per-map UDTA: before a map loads, revert every unit type to the boot baseline, then -- if the map is a
-// converted PUD and its UDTA chunk was cached as a sidecar (Data/Rez-equivalent field layout) -- overwrite
-// the numeric stats for THIS map only. Runs before InitUnitTypes(1) so UpdateStats() fans the values out to
-// every player's Stats. Maps without a sidecar simply get the baseline (clearing a previous map's override).
-void ApplyMapUnitData(const fs::path &mapPath)
+// Read a cached PUD chunk sidecar (<stem>.udta / <stem>.ugrd) into `out`. false if absent/too short.
+static bool LoadSidecar(const std::string &stem, const char *ext, size_t minSize, std::string &out)
 {
-	if (!g_baselineCaptured) {
-		CaptureStatBaseline(); // first map: current DefaultStat IS the baseline, nothing to revert yet
-	} else {
-		for (auto &kv : g_statBaseline) {
-			kv.first->DefaultStat = kv.second;
-		}
-	}
-
-	// Sidecar stem = map filename up to the first '.', matching the stem the PUD converters write.
-	const std::string leaf = mapPath.filename().string();
-	const std::string stem = leaf.substr(0, leaf.find('.'));
-	if (stem.empty()) {
-		return;
-	}
-	const fs::path sidecar = Parameters::Instance.GetUserDirectory() / "wc2mapcache" / (stem + ".udta");
+	const fs::path sc = Parameters::Instance.GetUserDirectory() / "wc2mapcache" / (stem + ext);
 	std::error_code ec;
-	const uintmax_t sz = fs::file_size(sidecar, ec);
-	if (ec || sz < 5254) { // need at least through the fields we read (< 5696); classic=5696, expansion=5950
+	const uintmax_t sz = fs::file_size(sc, ec);
+	if (ec || sz < minSize) {
+		return false;
+	}
+	auto fp = std::make_unique<CFile>();
+	if (fp->open(sc.string().c_str(), CL_OPEN_READ) == -1) {
+		return false;
+	}
+	out.resize((size_t) sz);
+	const bool ok = (size_t) fp->read(&out[0], (size_t) sz) == (size_t) sz;
+	fp->close();
+	return ok;
+}
+
+// Per-map UDTA: overwrite unit stats for THIS map, but only when the chunk's use_default flag is 0 (a
+// use_default==1 map keeps the D2 Remastered baseline). Field table follows a 2-byte flag prefix (base 2).
+static void ApplyMapUdta(const std::string &stem)
+{
+	std::string d;
+	if (!LoadSidecar(stem, ".udta", 5254, d)) {
 		return;
 	}
-	std::string d;
-	{
-		auto fp = std::make_unique<CFile>();
-		if (fp->open(sidecar.string().c_str(), CL_OPEN_READ) == -1) {
-			return;
-		}
-		d.resize((size_t) sz);
-		const bool ok = (size_t) fp->read(&d[0], (size_t) sz) == (size_t) sz;
-		fp->close();
-		if (!ok) {
-			return;
-		}
-	}
-
-	// use_default flag (u16 @ offset 0): 1 = this map uses the game's default unit data (keep the D2
-	// baseline, which IS the Remastered default -> apply nothing); 0 = the map ships custom stats -> apply.
-	// Verified across all 285 shipped maps (byte 0 perfectly splits the Oracle use_default classification).
 	if (rdU16(d, 0) != 0) {
-		return; // baseline already restored above
+		return; // use_default -> keep baseline
 	}
-
 	std::unordered_map<std::string, CUnitType *> byIdent;
 	for (CUnitType *t : getUnitTypes()) {
 		if (t) {
@@ -238,11 +258,71 @@ void ApplyMapUnitData(const fs::path &mapPath)
 		if (it == byIdent.end()) {
 			continue;
 		}
-		applyUdtaRecord(*it->second, d, i, 2); // PUD UDTA: 2-byte use_default flag precedes the field table
+		applyUdtaRecord(*it->second, d, i, 2);
 		++applied;
 	}
-	DebugPrint("ApplyMapUnitData: applied per-map UDTA for %d types from %s\n", applied,
-	           sidecar.string().c_str());
+	DebugPrint("ApplyMapUnitData: applied per-map UDTA for %d types\n", applied);
+}
+
+// Per-map UGRD: overwrite upgrade costs from THIS map's chunk. Unlike UDTA the body is applied for EVERY
+// map (the standalone upgrades.dat has zero/partial spell costs, so the PUD UGRD body is the authoritative
+// complete table). Body follows a 2-byte prefix; field-major per record (base 2): time u8 @0, gold u16
+// @52, lumber u16 @156, oil u16 @260. Record i -> UpgradeScriptNames[i] (VERIFIED order).
+static void ApplyMapUgrd(const std::string &stem)
+{
+	std::string d;
+	if (!LoadSidecar(stem, ".ugrd", 782, d)) { // 2-byte flag + 780-byte body
+		return;
+	}
+	std::unordered_map<std::string, CUpgrade *> byIdent;
+	for (auto &up : AllUpgrades) {
+		if (up) {
+			byIdent.emplace(up->Ident, up.get());
+		}
+	}
+	const size_t B = 2;
+	int applied = 0;
+	for (int i = 0; i < 52; ++i) {
+		auto it = byIdent.find(UpgradeScriptNames[i]);
+		if (it == byIdent.end()) {
+			continue;
+		}
+		CUpgrade *u = it->second;
+		u->Costs[TimeCost] = (int) rdU8(d, B + 0 + i);
+		u->Costs[GoldCost] = (int) rdU16(d, B + 52 + i * 2);
+		u->Costs[WoodCost] = (int) rdU16(d, B + 156 + i * 2);
+		u->Costs[OilCost] = (int) rdU16(d, B + 260 + i * 2);
+		++applied;
+	}
+	DebugPrint("ApplyMapUnitData: applied per-map UGRD for %d upgrades\n", applied);
+}
+
+// D1 per-map data: before a map loads, revert unit stats + upgrade costs to the boot baseline, then apply
+// this map's cached PUD UDTA/UGRD sidecars. Runs before InitUnitTypes(1) so UpdateStats() fans unit stats
+// out to every player's Stats. Maps without sidecars simply get the baseline.
+void ApplyMapUnitData(const fs::path &mapPath)
+{
+	if (!g_baselineCaptured) {
+		CaptureStatBaseline(); // first map: current values ARE the baseline, nothing to revert yet
+	} else {
+		for (auto &kv : g_statBaseline) {
+			kv.first->DefaultStat = kv.second;
+		}
+		for (auto &kv : g_upgradeBaseline) {
+			for (int k = 0; k < MaxCosts; ++k) {
+				kv.first->Costs[k] = kv.second[k];
+			}
+		}
+	}
+
+	// Sidecar stem = map filename up to the first '.', matching the stem the PUD converters write.
+	const std::string leaf = mapPath.filename().string();
+	const std::string stem = leaf.substr(0, leaf.find('.'));
+	if (stem.empty()) {
+		return;
+	}
+	ApplyMapUdta(stem);
+	ApplyMapUgrd(stem);
 }
 
 static int CclApplyRemasteredUnitData(lua_State *l)
