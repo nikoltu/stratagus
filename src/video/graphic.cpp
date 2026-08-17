@@ -697,7 +697,7 @@ bool CAtlasGraphic::Load(const std::string &path)
 // directly, with NO offline .hdatlas conversion step. Builds the same frames/pages/byHash model as
 // Load() so every draw method + FrameByName work unchanged. Frame keys keep their full TexturePacker
 // name (e.g. "Forest/forest_0"). Single page (meta.image). Returns false on any failure.
-bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath)
+bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask)
 {
 	if (!pages.empty()) {
 		return true; // already loaded; single-shot
@@ -749,8 +749,8 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath)
 		if (!surface) {
 			return false;
 		}
-		// The classic_* terrain atlases are 8-bit PALETTED PNGs; UploadSurfaceToTexture only accepts
-		// RGBA. Convert to RGBA32 (applies the palette) before upload.
+		// The classic_* terrain atlases are 8-bit PALETTED PNGs and the team masks are 8-bit LUMINANCE;
+		// UploadSurfaceToTexture only accepts RGBA. Convert to RGBA32 first.
 		if (!surface->format || surface->format->BytesPerPixel != 4) {
 			SDL_Surface *conv = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
 			SDL_FreeSurface(surface);
@@ -758,6 +758,24 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath)
 				return false;
 			}
 			surface = conv;
+		}
+		if (teamMask) {
+			// A luminance mask converts to RGBA as (lum,lum,lum,255) -> opaque. Remap so the luminance
+			// becomes ALPHA and RGB is white: the _team overlay's colour-mod then tints only the bright
+			// (team-colourable) pixels and leaves the rest transparent.
+			SDL_LockSurface(surface);
+			const SDL_PixelFormat *f = surface->format;
+			Uint8 *base = static_cast<Uint8 *>(surface->pixels);
+			for (int y = 0; y < surface->h; ++y) {
+				Uint32 *row = reinterpret_cast<Uint32 *>(base + y * surface->pitch);
+				for (int x = 0; x < surface->w; ++x) {
+					Uint8 r, g, b, a;
+					SDL_GetRGBA(row[x], f, &r, &g, &b, &a);
+					const Uint8 lum = (Uint8)((r * 77 + g * 150 + b * 29) >> 8);
+					row[x] = SDL_MapRGBA(f, 255, 255, 255, lum);
+				}
+			}
+			SDL_UnlockSurface(surface);
 		}
 		SDL_Texture *tex = UploadSurfaceToTexture(surface);
 		SDL_FreeSurface(surface);

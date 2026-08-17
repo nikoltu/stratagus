@@ -364,7 +364,10 @@ public:
 	// directly from the user's folder -- no offline .hdatlas conversion. Populates the same
 	// frame/page/byHash model as Load(), so every draw method and FrameByName work unchanged. Frame
 	// keys keep their full TexturePacker name (e.g. "Forest/forest_0"). Returns false on any failure.
-	bool LoadTexturePacker(const std::string &jsonPath);
+	// teamMask: the source is an 8-bit luminance team-colour mask (units_*_masks). Its luminance is
+	// remapped to ALPHA with RGB forced white, so a colour-mod tint paints team colour where the mask
+	// is bright and stays transparent where it is black (instead of an opaque box over the unit).
+	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false);
 	bool IsLoaded() const { return !pages.empty(); }
 
 	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.

@@ -724,6 +724,8 @@ public:
 	mutable std::shared_ptr<CAtlasGraphic> HDSprite;     /// HD base atlas (numeric frame names)
 	mutable std::shared_ptr<CAtlasGraphic> HDSpriteTeam; /// HD team-colour mask atlas (optional)
 	mutable bool HDSpriteTried = false;                  /// true once the HD load has been attempted
+	mutable std::string HDSpritePrefix;                  /// native Remastered atlas frame prefix (e.g.
+	                                                     /// "grunt"); empty => numeric frame names (legacy .hdatlas)
 };
 
 /*----------------------------------------------------------------------------

@@ -53,11 +53,13 @@
 #include "unitsound.h"
 #include "util.h"
 #include "video.h"
+#include "json.h"
 
 #include <cctype>
 #include <cmath>
 #include <map>
 #include <string>
+#include <unordered_map>
 
 /*----------------------------------------------------------------------------
 -- Documentation
@@ -818,6 +820,73 @@ std::pair<CUnitType *, bool> NewUnitTypeSlot(std::string_view ident)
 **  `type.HDSpriteTried`); on any failure `type.HDSprite` stays null and the caller keeps the classic
 **  CPlayerColorGraphic path. CAtlasGraphic::Load resolves the path through LibraryFileName itself.
 */
+// WargusHD: map from a unit's classic sprite path (type.File) to its native Remastered atlas + frame
+// prefix (e.g. "human/units/footman.png" -> {units_human_common, grunt}). Baked offline from the unit
+// roster into hd_units_map.json (deployed beside the scripts) so the engine reads the Remastered unit
+// atlases directly, with no per-unit conversion. Loaded once, lazily.
+struct HDUnitMapEntry { std::string atlas; std::string prefix; };
+static std::unordered_map<std::string, HDUnitMapEntry> g_hdUnitMap;
+static bool g_hdUnitMapTried = false;
+
+static void LoadHDUnitMap()
+{
+	if (g_hdUnitMapTried) {
+		return;
+	}
+	g_hdUnitMapTried = true;
+	const fs::path resolved = LibraryFileName("hd_units_map.json");
+	if (resolved.empty()) {
+		return;
+	}
+	std::error_code ec;
+	const uintmax_t sz = fs::file_size(resolved, ec);
+	if (ec || sz == 0 || sz > (uintmax_t) 8 * 1024 * 1024) {
+		return;
+	}
+	std::string text;
+	{
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+			return;
+		}
+		text.resize((size_t) sz);
+		const bool ok = (size_t) fp->read(&text[0], (size_t) sz) == (size_t) sz;
+		fp->close();
+		if (!ok) {
+			return;
+		}
+	}
+	content::JsonValue root;
+	std::string jerr;
+	if (!content::parseJson(text, root, jerr) || !root.isObject() || !root.object) {
+		return;
+	}
+	for (const auto &kv : *root.object) {
+		const content::JsonValue *a = kv.second.find("atlas");
+		const content::JsonValue *p = kv.second.find("prefix");
+		if (a && p) {
+			g_hdUnitMap[kv.first] = { a->asString(), p->asString() };
+		}
+	}
+}
+
+// Shared native atlas cache: many unit types map to the same atlas (e.g. every human land unit ->
+// units_human_common_sprites), so load each atlas once and share the pointer.
+static std::shared_ptr<CAtlasGraphic> GetSharedNativeAtlas(const std::string &stem, bool teamMask = false)
+{
+	static std::unordered_map<std::string, std::shared_ptr<CAtlasGraphic>> cache;
+	auto it = cache.find(stem);
+	if (it != cache.end()) {
+		return it->second;
+	}
+	auto atlas = std::make_shared<CAtlasGraphic>();
+	if (!atlas->LoadTexturePacker("Data/Art/hd/unit/" + stem + ".json", teamMask)) {
+		atlas.reset(); // remember the failure (null) so we don't retry every unit
+	}
+	cache[stem] = atlas;
+	return atlas;
+}
+
 static void EnsureHDUnitSprite(const CUnitType &type)
 {
 	if (type.HDSpriteTried) {
@@ -827,19 +896,35 @@ static void EnsureHDUnitSprite(const CUnitType &type)
 
 	const std::string &file = type.File;
 	if (file.size() < 4 || file.compare(file.size() - 4, 4, ".png") != 0) {
-		return; // only classic PNG-backed buildings have a sibling .hdatlas
+		return;
 	}
-	const std::string base = file.substr(0, file.size() - 4);
 
+	// Native Remastered atlas first (no conversion): look the unit's sprite path up in the roster map,
+	// share one atlas per (race/tileset) group, and address frames by "<prefix>_<N>".
+	LoadHDUnitMap();
+	std::string key = file;
+	for (char &c : key) { c = (char) std::tolower((unsigned char) c); }
+	auto mit = g_hdUnitMap.find(key);
+	if (mit != g_hdUnitMap.end()) {
+		auto sprites = GetSharedNativeAtlas(mit->second.atlas + "_sprites");
+		if (sprites && sprites->IsLoaded()) {
+			type.HDSprite = sprites;
+			type.HDSpritePrefix = mit->second.prefix;
+			type.HDSpriteTeam = GetSharedNativeAtlas(mit->second.atlas + "_masks", /*teamMask=*/true); // optional
+			return;
+		}
+	}
+
+	// Legacy fallback: a per-unit .hdatlas baked beside the classic PNG (numeric frame names).
+	const std::string base = file.substr(0, file.size() - 4);
 	auto atlas = std::make_shared<CAtlasGraphic>();
 	if (!atlas->Load(base + ".hdatlas")) {
-		return; // absent/corrupt -> classic path (graceful degradation)
+		return; // absent -> classic path (graceful degradation)
 	}
 	type.HDSprite = std::move(atlas);
-
 	auto team = std::make_shared<CAtlasGraphic>();
 	if (team->Load(base + "_team.hdatlas")) {
-		type.HDSpriteTeam = std::move(team); // optional; buildings without team colour omit it
+		type.HDSpriteTeam = std::move(team);
 	}
 }
 
@@ -871,7 +956,12 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 		// frame, mirroring is applied at draw time via the flip variant (matching the classic path,
 		// which flips when type.Flip && frame < 0).
 		const int absFrame = (frame < 0) ? (-frame - 1) : frame;
-		const int f = type.HDSprite->FrameByName(std::to_string(absFrame).c_str());
+		// Native Remastered atlas frames are named "<prefix>_<N>" (e.g. "grunt_0"); the legacy .hdatlas
+		// path uses bare numeric names. Build the right key from HDSpritePrefix.
+		const std::string frameName = type.HDSpritePrefix.empty()
+		                                  ? std::to_string(absFrame)
+		                                  : type.HDSpritePrefix + "_" + std::to_string(absFrame);
+		const int f = type.HDSprite->FrameByName(frameName.c_str());
 		if (f >= 0) {
 			const bool flip = (frame < 0) && type.Flip;
 			// Footprint mapping (the crux): the atlas canvas cw/ch is the RAW HD sourceSize (the
@@ -890,7 +980,10 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 			// (ramp[0], matching CPlayerColorGraphic::DrawPlayerColorFrameClipTex) and draw it over
 			// the base into the same footprint rect. Sparse: a building without team colour has no mask.
 			if (type.HDSpriteTeam && type.HDSpriteTeam->IsLoaded()) {
-				const int tf = type.HDSpriteTeam->FrameByName(std::to_string(absFrame).c_str());
+				const std::string teamName = type.HDSpritePrefix.empty()
+				                                 ? std::to_string(absFrame)
+				                                 : type.HDSpritePrefix + "_" + std::to_string(absFrame) + "_team";
+				const int tf = type.HDSpriteTeam->FrameByName(teamName.c_str());
 				if (tf >= 0) {
 					Uint8 r = 255, g = 255, b = 255;
 					if (colorIndex >= 0 && colorIndex < (int) PlayerColorsRGB.size()
