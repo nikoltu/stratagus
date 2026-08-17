@@ -38,6 +38,7 @@
 #include "minimap.h"
 
 #include "editor.h"
+#include "iolib.h"
 #include "map.h"
 #include "player.h"
 #include "settings.h"
@@ -47,6 +48,9 @@
 #include "unittype.h"
 #include "video.h"
 
+#include <array>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 /*----------------------------------------------------------------------------
@@ -162,6 +166,141 @@ static inline Uint8 *GetTileGraphicPixel(int xofs, int yofs, int mx, int my, int
 	return &pixels[x * bpp + y * Map.TileGraphic->getSurface()->pitch];
 }
 
+// NG11: native HD minimap terrain colours. On the HD path the classic tileset sheet is a placeholder,
+// so the per-tile pixel sampling above cannot produce terrain colours. Instead derive them from the
+// Remastered files the folder already ships: <era>_mapColors.bin (per-megatile 4x4 grid of palette
+// indices, base index 16) + the era .ppl palette (256 x 6-bit RGB). Both read natively via
+// LibraryFileName; cached per era so a tileset change (or map reload) re-derives.
+namespace
+{
+namespace fs = std::filesystem;
+
+struct HDMinimapColors {
+	std::string era;
+	bool ok = false;
+	uint8_t pal[256][3] = {};
+	int base = 16;
+	std::vector<std::array<uint8_t, 16>> tiles; // indexed by (megatile - base)
+};
+static HDMinimapColors g_hdmm;
+
+// Same tileset->era mapping as EnsureHDTileAtlas (map_draw.cpp): summer->forest, winter->iceland,
+// wasteland->xswamp, swamp->swamp. Returns "" if unknown.
+static std::string MinimapEra()
+{
+	const std::string &img = Map.Tileset.ImageFile;
+	if (img.find("summer") != std::string::npos) return "forest";
+	if (img.find("winter") != std::string::npos) return "iceland";
+	if (img.find("wasteland") != std::string::npos) return "xswamp";
+	if (img.find("swamp") != std::string::npos) return "swamp";
+	return "";
+}
+
+static std::string EraCap(const std::string &era)
+{
+	if (era == "forest") return "Forest";
+	if (era == "iceland") return "Iceland";
+	if (era == "swamp") return "Swamp";
+	if (era == "xswamp") return "XSwamp";
+	return "";
+}
+
+static bool ReadNativeFile(const std::string &logicalPath, std::string &out)
+{
+	const fs::path resolved = LibraryFileName(logicalPath);
+	if (resolved.empty()) {
+		return false;
+	}
+	std::error_code ec;
+	const uintmax_t sz = fs::file_size(resolved, ec);
+	if (ec || sz == 0 || sz > (uintmax_t) 8 * 1024 * 1024) {
+		return false;
+	}
+	auto fp = std::make_unique<CFile>();
+	if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+		return false;
+	}
+	out.resize((size_t) sz);
+	const bool okc = (size_t) fp->read(&out[0], (size_t) sz) == (size_t) sz;
+	fp->close();
+	return okc;
+}
+
+static bool EnsureHDMinimapColors()
+{
+	const std::string era = MinimapEra();
+	if (era.empty()) {
+		return false;
+	}
+	if (g_hdmm.ok && g_hdmm.era == era) {
+		return true;
+	}
+	g_hdmm.ok = false;
+	g_hdmm.tiles.clear();
+
+	// Palette: Data/Art/bgs/<Cap>/<era>.ppl  (256 x 3 bytes, 6-bit -> 8-bit)
+	std::string ppl;
+	if (!ReadNativeFile("Data/Art/bgs/" + EraCap(era) + "/" + era + ".ppl", ppl) || ppl.size() < 768) {
+		return false;
+	}
+	for (int i = 0; i < 256; ++i) {
+		for (int c = 0; c < 3; ++c) {
+			const uint8_t v6 = (uint8_t) ppl[i * 3 + c] & 0x3F;
+			g_hdmm.pal[i][c] = (uint8_t) ((v6 * 255 + 31) / 63); // 6-bit -> 8-bit
+		}
+	}
+	// Colours: Data/Art/hd/classic/<era>_mapColors.bin  (N*16 bytes, megatile base 16)
+	std::string bin;
+	if (!ReadNativeFile("Data/Art/hd/classic/" + era + "_mapColors.bin", bin) || bin.size() < 16) {
+		return false;
+	}
+	const size_t n = bin.size() / 16;
+	g_hdmm.tiles.resize(n);
+	for (size_t t = 0; t < n; ++t) {
+		for (int k = 0; k < 16; ++k) {
+			g_hdmm.tiles[t][k] = (uint8_t) bin[t * 16 + k];
+		}
+	}
+	g_hdmm.era = era;
+	g_hdmm.ok = true;
+	return true;
+}
+
+// Average the megatile's 4x4 palette-resolved colours into one representative RGB.
+static bool HDTileRGB(int megatile, uint8_t &r, uint8_t &g, uint8_t &b)
+{
+	const int idx = megatile - g_hdmm.base;
+	if (idx < 0 || idx >= (int) g_hdmm.tiles.size()) {
+		return false;
+	}
+	const std::array<uint8_t, 16> &cell = g_hdmm.tiles[idx];
+	int R = 0, G = 0, B = 0;
+	for (int k = 0; k < 16; ++k) {
+		const uint8_t p = cell[k];
+		R += g_hdmm.pal[p][0];
+		G += g_hdmm.pal[p][1];
+		B += g_hdmm.pal[p][2];
+	}
+	r = (uint8_t) (R / 16);
+	g = (uint8_t) (G / 16);
+	b = (uint8_t) (B / 16);
+	return true;
+}
+
+// Write one mapped pixel into a surface (respects BytesPerPixel; Android minimap is 32bpp).
+static inline void PutMinimapPixel(SDL_Surface *s, int x, int y, Uint32 px)
+{
+	Uint8 *d = &((Uint8 *) s->pixels)[x * s->format->BytesPerPixel + y * s->pitch];
+	switch (s->format->BytesPerPixel) {
+		case 4: *(Uint32 *) d = px; break;
+		case 3: d[0] = px & 0xFF; d[1] = (px >> 8) & 0xFF; d[2] = (px >> 16) & 0xFF; break;
+		case 2: *(Uint16 *) d = (Uint16) px; break;
+		default: d[0] = (Uint8) px; break;
+	}
+}
+
+} // namespace
+
 /**
 **  Update a mini-map from the tiles of the map.
 */
@@ -192,6 +331,23 @@ void CMinimap::UpdateTerrain()
 	// 0. Detect the placeholder by its frame count and bail to a blank minimap-terrain layer instead
 	// of crashing. Real HD minimap colours are a later step (Remastered *_mapColors.bin).
 	if (tilepitch <= 0 || Map.TileGraphic->NumFrames <= 1) {
+		// NG11: HD path -- classic sheet is a placeholder. Fill terrain colours from the native
+		// Remastered <era>_mapColors.bin + .ppl palette instead of leaving the minimap black.
+		if (EnsureHDMinimapColors()) {
+			SDL_LockSurface(MinimapTerrainSurface);
+			for (int my = YOffset; my < H - YOffset; ++my) {
+				for (int mx = XOffset; mx < W - XOffset; ++mx) {
+					const int tile = Map.Fields[Minimap2MapX[mx] + Minimap2MapY[my]].getGraphicTile();
+					uint8_t r, g, b;
+					const Uint32 px = HDTileRGB(tile, r, g, b)
+					                      ? SDL_MapRGB(MinimapTerrainSurface->format, r, g, b)
+					                      : 0;
+					PutMinimapPixel(MinimapTerrainSurface, mx, my, px);
+				}
+			}
+			SDL_UnlockSurface(MinimapTerrainSurface);
+			return;
+		}
 		SDL_FillRect(MinimapTerrainSurface, nullptr, 0);
 		return;
 	}
@@ -260,6 +416,38 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 	int scaley = MinimapScaleY * SCALE_PRECISION / MINIMAP_FAC;
 	if (scaley == 0) {
 		scaley = 1;
+	}
+
+	// NG11: on the HD path the classic sheet is a placeholder; sampling it per-tile would read OOB.
+	// Refresh this tile's minimap pixels from the native mapColors instead.
+	if (Map.TileGraphic->NumFrames <= 1) {
+		if (!EnsureHDMinimapColors()) {
+			return;
+		}
+		const int hty = pos.y * Map.Info.MapWidth;
+		const int htx = pos.x;
+		SDL_LockSurface(MinimapTerrainSurface);
+		for (int my = YOffset; my < H - YOffset; ++my) {
+			const int y = Minimap2MapY[my];
+			if (y < hty) continue;
+			if (y > hty) break;
+			for (int mx = XOffset; mx < W - XOffset; ++mx) {
+				const int x = Minimap2MapX[mx];
+				if (x < htx) continue;
+				if (x > htx) break;
+				int tile = Map.Fields[x + y].playerInfo.SeenTile;
+				if (!tile) {
+					tile = Map.Fields[x + y].getGraphicTile();
+				}
+				uint8_t r, g, b;
+				const Uint32 px = HDTileRGB(tile, r, g, b)
+				                      ? SDL_MapRGB(MinimapTerrainSurface->format, r, g, b)
+				                      : 0;
+				PutMinimapPixel(MinimapTerrainSurface, mx, my, px);
+			}
+		}
+		SDL_UnlockSurface(MinimapTerrainSurface);
+		return;
 	}
 
 	const int tilepitch = Map.TileGraphic->getSurface()->w / PixelTileSize.x;
