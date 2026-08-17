@@ -112,6 +112,11 @@ void CFogOfWar::Init()
         }
         if (!TiledFogSrc || TiledFogSrc->NumFrames < 16) {
             Settings.Type = FogOfWarTypes::cEnhanced;
+            // NG10: the enhanced fog is generated at 4x per tile and upscaled to the screen. The default
+            // cSimple upscale is nearest-neighbour -> blocky/pixelated fog edges. Force bilinear so the
+            // feathered edges match the Remastered look. (The fully-native path is the bgs_Fow HD masks,
+            // a larger follow-up; bilinear removes the reported pixelation with no asset dependency.)
+            Settings.UpscaleType = UpscaleTypes::cBilinear;
         }
     }
 
