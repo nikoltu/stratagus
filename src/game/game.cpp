@@ -185,7 +185,10 @@ static void LoadStratagusMap(const fs::path &smpdir, const fs::path &mapname)
 	for (auto candidate : {smpdir / mapname,
 	                       fs::path(StratagusLibPath) / smpdir / mapname,
 	                       fs::path(StratagusLibPath) / mapname,
-	                       fs::path(mapname)}) {
+	                       fs::path(mapname),
+	                       // WargusHD: let the campaign-PUD converter resolve a raw campaign .sms to
+	                       // its converted cache copy (LibraryFileName runs the on-demand conversion).
+	                       fs::path(LibraryFileName(mapname.string()))}) {
 		const std::string_view extra_extensions[] = {
 			"",
 #ifdef USE_ZLIB

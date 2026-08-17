@@ -587,8 +587,12 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	const auto slash = rest.find('/');
 	if (slash == std::string::npos) { return {}; }
 	const std::string dir  = rest.substr(0, slash);     // human | orc | human-exp | orc-exp
-	const std::string base = rest.substr(slash + 1);    // level01h.smp
-	const auto dot = base.find(".smp");
+	const std::string base = rest.substr(slash + 1);    // level01h.smp | level01h.sms
+	// Accept both the presentation (.smp) and the setup (.sms): converting the PUD writes both, and
+	// the engine requests each in turn while loading a campaign map.
+	std::string ext = "smp";
+	auto dot = base.find(".smp");
+	if (dot == std::string::npos) { dot = base.find(".sms"); ext = "sms"; }
 	if (dot == std::string::npos) { return {}; }
 	const std::string stem = base.substr(0, dot);       // level01h
 	if (stem.compare(0, 5, "level") != 0) { return {}; }
@@ -612,9 +616,9 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	// (no _c.sms DefineMapSetup hack); the engine then auto-derives <map>.sms from <map>.smp.
 	fs::path cacheDir = Parameters::Instance.GetUserDirectory() / "wc2mapcache";
 	fs::create_directories(cacheDir, ec);
-	fs::path outSmp = cacheDir / (stem + ".smp.gz");
-	if (fs::exists(outSmp, ec)) {
-		return outSmp;
+	const fs::path wanted = cacheDir / (stem + "." + ext + ".gz");   // the file actually requested
+	if (fs::exists(wanted, ec)) {
+		return wanted;                                              // already converted this map
 	}
 	FILE *fp = fopen(pud.string().c_str(), "rb");
 	if (!fp) { return {}; }
@@ -626,11 +630,12 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	const size_t rd = fread(buf.data(), 1, (size_t)sz, fp);
 	fclose(fp);
 	if (rd != (size_t)sz) { return {}; }
+	// Writes both <stem>.smp.gz and <stem>.sms.gz into cacheDir.
 	if (wc2pud::PudToStratagus(buf.data(), buf.size(), stem.c_str(), cacheDir.string().c_str()) != 0) {
 		return {};
 	}
-	if (fs::exists(outSmp, ec)) {
-		return outSmp;
+	if (fs::exists(wanted, ec)) {
+		return wanted;
 	}
 	return {};
 }
