@@ -572,10 +572,28 @@ static void LoadMap(const fs::path &filename, CMap &map)
 		return;
 	}
 
-	// Campaign maps load natively via the Lua Load() path (CclLoad -> the in-memory PUD loader); their
-	// .smp branch above runs the _c.sms wrapper. Custom / multiplayer raw .PUD maps (no wrapper) are not yet
-	// reachable (the Custom Scenario browser doesn't list them yet) and will get their own native
-	// presentation+setup path when that menu is built. Until then an unknown extension is an error.
+	// Custom / multiplayer maps ship as raw .PUD (no _c.sms wrapper). Load natively: presentation (if the
+	// info phase did not already run it) then setup, straight from the original .PUD. Gated on the .pud
+	// extension so campaign .smp requests stay on the wrapper-preserving .smp branch above.
+	{
+		const std::string ext = name.extension().string();
+		if (ext == ".pud" || ext == ".PUD" || ext == ".Pud") {
+			const fs::path pud = ResolveMapPud(name.string());
+			if (!pud.empty()) {
+				if (map.Info.Filename.empty()) {
+					LoadPudMapNative(pud, 0); // presentation -> Map.Info
+					map.Info.Filename = filename.string();
+				}
+				map.Create();
+				if (LoadPudMapNative(pud, 1)) { // setup (tiles + units)
+					return;
+				}
+				ErrorPrint("Native PUD setup failed for '%s'\n", filename.u8string().c_str());
+				ExitFatal(-1);
+			}
+		}
+	}
+
 	ErrorPrint("Unrecognized map format\n");
 	ExitFatal(-1);
 }
@@ -827,9 +845,14 @@ void CreateGame(const fs::path &filename, CMap *map)
 		InitSyncRand();
 	}
 
-	if (Map.Info.Filename.empty() && has_any_extension(filename, {".smp", ".SMP"})) {
-		const std::string path = LibraryFileName(filename.string());
-		LuaLoadFile(path);
+	if (Map.Info.Filename.empty()) {
+		// Load the map presentation (Map.Info + player types) BEFORE the player-setup loop below. Campaign
+		// .smp requests and custom raw .PUD maps both resolve through LuaLoadFile -> the native PUD loader
+		// (LibraryFileName leaves the path intact; ResolveMapPud serves it from the original .PUD).
+		if (has_any_extension(filename, {".smp", ".SMP"}) || !ResolveMapPud(filename.string()).empty()) {
+			const std::string path = LibraryFileName(filename.string());
+			LuaLoadFile(path);
+		}
 	}
 
 	for (int i = 0; i < PlayerMax; ++i) {
