@@ -37,6 +37,7 @@
 
 #include "icons.h"
 
+#include "hd_synth_graphics.h"
 #include "menus.h"
 #include "player.h"
 #include "translate.h"
@@ -279,6 +280,34 @@ void CIcon::SetPaletteSwaps(std::vector<PaletteSwap> &newSwaps)
 }
 
 /**
+**  IC1: draw the native Remastered command-cell frame (portrait_button, state-dependent) behind an
+**  icon. The frame strip `ui/hd_cmd_frame.png` is synthesised in-engine from the native
+**  Modern_HUD_Widgets atlas (see hd_synth_graphics.cpp). If that atlas is absent the strip degrades
+**  to a placeholder (NumFrames != FRAME_STATES); we then draw nothing so classic installs are
+**  untouched. Frame order: 0 default,1 hovered,2 active,3 highlight,4 highlight_hovered,5 highlight_active.
+*/
+static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos)
+{
+	static int state = 0;   // 0 = untried, 1 = active, -1 = disabled
+	static std::shared_ptr<CGraphic> frameG;
+	if (state == 0) {
+		frameG = CGraphic::New("ui/hd_cmd_frame.png", hdicon::CELL_W, hdicon::CELL_H);
+		frameG->Load();
+		state = (frameG && frameG->NumFrames >= hdicon::FRAME_STATES) ? 1 : -1;
+	}
+	if (state != 1) {
+		return;
+	}
+	int idx = (flags & IconSelected) ? 3 : 0;   // highlight vs default base
+	if (flags & IconClicked) {
+		idx += 2;                                // ..._active
+	} else if (flags & IconActive) {
+		idx += 1;                                // ..._hovered
+	}
+	frameG->DrawFrameClip(idx, pos.x, pos.y);
+}
+
+/**
 **  Draw unit icon 'icon' with border on x,y
 **
 **  @param style   Button style
@@ -289,6 +318,8 @@ void CIcon::SetPaletteSwaps(std::vector<PaletteSwap> &newSwaps)
 void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 						 const PixelPos &pos, const std::string &text, int player) const
 {
+	DrawHDCommandFrame(flags, pos);
+
 	ButtonStyle s(style);
 
 	s.Default.Sprite = s.Hover.Sprite = s.Clicked.Sprite = this->G;

@@ -350,6 +350,7 @@ set(video_SRCS
 	src/video/cursor.cpp
 	src/video/font.cpp
 	src/video/graphic.cpp
+	src/video/hd_synth_graphics.cpp
 	src/video/linedraw.cpp
 	src/video/mng.cpp
 	src/video/movie.cpp

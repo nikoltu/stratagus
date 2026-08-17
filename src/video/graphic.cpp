@@ -36,6 +36,7 @@
 #include "video.h"
 #include "json.h"
 
+#include "hd_synth_graphics.h"
 #include "intern_video.h"
 #include "iolib.h"
 #include "nineslice.h"
@@ -1767,26 +1768,46 @@ void CGraphic::Load(bool grayscale)
 		return;
 	}
 
-	auto fp = std::make_unique<CFile>();
-	const fs::path name = LibraryFileName(File.string());
+	// IC1: a few HD command graphics are synthesised in-engine from the native Remastered atlases
+	// (Portrait-face icons, portrait_button frame states) rather than shipping a derived PNG, so
+	// they are reachable from the Remastered folder alone. Try the builder by basename first; if the
+	// native atlas is absent the builder returns nullptr and we fall back to the on-disk file below.
+	{
+		const std::string base = File.filename().string();
+		if (base == "icons_hd.png") {
+			mSurface = BuildHDIconStrip();
+		} else if (base == "hd_cmd_frame.png") {
+			mSurface = BuildHDCommandFrameStrip();
+		}
+	}
+
+	fs::path name;
+	if (!mSurface) {
+		name = LibraryFileName(File.string());
+	}
 	// A missing or unreadable graphic must NOT kill the program: a single absent
 	// skin/menu asset (e.g. a race that ships fewer button variants) would otherwise
 	// take down the whole app via ExitFatal -> _Exit (silent on Android). Log loudly
 	// and substitute a visible placeholder so the owning menu/HUD still opens.
-	if (name.empty()) {
+	if (mSurface) {
+		// already synthesised above -> skip the on-disk decode
+	} else if (name.empty()) {
 		ErrorPrint("Can't load the graphic '%s': file not found; using placeholder\n",
 		           File.u8string().c_str());
 		mSurface = MakePlaceholderSurface(Width, Height);
-	} else if (fp->open(name.string().c_str(), CL_OPEN_READ) == -1) {
-		ErrorPrint("Can't open the graphic '%s': %s; using placeholder\n",
-		           File.u8string().c_str(), strerror(errno));
-		mSurface = MakePlaceholderSurface(Width, Height);
 	} else {
-		mSurface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(fp)), 1);
-		if (mSurface == nullptr) {
-			ErrorPrint("Couldn't decode the graphic '%s': %s; using placeholder\n",
-			           name.u8string().c_str(), IMG_GetError());
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(name.string().c_str(), CL_OPEN_READ) == -1) {
+			ErrorPrint("Can't open the graphic '%s': %s; using placeholder\n",
+			           File.u8string().c_str(), strerror(errno));
 			mSurface = MakePlaceholderSurface(Width, Height);
+		} else {
+			mSurface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(fp)), 1);
+			if (mSurface == nullptr) {
+				ErrorPrint("Couldn't decode the graphic '%s': %s; using placeholder\n",
+				           name.u8string().c_str(), IMG_GetError());
+				mSurface = MakePlaceholderSurface(Width, Height);
+			}
 		}
 	}
 	if (mSurface == nullptr) {
