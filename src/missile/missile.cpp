@@ -509,15 +509,17 @@ static void LoadHDMissileMap()
 	}
 }
 
-// Current map's tileset name in the UNIT/effect atlas namespace (summer->forest, winter->winter,
-// wasteland->xswamp, swamp->swamp). Empty when unknown.
+// Current map's tileset name in the UNIT/effect atlas namespace (summer->forest, winter->winter).
+// D5/NG-TERR1: classic "wasteland"->swamp and classic "swamp"->xswamp -- this was reversed here (it
+// disagreed with hd_units_map, where wasteland units live in units_*_swamp and swamp units in
+// units_*_xswamp), so effects on swamp/wasteland maps loaded the wrong-biome atlas. Empty when unknown.
 static std::string CurrentEffectTileset()
 {
 	const std::string &img = Map.Tileset.ImageFile;
 	if (img.find("summer") != std::string::npos) { return "forest"; }
 	if (img.find("winter") != std::string::npos) { return "winter"; }
-	if (img.find("wasteland") != std::string::npos) { return "xswamp"; }
-	if (img.find("swamp") != std::string::npos) { return "swamp"; }
+	if (img.find("wasteland") != std::string::npos) { return "swamp"; }
+	if (img.find("swamp") != std::string::npos) { return "xswamp"; }
 	return "";
 }
 
