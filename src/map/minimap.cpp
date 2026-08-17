@@ -185,14 +185,15 @@ struct HDMinimapColors {
 static HDMinimapColors g_hdmm;
 
 // Same tileset->era mapping as EnsureHDTileAtlas (map_draw.cpp): summer->forest, winter->iceland,
-// wasteland->xswamp, swamp->swamp. Returns "" if unknown.
+// NG-TERR1: classic "wasteland"->Remastered Swamp, classic "swamp"->Remastered XSwamp (the two were
+// reversed, giving the wrong minimap palette + out-of-range colours). Returns "" if unknown.
 static std::string MinimapEra()
 {
 	const std::string &img = Map.Tileset.ImageFile;
 	if (img.find("summer") != std::string::npos) return "forest";
 	if (img.find("winter") != std::string::npos) return "iceland";
-	if (img.find("wasteland") != std::string::npos) return "xswamp";
-	if (img.find("swamp") != std::string::npos) return "swamp";
+	if (img.find("wasteland") != std::string::npos) return "swamp";
+	if (img.find("swamp") != std::string::npos) return "xswamp";
 	return "";
 }
 

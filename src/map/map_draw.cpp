@@ -118,9 +118,13 @@ static void EnsureHDTileAtlas()
 	} else if (img.find("winter") != std::string::npos) {
 		atlasName = "classic_ice"; nativePrefix = "Iceland/iceland"; era = "iceland";
 	} else if (img.find("wasteland") != std::string::npos) {
-		atlasName = "classic_xswamp"; nativePrefix = "XSwamp/xswamp"; era = "xswamp";
-	} else if (img.find("swamp") != std::string::npos) {
+		// NG-TERR1: classic "wasteland" tileset == Remastered SWAMP atlas (verified: wasteland.lua CV4
+		// groups match Oracle Swamp). The mapping used to be reversed, drawing wrong-era terrain.
 		atlasName = "classic_swamp"; nativePrefix = "Swamp/swamp"; era = "swamp";
+	} else if (img.find("swamp") != std::string::npos) {
+		// NG-TERR1: classic "swamp" tileset == Remastered XSWAMP atlas (swamp.lua CV4 groups match Oracle
+		// XSwamp; megatile IDs run to 383 which only classic_xswamp's 368 frames cover).
+		atlasName = "classic_xswamp"; nativePrefix = "XSwamp/xswamp"; era = "xswamp";
 	}
 	if (!atlasName) {
 		return;
