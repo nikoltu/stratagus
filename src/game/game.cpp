@@ -908,6 +908,10 @@ void CreateGame(const fs::path &filename, CMap *map)
 		// Load the map.
 		//
 		UpdateLoadingScreen();
+		// D1 per-map UDTA: revert to the boot stat baseline then apply this map's cached PUD UDTA overrides
+		// BEFORE InitUnitTypes(1) so UpdateStats() fans the per-map stats out to every player's Stats.
+		extern void ApplyMapUnitData(const fs::path &mapPath); // wc2data.cpp
+		ApplyMapUnitData(filename);
 		InitUnitTypes(1);
 		UpdateLoadingScreen();
 		LoadMap(filename, *map);

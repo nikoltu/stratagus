@@ -48,6 +48,9 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#include "parameters.h"
 
 namespace fs = std::filesystem;
 
@@ -75,6 +78,34 @@ inline void setVar(CUnitType &t, int index, int value)
 	t.DefaultStat.Variables[index].Max = value;
 	t.DefaultStat.Variables[index].Enable = 1;
 }
+
+// Overwrite one unit type's numeric stats from record i of a field-major UDTA table. `base` is the byte
+// offset of field 0 within `d`: 0 for the standalone Data/Rez/unitdata.dat (flag-less), 2 for a per-map PUD
+// UDTA chunk (a 2-byte use_default flag precedes the field table). Field layout verified against Oracle
+// gameplay_loader_descriptors + real .PUD stat cross-check (footman rec0 = hp60/armor2/dmg6). Only offsets
+// below the classic field-table end are read, so both PUD variants (5696 classic / 5950 expansion) work.
+inline void applyUdtaRecord(CUnitType &t, const std::string &d, int i, size_t base)
+{
+	setVar(t, SIGHTRANGE_INDEX, (int) rdU32(d, base + 1236 + i * 4));
+	setVar(t, HP_INDEX, (int) rdU16(d, base + 1676 + i * 2));
+	setVar(t, ARMOR_INDEX, (int) rdU8(d, base + 3656 + i));
+	setVar(t, PRIORITY_INDEX, (int) rdU8(d, base + 3876 + i));
+	setVar(t, BASICDAMAGE_INDEX, (int) rdU8(d, base + 3986 + i));
+	setVar(t, PIERCINGDAMAGE_INDEX, (int) rdU8(d, base + 4096 + i));
+	setVar(t, POINTS_INDEX, (int) rdU16(d, base + 4924 + i * 2));
+	setVar(t, ATTACKRANGE_INDEX, (int) rdU8(d, base + 3326 + i));
+
+	t.DefaultStat.Costs[TimeCost] = (int) rdU8(d, base + 2006 + i);
+	t.DefaultStat.Costs[GoldCost] = (int) rdU8(d, base + 2116 + i) * 10;
+	t.DefaultStat.Costs[WoodCost] = (int) rdU8(d, base + 2226 + i) * 10;
+	t.DefaultStat.Costs[OilCost] = (int) rdU8(d, base + 2336 + i) * 10;
+}
+
+// Baseline snapshot of DefaultStat per type, captured once after the boot-time table (D2) settles, so a
+// per-map UDTA override can be reverted before the next map is loaded (unit types persist across games --
+// CreateGame does not re-run the unit Lua, so overrides would otherwise accumulate).
+std::unordered_map<CUnitType *, CUnitStats> g_statBaseline;
+bool g_baselineCaptured = false;
 
 } // namespace
 
@@ -123,24 +154,95 @@ static void ApplyRemasteredUnitData()
 		if (it == byIdent.end()) {
 			continue; // ident not defined by the Lua (e.g. this race not loaded) -> skip
 		}
-		CUnitType *type = it->second;
-		setVar(*type, SIGHTRANGE_INDEX, (int) rdU32(d, 1236 + i * 4));
-		setVar(*type, HP_INDEX, (int) rdU16(d, 1676 + i * 2));
-		setVar(*type, ARMOR_INDEX, (int) rdU8(d, 3656 + i));
-		setVar(*type, PRIORITY_INDEX, (int) rdU8(d, 3876 + i));
-		setVar(*type, BASICDAMAGE_INDEX, (int) rdU8(d, 3986 + i));
-		setVar(*type, PIERCINGDAMAGE_INDEX, (int) rdU8(d, 4096 + i));
-		setVar(*type, POINTS_INDEX, (int) rdU16(d, 4924 + i * 2));
-		setVar(*type, ATTACKRANGE_INDEX, (int) rdU8(d, 3326 + i));
-
-		type->DefaultStat.Costs[TimeCost] = (int) rdU8(d, 2006 + i);
-		type->DefaultStat.Costs[GoldCost] = (int) rdU8(d, 2116 + i) * 10;
-		type->DefaultStat.Costs[WoodCost] = (int) rdU8(d, 2226 + i) * 10;
-		type->DefaultStat.Costs[OilCost] = (int) rdU8(d, 2336 + i) * 10;
+		applyUdtaRecord(*it->second, d, i, 0); // standalone table: field 0 at byte 0 (no flag prefix)
 		++applied;
 	}
 	DebugPrint("ApplyRemasteredUnitData: overwrote stats for %d unit types from Data/Rez/unitdata.dat\n",
 	           applied);
+}
+
+// Capture (once) the current DefaultStat of every unit type as the baseline to revert per-map overrides to.
+static void CaptureStatBaseline()
+{
+	if (g_baselineCaptured) {
+		return;
+	}
+	for (CUnitType *t : getUnitTypes()) {
+		if (t) {
+			g_statBaseline[t] = t->DefaultStat;
+		}
+	}
+	g_baselineCaptured = true;
+}
+
+// D1 per-map UDTA: before a map loads, revert every unit type to the boot baseline, then -- if the map is a
+// converted PUD and its UDTA chunk was cached as a sidecar (Data/Rez-equivalent field layout) -- overwrite
+// the numeric stats for THIS map only. Runs before InitUnitTypes(1) so UpdateStats() fans the values out to
+// every player's Stats. Maps without a sidecar simply get the baseline (clearing a previous map's override).
+void ApplyMapUnitData(const fs::path &mapPath)
+{
+	if (!g_baselineCaptured) {
+		CaptureStatBaseline(); // first map: current DefaultStat IS the baseline, nothing to revert yet
+	} else {
+		for (auto &kv : g_statBaseline) {
+			kv.first->DefaultStat = kv.second;
+		}
+	}
+
+	// Sidecar stem = map filename up to the first '.', matching the stem the PUD converters write.
+	const std::string leaf = mapPath.filename().string();
+	const std::string stem = leaf.substr(0, leaf.find('.'));
+	if (stem.empty()) {
+		return;
+	}
+	const fs::path sidecar = Parameters::Instance.GetUserDirectory() / "wc2mapcache" / (stem + ".udta");
+	std::error_code ec;
+	const uintmax_t sz = fs::file_size(sidecar, ec);
+	if (ec || sz < 5254) { // need at least through the fields we read (< 5696); classic=5696, expansion=5950
+		return;
+	}
+	std::string d;
+	{
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(sidecar.string().c_str(), CL_OPEN_READ) == -1) {
+			return;
+		}
+		d.resize((size_t) sz);
+		const bool ok = (size_t) fp->read(&d[0], (size_t) sz) == (size_t) sz;
+		fp->close();
+		if (!ok) {
+			return;
+		}
+	}
+
+	// use_default flag (u16 @ offset 0): 1 = this map uses the game's default unit data (keep the D2
+	// baseline, which IS the Remastered default -> apply nothing); 0 = the map ships custom stats -> apply.
+	// Verified across all 285 shipped maps (byte 0 perfectly splits the Oracle use_default classification).
+	if (rdU16(d, 0) != 0) {
+		return; // baseline already restored above
+	}
+
+	std::unordered_map<std::string, CUnitType *> byIdent;
+	for (CUnitType *t : getUnitTypes()) {
+		if (t) {
+			byIdent.emplace(t->Ident, t);
+		}
+	}
+	int applied = 0;
+	for (int i = 0; i < WC2_UNIT_RECORDS; ++i) {
+		const char *ident = wc2pud::UnitScriptNames[i];
+		if (!ident || ident[0] == '\0' || ident[1] == '\0') {
+			continue;
+		}
+		auto it = byIdent.find(ident);
+		if (it == byIdent.end()) {
+			continue;
+		}
+		applyUdtaRecord(*it->second, d, i, 2); // PUD UDTA: 2-byte use_default flag precedes the field table
+		++applied;
+	}
+	DebugPrint("ApplyMapUnitData: applied per-map UDTA for %d types from %s\n", applied,
+	           sidecar.string().c_str());
 }
 
 static int CclApplyRemasteredUnitData(lua_State *l)

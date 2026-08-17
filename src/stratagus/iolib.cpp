@@ -572,6 +572,50 @@ static bool FindFileWithExtension(fs::path &fullpath)
 // (WC2SourcePath) -- to a Stratagus .smp/.sms in a writable cache and return that. This makes the
 // engine read the original campaign maps directly, with no external extractor: the converter is
 // built into the app, so a single APK reads the original + Remastered files on its own.
+// D1 per-map UDTA/UGRD: extract the raw UDTA and UGRD chunks from a .PUD and cache them beside the
+// converted map as <stem>.udta / <stem>.ugrd sidecars. wc2data.cpp reads the .udta at map load to apply
+// this map's per-unit stat overrides (the classic PudToStratagus converter drops UDTA/UGRD entirely).
+// Idempotent + keyed on the .udta sidecar's existence, so it also backfills caches converted before this
+// feature. The PUD is a flat sequence of [4-byte tag][4-byte little-endian length][payload] chunks.
+static void EnsurePudStatSidecars(const fs::path &pud, const fs::path &cacheDir, const std::string &stem)
+{
+	std::error_code ec;
+	const fs::path udtaSc = cacheDir / (stem + ".udta");
+	if (fs::exists(udtaSc, ec)) {
+		return; // already emitted (UGRD is written together)
+	}
+	FILE *fp = fopen(pud.string().c_str(), "rb");
+	if (!fp) { return; }
+	fseek(fp, 0, SEEK_END);
+	const long sz = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (sz <= 8) { fclose(fp); return; }
+	std::vector<unsigned char> b((size_t) sz);
+	const size_t rd = fread(b.data(), 1, (size_t) sz, fp);
+	fclose(fp);
+	if (rd != (size_t) sz) { return; }
+
+	const auto writeChunk = [&](const fs::path &dst, const unsigned char *p, uint32_t len) {
+		FILE *o = fopen(dst.string().c_str(), "wb");
+		if (!o) { return; }
+		fwrite(p, 1, len, o);
+		fclose(o);
+	};
+	size_t off = 0;
+	while (off + 8 <= b.size()) {
+		const uint32_t len = b[off + 4] | ((uint32_t) b[off + 5] << 8) | ((uint32_t) b[off + 6] << 16)
+		                   | ((uint32_t) b[off + 7] << 24);
+		const size_t payload = off + 8;
+		if (payload + len > b.size()) { break; }
+		if (memcmp(&b[off], "UDTA", 4) == 0) {
+			writeChunk(udtaSc, &b[payload], len);
+		} else if (memcmp(&b[off], "UGRD", 4) == 0) {
+			writeChunk(cacheDir / (stem + ".ugrd"), &b[payload], len);
+		}
+		off = payload + len;
+	}
+}
+
 static fs::path TryConvertCampaignPud(const std::string_view fileview)
 {
 	if (WC2SourcePath.empty()) {
@@ -625,6 +669,7 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	fs::create_directories(cacheDir, ec);
 	const fs::path wanted = cacheDir / (stem + "." + ext + ".gz");   // the file actually requested
 	if (fs::exists(wanted, ec)) {
+		EnsurePudStatSidecars(pud, cacheDir, stem);                 // backfill sidecar if missing
 		return wanted;                                              // already converted this map
 	}
 	FILE *fp = fopen(pud.string().c_str(), "rb");
@@ -641,6 +686,7 @@ static fs::path TryConvertCampaignPud(const std::string_view fileview)
 	if (wc2pud::PudToStratagus(buf.data(), buf.size(), stem.c_str(), cacheDir.string().c_str()) != 0) {
 		return {};
 	}
+	EnsurePudStatSidecars(pud, cacheDir, stem);                     // cache this map's UDTA/UGRD chunks
 	if (fs::exists(wanted, ec)) {
 		return wanted;
 	}
@@ -662,6 +708,7 @@ fs::path ConvertPudFileToCache(const fs::path &pudPath)
 	fs::create_directories(cacheDir, ec);
 	const fs::path wanted = cacheDir / (stem + ".smp.gz");
 	if (fs::exists(wanted, ec)) {
+		EnsurePudStatSidecars(pudPath, cacheDir, stem); // backfill sidecar if missing
 		return wanted; // already converted
 	}
 	FILE *fp = fopen(pudPath.string().c_str(), "rb");
