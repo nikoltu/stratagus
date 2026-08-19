@@ -89,6 +89,7 @@ public:
     void Draw(CViewport &viewport);
 
     uint8_t GetVisibilityForTile(const Vec2i tilePos) const;
+    bool HasHDFog() const { return HDFogAtlas && HDFogAtlas->IsLoaded(); }
 
 private:
     void InitEnhanced();
@@ -124,6 +125,7 @@ private:
                           const int16_t dx, const int16_t dy, SDL_Surface *const vpFogSurface);
     void DrawTiled(CViewport &viewport);
     void DrawTiledLegacy(CViewport &viewport);
+    void DrawHDTiled(CViewport &viewport);
 
 private:
     struct FogOfWarSettings
@@ -162,6 +164,11 @@ private:
                                               /// + 1 tile to the left and up (for simplification of upscale algorithm purposes).
     std::vector<uint8_t> RenderedFog;         /// Back buffer for bilinear upscaling in to viewports
     CBlurrer             Blurrer;             /// Blurrer for fog of war texture
+
+    std::unique_ptr<CAtlasGraphic> HDFogAtlas;
+    int HDFogFrames[16]     = {};  // TiledFogTable index -> atlas frame for unexplored fog
+    int HDFogGreyFrames[16] = {};  // TiledFogTable index -> atlas frame for explored-not-visible fog
+    int HDFogBlankFrame     = -1;  // fully opaque fog (mask_0_blank)
 
     /// Tables with patterns to generate fog of war texture from vision table
 #if SDL_BYTEORDER == SDL_LIL_ENDIAN

@@ -398,6 +398,11 @@ void CViewport::DrawMapFogOfWar()
 
 	FogOfWar->Draw(*this);
 
+	// HD fog draws directly to the GPU renderer inside Draw(); skip the surface compositing.
+	if (FogOfWar->HasHDFog() && TheRenderer && TheScreen != this->MapRenderSurface) {
+		return;
+	}
+
 	const bool nonLegacy = FogOfWar->GetType() != FogOfWarTypes::cTiledLegacy;
 
 	// On-screen destination = the whole viewport rectangle in window pixels.

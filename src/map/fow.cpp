@@ -45,6 +45,7 @@
 #include "viewport.h"
 
 #include <algorithm>
+#include <cmath>
 
 /*----------------------------------------------------------------------------
 --  Defines
@@ -102,21 +103,47 @@ void CFogOfWar::Init()
 
     VisTable_Index0 = VisTableWidth + 1;
 
+    // Try to load the Remastered HD fog atlas (bgs_Fow). 33 frames at 216x216: 16 mask patterns
+    // (mask_0..mask_15), 16 explored-grey variants (mask_0_grey..mask_15_grey), and mask_0_blank.
+    // When loaded, the tiled fog path uses these HD masks drawn directly to the GPU renderer
+    // (bypassing the 32px fog surface), matching the Remastered's native fog edges.
+    if (!HDFogAtlas) {
+        HDFogAtlas = std::make_unique<CAtlasGraphic>();
+    }
+    if (!HDFogAtlas->IsLoaded()) {
+        if (!HDFogAtlas->LoadTexturePacker("Data/Art/hd/bgs/bgs_Fow.json", false, true)) {
+            HDFogAtlas.reset();
+        } else {
+            bool allFound = true;
+            for (int i = 0; i < 16; i++) {
+                char name[32];
+                snprintf(name, sizeof(name), "mask_%d", i);
+                HDFogFrames[i] = HDFogAtlas->FrameByName(name);
+                if (HDFogFrames[i] < 0) allFound = false;
+                snprintf(name, sizeof(name), "mask_%d_grey", i);
+                HDFogGreyFrames[i] = HDFogAtlas->FrameByName(name);
+                if (HDFogGreyFrames[i] < 0) allFound = false;
+            }
+            HDFogBlankFrame = HDFogAtlas->FrameByName("mask_0_blank");
+            if (!allFound) {
+                HDFogAtlas.reset();
+            }
+        }
+    }
+
     // NG10: the Remastered ships no classic tiled fog tiles. If a tiled fog type is selected but the
     // classic fog graphic is missing (HD build -> a 1-frame placeholder), the tiled renderer samples a
-    // bogus surface and stamps hard black artifacts. Fall back to the smooth enhanced fog, which needs
-    // no classic asset and matches the Remastered's feathered fog.
+    // bogus surface and stamps hard black artifacts. When HD fog is available, keep the tiled type
+    // (DrawHDTiled bypasses the classic tiles entirely). Otherwise fall back to enhanced fog.
     if (Settings.Type == FogOfWarTypes::cTiled || Settings.Type == FogOfWarTypes::cTiledLegacy) {
-        if (TiledFogSrc) {
-            TiledFogSrc->Load();
-        }
-        if (!TiledFogSrc || TiledFogSrc->NumFrames < 16) {
-            Settings.Type = FogOfWarTypes::cEnhanced;
-            // NG10: the enhanced fog is generated at 4x per tile and upscaled to the screen. The default
-            // cSimple upscale is nearest-neighbour -> blocky/pixelated fog edges. Force bilinear so the
-            // feathered edges match the Remastered look. (The fully-native path is the bgs_Fow HD masks,
-            // a larger follow-up; bilinear removes the reported pixelation with no asset dependency.)
-            Settings.UpscaleType = UpscaleTypes::cBilinear;
+        if (!HasHDFog()) {
+            if (TiledFogSrc) {
+                TiledFogSrc->Load();
+            }
+            if (!TiledFogSrc || TiledFogSrc->NumFrames < 16) {
+                Settings.Type = FogOfWarTypes::cEnhanced;
+                Settings.UpscaleType = UpscaleTypes::cBilinear;
+            }
         }
     }
 
@@ -214,6 +241,7 @@ void CFogOfWar::Clean(const bool isHardClean /*= false*/)
 {
     if(isHardClean) {
         VisionFor.clear();
+        HDFogAtlas.reset();
     }
 
     VisTable.clear();
@@ -429,6 +457,11 @@ void CFogOfWar::Update(bool doAtOnce /*= false*/)
 */
 void CFogOfWar::Draw(CViewport &viewport)
 {
+    if (HasHDFog() && TheRenderer && TheScreen != viewport.GetMapRenderSurface()) {
+        DrawHDTiled(viewport);
+        return;
+    }
+
     if (Settings.Type == FogOfWarTypes::cTiledLegacy) {
         DrawTiledLegacy(viewport);
     } else {
@@ -948,6 +981,106 @@ void CFogOfWar::DrawTiledLegacy(CViewport &viewport)
         dy += PixelTileSize.y;
     }
 }
+/**
+**  Draw HD fog of war using Remastered bgs_Fow atlas masks directly to the GPU renderer.
+**  Each map tile's fog is rendered as a scaled HD mask frame over the tile's screen rect,
+**  matching the terrain tile positions exactly (including zoom).
+*/
+void CFogOfWar::DrawHDTiled(CViewport &viewport)
+{
+    const float zoom = viewport.Zoom;
+    const int tileW = PixelTileSize.x;
+    const int tileH = PixelTileSize.y;
+
+    size_t mapIndexBase = viewport.MapPos.y * Map.Info.MapWidth;
+    size_t visIndexBase = viewport.MapPos.y * VisTableWidth + VisTable_Index0;
+
+    // Screen-space tile iteration: same origin as terrain (TopLeftPos - Offset)
+    int logY = viewport.TopLeftPos.y - viewport.Offset.y;
+    const int mapRows = Map.Info.MapHeight;
+    const int mapCols = Map.Info.MapWidth;
+
+    // Screen bounds for clipping
+    const int screenRight  = viewport.BottomRightPos.x;
+    const int screenBottom = viewport.BottomRightPos.y;
+
+    for (int tileY = viewport.MapPos.y; tileY < mapRows; tileY++) {
+        int logX = viewport.TopLeftPos.x - viewport.Offset.x;
+        size_t mapIndex = viewport.MapPos.x + mapIndexBase;
+        size_t visIndex = viewport.MapPos.x + visIndexBase;
+
+        // Compute this row's screen Y range
+        int sy0, sy1;
+        if (zoom != 1.0f) {
+            sy0 = viewport.TopLeftPos.y
+                  + static_cast<int>(std::lround((logY - viewport.TopLeftPos.y) * zoom));
+            sy1 = viewport.TopLeftPos.y
+                  + static_cast<int>(std::lround((logY + tileH - viewport.TopLeftPos.y) * zoom));
+        } else {
+            sy0 = logY;
+            sy1 = logY + tileH;
+        }
+        if (sy0 > screenBottom) break;
+
+        for (int tileX = viewport.MapPos.x; tileX < mapCols; tileX++) {
+            int sx0, sx1;
+            if (zoom != 1.0f) {
+                sx0 = viewport.TopLeftPos.x
+                      + static_cast<int>(std::lround((logX - viewport.TopLeftPos.x) * zoom));
+                sx1 = viewport.TopLeftPos.x
+                      + static_cast<int>(std::lround((logX + tileW - viewport.TopLeftPos.x) * zoom));
+            } else {
+                sx0 = logX;
+                sx1 = logX + tileW;
+            }
+            if (sx0 > screenRight) break;
+
+            SDL_Rect dst = { sx0, sy0, sx1 - sx0, sy1 - sy0 };
+
+            if (!VisTable[visIndex]) {
+                // Completely unexplored: draw fully opaque fog (mask_0 = all-opaque)
+                const uint8_t alpha = GameSettings.RevealMap != MapRevealModes::cHidden
+                                      ? GetRevealedOpacity() : GetUnseenOpacity();
+                HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogFrames[0], dst, alpha);
+            } else {
+                int fogTile = 0;
+                int blackFogTile = 0;
+                GetFogTile(visIndex, mapIndex, mapIndexBase, &fogTile, &blackFogTile);
+
+                // Explored-not-visible layer. EM1: the authored mask_N_grey frames CARRY the
+                // Remastered explored-dim level in their own alpha (core = 128); modulating them
+                // again by ExploredOpacity halved the boundary tiles vs the mask_0(255)-based fill
+                // (127) -> a hard half-dim staircase at every explored/visible edge. Draw the grey
+                // set at full alpha for BOTH the fill (mask_0_grey) and the visible-side transition
+                // (mask_N_grey) so the dim level is continuous and the edge keeps its authored feather.
+                if (IsMapFieldVisible(visIndex) || ReplayRevealMap) {
+                    if (fogTile && fogTile != blackFogTile) {
+                        HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogGreyFrames[fogTile], dst, 255);
+                    }
+                } else {
+                    // Fully explored but not currently visible: full explored overlay
+                    HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogGreyFrames[0], dst, 255);
+                }
+
+                // Unexplored edges (black mask at unseen/revealed opacity)
+                if (blackFogTile) {
+                    const uint8_t alpha = GameSettings.RevealMap != MapRevealModes::cHidden
+                                          ? GetRevealedOpacity() : GetUnseenOpacity();
+                    HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogFrames[blackFogTile], dst, alpha);
+                }
+            }
+
+            mapIndex++;
+            visIndex++;
+            logX += tileW;
+        }
+
+        mapIndexBase += Map.Info.MapWidth;
+        visIndexBase += VisTableWidth;
+        logY += tileH;
+    }
+}
+
 /**
 **  Cleanup the fog of war.
 */
