@@ -101,17 +101,20 @@ bool LoadAtlas(const std::string &jsonPath, Atlas &out)
 	if (resolved.empty()) {
 		return false;
 	}
-	std::error_code ec;
-	const uintmax_t sz = fs::file_size(resolved, ec);
-	if (ec || sz == 0 || sz > (uintmax_t) 64 * 1024 * 1024) {
-		return false;
-	}
+	// Use CFile seek-to-end for sizing (fs::file_size fails on Android scoped storage paths).
 	std::string text;
 	{
 		auto fp = std::make_unique<CFile>();
 		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
 			return false;
 		}
+		fp->seek(0, SEEK_END);
+		long sz = fp->tell();
+		if (sz <= 0 || sz > 64 * 1024 * 1024) {
+			fp->close();
+			return false;
+		}
+		fp->seek(0, SEEK_SET);
 		text.resize((size_t) sz);
 		const bool ok = (size_t) fp->read(&text[0], (size_t) sz) == (size_t) sz;
 		fp->close();
@@ -342,6 +345,71 @@ SDL_Surface *BuildHDCommandFrameStrip()
 		return nullptr;
 	}
 	return strip;
+}
+
+SDL_Surface *BuildHDSidebarPanel(const char *race, const char *frameName)
+{
+	const std::string atlasPath = std::string("Data/Art/hd/HUD/BG_") + race + ".json";
+	Atlas atlas;
+	if (!LoadAtlas(atlasPath, atlas)) {
+		return nullptr;
+	}
+	return CropFrame(atlas, frameName);
+}
+
+SDL_Surface *BuildHDHudF5Strip(int cellW, int cellH)
+{
+	Atlas atlas;
+	if (!LoadAtlas("Data/skins/Modern_HUD_Widgets.json", atlas)) {
+		return nullptr;
+	}
+	static const char *const kStates[3] = {"f5", "f5_hovered", "f5_active"};
+	SDL_Surface *strip = NewRGBA(cellW, cellH * 3);
+	if (!strip) {
+		return nullptr;
+	}
+	int built = 0;
+	for (int i = 0; i < 3; ++i) {
+		auto it = atlas.frames.find(kStates[i]);
+		if (it == atlas.frames.end()) {
+			continue;
+		}
+		CopyScaled(atlas.surface, it->second, strip, SDL_Rect{0, i * cellH, cellW, cellH});
+		++built;
+	}
+	if (!built) {
+		SDL_FreeSurface(strip);
+		return nullptr;
+	}
+	return strip;
+}
+
+SDL_Surface *BuildHDHudSmallButton(const char *race, bool pressed, int cellW, int cellH)
+{
+	Atlas atlas;
+	if (!LoadAtlas("Data/skins/Modern_HUD_Widgets.json", atlas)) {
+		return nullptr;
+	}
+	std::string key = std::string("hud_") + race + "_small";
+	if (pressed) {
+		key += "_active";
+	}
+	// frame names use lowercase race
+	for (auto &c : key) {
+		if (c >= 'A' && c <= 'Z') {
+			c = c - 'A' + 'a';
+		}
+	}
+	auto it = atlas.frames.find(key);
+	if (it == atlas.frames.end()) {
+		return nullptr;
+	}
+	SDL_Surface *out = NewRGBA(cellW, cellH);
+	if (!out) {
+		return nullptr;
+	}
+	CopyScaled(atlas.surface, it->second, out, SDL_Rect{0, 0, cellW, cellH});
+	return out;
 }
 
 //@}

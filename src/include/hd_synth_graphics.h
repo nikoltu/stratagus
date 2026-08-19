@@ -46,6 +46,22 @@ extern SDL_Surface *BuildHDIconStrip();
 /// SDL_Surface (caller owns) or nullptr if the native atlas is unavailable.
 extern SDL_Surface *BuildHDCommandFrameStrip();
 
+/// Crop a single frame from the Remastered sidebar background atlas `Data/Art/hd/HUD/BG_{race}.json`.
+/// @param race "Human" or "Orc"
+/// @param frameName "TopLeft" (855x2160) or "TileableLeft" (855x630)
+/// Returns a fresh RGBA32 SDL_Surface (caller owns) or nullptr if the atlas is unavailable.
+extern SDL_Surface *BuildHDSidebarPanel(const char *race, const char *frameName);
+
+/// Build an F5 menu button 3-frame strip from `Data/skins/Modern_HUD_Widgets.json`:
+/// f5, f5_hovered, f5_active, each scaled to cellW x cellH. Total surface = cellW x (cellH*3).
+extern SDL_Surface *BuildHDHudF5Strip(int cellW, int cellH);
+
+/// Build a single HUD header button frame from `Data/skins/Modern_HUD_Widgets.json`.
+/// @param race "Human" or "Orc"
+/// @param pressed false = normal (hud_{race}_small), true = active (hud_{race}_small_active)
+/// Surface = cellW x cellH.
+extern SDL_Surface *BuildHDHudSmallButton(const char *race, bool pressed, int cellW, int cellH);
+
 //@}
 
 #endif // !__HD_SYNTH_GRAPHICS_H__

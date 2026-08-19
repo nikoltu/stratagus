@@ -804,7 +804,20 @@ bool CanAccessFile(const char *filename)
 {
 	if (filename && filename[0] != '\0') {
 		const auto path = LibraryFileNameImpl(filename);
-		return fs::exists(path);
+		if (fs::exists(path)) {
+			return true;
+		}
+		// Engine-synthesized graphics (hd_synth_graphics.cpp) can provide surfaces
+		// even when no baked PNG exists on disk. Let these through so the Lua filler
+		// setup reaches CGraphic::Load() where the synthesis intercept runs.
+		const std::string base = path.filename().string();
+		if (base == "icons_hd.png" || base == "hd_cmd_frame.png"
+			|| base == "hud_TopLeft.png" || base == "hud_TileableLeft.png"
+			|| base == "f5_menu.png"
+			|| base == "hud_btn_small.png" || base == "hud_btn_small_pressed.png") {
+			return true;
+		}
+		return false;
 	}
 	return false;
 }
