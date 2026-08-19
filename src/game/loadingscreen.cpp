@@ -152,8 +152,9 @@ void ShowLoadingScreen()
 		LoadingAnimation->Load();
 
 		// Size one frame to ~22% of the screen height, keeping the atlas aspect, then place it
-		// centre-bottom (the Remastered anchor is unresolved without an original-client capture;
-		// centre-bottom is the nearest-sensible default).
+		// in the BOTTOM-RIGHT corner: the Remastered client anchors the working peasant/peon
+		// there (owner-observed reference), not centre-bottom. The corner inset reuses the
+		// bottom margin on both axes; no original layout rect is available for the exact inset.
 		const int targetFrameH = (int)std::lround(Video.Height * 0.22);
 		AnimScale = (AnimNativeH > 0) ? ((double)targetFrameH / (double)AnimNativeH) : 1.0;
 		const int atlasW = LoadingAnimation->Width;
@@ -164,7 +165,10 @@ void ShowLoadingScreen()
 		}
 		const int frameW = (int)std::lround(AnimNativeW * AnimScale);
 		const int bottomMargin = (int)std::lround(Video.Height * 0.06);
-		AnimOriginX = (Video.Width - frameW) / 2;
+		AnimOriginX = Video.Width - frameW - bottomMargin;
+		if (AnimOriginX < 0) {
+			AnimOriginX = 0;
+		}
 		AnimOriginY = Video.Height - targetFrameH - bottomMargin;
 		if (AnimOriginY < 0) {
 			AnimOriginY = 0;

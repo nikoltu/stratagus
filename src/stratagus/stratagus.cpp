@@ -193,6 +193,7 @@ extern void beos_init(int argc, char **argv);
 #include "game.h"
 #include "interface.h"
 #include "iolib.h"
+#include "loadingscreen.h"
 #include "map.h"
 #include "netconnect.h"
 #include "network.h"
@@ -311,9 +312,12 @@ static int MenuLoop()
 
 	initGuichan();
 	InterfaceState = IfaceState::Menu;
-	//  Clear screen
-	Video.ClearScreen();
-	Invalidate();
+	// Clear screen — unless the boot loading screen is up (B6-1): wiping it here would
+	// leave black for the whole guichan.lua menu build.
+	if (!IsLoadingScreenActive()) {
+		Video.ClearScreen();
+		Invalidate();
+	}
 
 	ButtonUnderCursor = -1;
 	OldButtonUnderCursor = -1;
@@ -859,12 +863,19 @@ try {
 	// memset(Players, 0, sizeof(Players));
 	NumPlayers = 0;
 
+	// B6-1: the Remastered loading screen also precedes the MAIN MENU, not only missions.
+	// Cover the menu asset warm-up (PreMenuSetup + first-menu build) with it; video is live
+	// here, so this is the earliest point it can be painted (InitVideo runs after LoadCcl).
+	ShowLoadingScreen();
+
 	UnitManager->Init(); // Units memory management
 	PreMenuSetup();     // Load everything needed for menus
 
 	// Start the observe-only debug bridge (wdbg/ command channel + crash catcher).
 	DebugBridge_Init();
 
+	// The boot loading screen stays active through MenuLoop's guichan.lua build; the first
+	// MenuScreen::run hides it (widgets.cpp), which also re-arms it for mission loads.
 	MenuLoop();
 
 	Exit(0);

@@ -43,6 +43,7 @@
 #include "network.h"
 #include "netconnect.h"
 #include "editor.h"
+#include "loadingscreen.h"
 #include "sound.h"
 #include "util.h"
 
@@ -2740,6 +2741,11 @@ MenuScreen::MenuScreen() : Container(), runLoop(true)
 */
 int MenuScreen::run(bool loop)
 {
+	// B6-1: the boot loading screen stays up through the guichan.lua menu build; the first
+	// real menu taking over the frame is the point where it must go away (also re-arms
+	// ShowLoadingScreen for the next mission load).
+	HideLoadingScreen();
+
 	this->loopResult = 0;
 	this->runLoop = loop;
 
