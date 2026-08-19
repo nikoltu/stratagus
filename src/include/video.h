@@ -367,7 +367,10 @@ public:
 	// teamMask: the source is an 8-bit luminance team-colour mask (units_*_masks). Its luminance is
 	// remapped to ALPHA with RGB forced white, so a colour-mod tint paints team colour where the mask
 	// is bright and stays transparent where it is black (instead of an opaque box over the unit).
-	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false);
+	// fogMask: the source is a fog-of-war mask atlas (bgs_Fow: all-black palette, tRNS per-index
+	// alpha). Index-0 colour-keying is skipped so the authored alpha survives the RGBA conversion,
+	// and the pages are bilinear-filtered so mask gradients stay smooth when scaled to tile size.
+	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false, bool fogMask = false);
 	bool IsLoaded() const { return !pages.empty(); }
 
 	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.
@@ -396,6 +399,7 @@ public:
 	// the exact destination tile rect. Terrain frames are untrimmed (offx/offy==0, cw/ch==sw/sh)
 	// so the trimmed src rect is the full frame. No-op if not loaded or frame/page out of range.
 	void DrawAtlasFrameFull(int frame, const SDL_Rect &dst) const;
+	void DrawAtlasFrameFullAlpha(int frame, const SDL_Rect &dst, uint8_t alpha) const;
 
 private:
 	uint32_t cap = 0;

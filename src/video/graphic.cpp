@@ -698,7 +698,7 @@ bool CAtlasGraphic::Load(const std::string &path)
 // directly, with NO offline .hdatlas conversion step. Builds the same frames/pages/byHash model as
 // Load() so every draw method + FrameByName work unchanged. Frame keys keep their full TexturePacker
 // name (e.g. "Forest/forest_0"). Single page (meta.image). Returns false on any failure.
-bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask)
+bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask, bool fogMask)
 {
 	if (!pages.empty()) {
 		return true; // already loaded; single-shot
@@ -759,7 +759,7 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		// and colour-key-blit onto a transparent RGBA32 target so keyed pixels become alpha 0.
 		if (!surface->format || surface->format->BytesPerPixel != 4) {
 			const bool paletted = surface->format && surface->format->BytesPerPixel == 1;
-			if (paletted) {
+			if (paletted && !fogMask) {
 				SDL_SetColorKey(surface, SDL_TRUE, 0);
 			}
 			SDL_Surface *conv =
@@ -791,6 +791,10 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 				}
 			}
 			SDL_UnlockSurface(surface);
+		} else if (fogMask) {
+			// bgs_Fow.png: palette is all-black, tRNS chunk carries per-index alpha (0-254).
+			// After palette→RGBA32 conversion above, pixels are already (0,0,0,alpha) —
+			// exactly the fog mask we need. No luminance conversion required.
 		}
 		// D0: defer the GPU upload. An atlas page can exceed GL_MAX_TEXTURE_SIZE (baseline phones cap at
 		// 4096, but native unit atlases reach ~8000px) -> a single-texture upload would fail and drop the
@@ -929,6 +933,15 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		pages.clear();
 		return false;
 	}
+	if (fogMask) {
+		// EM1: the 216x216 bgs_Fow masks are drawn scaled DOWN to the ~66px tile screen rect; the
+		// default nearest filtering quantizes their smooth alpha gradients into hard tile-edge
+		// staircases ("two masks" artifact). Filter the fog pages bilinearly so the authored
+		// feathered edges survive the downscale. Fog-only: sprite/terrain pages stay nearest.
+		for (SDL_Texture *tex : pages) {
+			if (tex) { SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear); }
+		}
+	}
 	return true;
 }
 
@@ -1017,6 +1030,22 @@ void CAtlasGraphic::DrawAtlasFrameFull(int frame, const SDL_Rect &dst) const
 	}
 	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
 	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
+}
+
+void CAtlasGraphic::DrawAtlasFrameFullAlpha(int frame, const SDL_Rect &dst, uint8_t alpha) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	SDL_SetTextureAlphaMod(pages[rec.page], alpha);
+	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
+	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
+	SDL_SetTextureAlphaMod(pages[rec.page], 255);
 }
 
 /**
@@ -1877,6 +1906,20 @@ void CGraphic::Load(bool grayscale)
 			mSurface = BuildHDIconStrip();
 		} else if (base == "hd_cmd_frame.png") {
 			mSurface = BuildHDCommandFrameStrip();
+		} else if (base == "hud_TopLeft.png" || base == "hud_TileableLeft.png") {
+			const std::string path = File.string();
+			const char *race = (path.find("/orc/") != std::string::npos
+			                    || path.find("\\orc\\") != std::string::npos) ? "Orc" : "Human";
+			const char *frame = (base == "hud_TopLeft.png") ? "TopLeft" : "TileableLeft";
+			mSurface = BuildHDSidebarPanel(race, frame);
+		} else if (base == "f5_menu.png") {
+			mSurface = BuildHDHudF5Strip(Width ? Width : 200, Height ? Height : 100);
+		} else if (base == "hud_btn_small.png" || base == "hud_btn_small_pressed.png") {
+			const std::string path = File.string();
+			const char *race = (path.find("/orc/") != std::string::npos
+			                    || path.find("\\orc\\") != std::string::npos) ? "Orc" : "Human";
+			const bool pressed = (base == "hud_btn_small_pressed.png");
+			mSurface = BuildHDHudSmallButton(race, pressed, Width ? Width : 400, Height ? Height : 100);
 		}
 	}
 
