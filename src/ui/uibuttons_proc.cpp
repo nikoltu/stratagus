@@ -58,7 +58,7 @@
 **  @param text   text to print on button
 */
 void DrawUIButton(ButtonStyle *style, unsigned flags, int x, int y,
-				  std::string_view text, int player)
+				  std::string_view text, bool scaleSpriteToStyle, int player)
 {
 	ButtonStyleProperties *p;
 
@@ -88,10 +88,24 @@ void DrawUIButton(ButtonStyle *style, unsigned flags, int x, int y,
 	if (pimage->Sprite) {
 		auto colorGraphic = std::dynamic_pointer_cast<CPlayerColorGraphic>(pimage->Sprite);
 
-		if (colorGraphic && player != -1) {
-			colorGraphic->DrawPlayerColorFrameClip(player, pimage->Frame, x, y);
+		// NG3/NG25: the frame around this cell is drawn nine-sliced to style->Width/Height, but the
+		// icon itself was blitted at the graphic's NATIVE size -- DrawPlayerColorFrameClip/DrawFrame
+		// take only (frame, x, y). The comment at icons.cpp:307 already claimed the icon was
+		// "likewise stretched"; it never was. Give it the real destination rect, but ONLY when the
+		// caller is an icon context: the menu/dialog styles deliberately pair a 300x144 sprite with
+		// a 128x20 style, and stretching those would squash them.
+		const bool scaled = scaleSpriteToStyle && style->Width > 0 && style->Height > 0;
+		if (!scaled) {
+			if (colorGraphic && player != -1) {
+				colorGraphic->DrawPlayerColorFrameClip(player, pimage->Frame, x, y);
+			} else {
+				pimage->Sprite->DrawFrame(pimage->Frame, x, y);
+			}
+		} else if (colorGraphic && player != -1) {
+			colorGraphic->DrawPlayerColorFrameClipScaled(player, pimage->Frame, x, y,
+			                                             style->Width, style->Height);
 		} else {
-			pimage->Sprite->DrawFrame(pimage->Frame, x, y);
+			pimage->Sprite->DrawFrameClipScaled(pimage->Frame, x, y, style->Width, style->Height);
 		}
 	}
 

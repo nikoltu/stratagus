@@ -48,8 +48,12 @@ class ButtonStyle;
 ----------------------------------------------------------------------------*/
 
 /// Draw menu button
+// NG3/NG25: scaleSpriteToStyle stretches the button's SPRITE to style->Width/Height. Only the icon
+// path passes true -- menu/dialog styles deliberately use a sprite of a different size than the style
+// (main menu: sprite 300x144 vs Size 128x20), so stretching those would squash them.
 extern void DrawUIButton(ButtonStyle *style, unsigned flags,
-						 int x, int y, std::string_view text, int player = -1);
+						 int x, int y, std::string_view text,
+						 bool scaleSpriteToStyle = false, int player = -1);
 
 /// Pre menu setup
 extern void PreMenuSetup();

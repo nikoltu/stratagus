@@ -150,7 +150,11 @@ void DrawUserDefinedButtons()
 **  @param x     Screen X position of icon
 **  @param y     Screen Y position of icon
 */
-static void UiDrawLifeBar(const CUnit &unit, int x, int y)
+// NG26: cellW/cellH are the button style's on-screen size -- the rect the portrait was actually
+// drawn into. The bar used to size and offset itself from Icon.Icon->G->Width/Height (the icon
+// graphic's NATIVE size), so once the portrait is drawn scaled to its cell the bar no longer matched
+// it: narrower than the portrait and vertically offset. Pass 0/0 to keep the old native behaviour.
+static void UiDrawLifeBar(const CUnit &unit, int x, int y, int cellW = 0, int cellH = 0)
 {
 	// FIXME: add icon borders
 	int hBar, hAll;
@@ -164,11 +168,11 @@ static void UiDrawLifeBar(const CUnit &unit, int x, int y)
 		hBar = 5;
 		hAll = 7;
 	}
-	y += unit.Type->Icon.Icon->G->Height;
+	y += (cellH > 0) ? cellH : unit.Type->Icon.Icon->G->Height;
 	y += UI.LifeBarYOffset;
+	const int barW = (cellW > 0) ? cellW : unit.Type->Icon.Icon->G->Width;
 	if (UI.LifeBarBorder) {
-		Video.FillRectangleClip(ColorBlack, x - 4, y + 2,
-								unit.Type->Icon.Icon->G->Width + 8, hAll);
+		Video.FillRectangleClip(ColorBlack, x - 4, y + 2, barW + 8, hAll);
 	}
 
 	if (unit.Variable[HP_INDEX].Value) {
@@ -182,7 +186,7 @@ static void UiDrawLifeBar(const CUnit &unit, int x, int y)
 		}
 		color = UI.LifeBarColorsInt[i];
 
-		f = (f * (unit.Type->Icon.Icon->G->Width + 6)) / 100;
+		f = (f * (barW + 6)) / 100;
 		Video.FillRectangleClip(color, x - 2 + UI.LifeBarPadding, y + 4 + UI.LifeBarPadding,
 			std::max(f - 2 - UI.LifeBarPadding * 2, 0), hBar - UI.LifeBarPadding);
 	}
@@ -515,7 +519,9 @@ static void DrawUnitInfo_transporter(const CUnit &unit)
 		icon.DrawContainedIcon(*UI.TransportingButtons[j].Style, flag, posIcon, "", *uins);
 		int lastOccupiedButton = j + uins->Type->BoardSize - 1;
 		const PixelPos pos = PixelPos(UI.TransportingButtons[lastOccupiedButton].X, UI.TransportingButtons[lastOccupiedButton].Y);
-		UiDrawLifeBar(*uins, pos.x, pos.y);
+		UiDrawLifeBar(*uins, pos.x, pos.y,
+					  UI.TransportingButtons[lastOccupiedButton].Style->Width,
+					  UI.TransportingButtons[lastOccupiedButton].Style->Height);
 		if (!uins->Type->CanCastSpell.empty() && uins->Variable[MANA_INDEX].Max) {
 			UiDrawManaBar(*uins, pos.x, pos.y);
 		}
@@ -1205,7 +1211,8 @@ static void InfoPanel_draw_multiple_selection()
 						  (ButtonAreaUnderCursor == ButtonArea::Selected && ButtonUnderCursor == (int)i) ?
 						  (IconActive | (MouseButtons & LeftButton)) : 0,
 						  pos, "", *Selected[i]);
-		UiDrawLifeBar(*Selected[i], UI.SelectedButtons[i].X, UI.SelectedButtons[i].Y);
+		UiDrawLifeBar(*Selected[i], UI.SelectedButtons[i].X, UI.SelectedButtons[i].Y,
+					  UI.SelectedButtons[i].Style->Width, UI.SelectedButtons[i].Style->Height);
 
 		if (ButtonAreaUnderCursor == ButtonArea::Selected && ButtonUnderCursor == (int) i) {
 			UI.StatusLine.Set(Selected[i]->Type->Name);

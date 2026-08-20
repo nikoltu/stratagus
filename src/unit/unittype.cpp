@@ -887,6 +887,43 @@ static std::shared_ptr<CAtlasGraphic> GetSharedNativeAtlas(const std::string &st
 	return atlas;
 }
 
+// NG15/NG22: resolve the HD atlas+prefix for an ARBITRARY sprite path. The per-type cache below is
+// keyed on type.File, which is correct for the unit's own sprite but wrong for the CARRY sprites: a
+// loaded worker is drawn from resinfo->SpriteWhenLoaded (peasant_with_gold.png / _with_wood.png),
+// and those have their own roster entries (peong / peonl). Without this the HD branch always drew
+// the empty-handed prefix, so gold and lumber frames were never selected.
+// Results are cached per path; peon/peong/peonl each have 65 contiguous frames, so the absolute
+// frame index maps 1:1 between them and no index translation is needed.
+static bool ResolveHDForFile(const std::string &file,
+                             std::shared_ptr<CAtlasGraphic> &outSprite,
+                             std::string &outPrefix)
+{
+	static std::map<std::string, std::pair<std::shared_ptr<CAtlasGraphic>, std::string>> cache;
+	if (file.size() < 4 || file.compare(file.size() - 4, 4, ".png") != 0) {
+		return false;
+	}
+	std::string key = file;
+	for (char &c : key) { c = (char) std::tolower((unsigned char) c); }
+	auto cit = cache.find(key);
+	if (cit != cache.end()) {
+		outSprite = cit->second.first;
+		outPrefix = cit->second.second;
+		return outSprite && outSprite->IsLoaded();
+	}
+	LoadHDUnitMap();
+	std::shared_ptr<CAtlasGraphic> sprites;
+	std::string prefix;
+	auto mit = g_hdUnitMap.find(key);
+	if (mit != g_hdUnitMap.end()) {
+		sprites = GetSharedNativeAtlas(mit->second.atlas + "_sprites");
+		prefix = mit->second.prefix;
+	}
+	cache[key] = {sprites, prefix};
+	outSprite = sprites;
+	outPrefix = prefix;
+	return sprites && sprites->IsLoaded();
+}
+
 static void EnsureHDUnitSprite(const CUnitType &type)
 {
 	if (type.HDSpriteTried) {
@@ -960,17 +997,29 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 	// below. Only the pixel blit changes here; the frame index, centring and screenPos are the same
 	// values the classic path uses.
 	EnsureHDUnitSprite(type);
-	if (type.HDSprite && type.HDSprite->IsLoaded()) {
+	// NG15/NG22: the caller may hand us a DIFFERENT sprite than the type's own (the resource-carry
+	// swap in CUnit::Draw). Prefer that sprite's own HD entry so peong/peonl are actually used.
+	std::shared_ptr<CAtlasGraphic> hdSprite = type.HDSprite;
+	std::string hdPrefix = type.HDSpritePrefix;
+	if (sprite && !sprite->File.empty() && sprite->File != type.File) {
+		std::shared_ptr<CAtlasGraphic> carry;
+		std::string carryPrefix;
+		if (ResolveHDForFile(sprite->File, carry, carryPrefix)) {
+			hdSprite = carry;
+			hdPrefix = carryPrefix;
+		}
+	}
+	if (hdSprite && hdSprite->IsLoaded()) {
 		// Engine frame -> atlas frame is by numeric name; the atlas stores the absolute (unmirrored)
 		// frame, mirroring is applied at draw time via the flip variant (matching the classic path,
 		// which flips when type.Flip && frame < 0).
 		const int absFrame = (frame < 0) ? (-frame - 1) : frame;
 		// Native Remastered atlas frames are named "<prefix>_<N>" (e.g. "grunt_0"); the legacy .hdatlas
 		// path uses bare numeric names. Build the right key from HDSpritePrefix.
-		const std::string frameName = type.HDSpritePrefix.empty()
+		const std::string frameName = hdPrefix.empty()
 		                                  ? std::to_string(absFrame)
-		                                  : type.HDSpritePrefix + "_" + std::to_string(absFrame);
-		const int f = type.HDSprite->FrameByName(frameName.c_str());
+		                                  : hdPrefix + "_" + std::to_string(absFrame);
+		const int f = hdSprite->FrameByName(frameName.c_str());
 		if (f >= 0) {
 			const bool flip = (frame < 0) && type.Flip;
 			// Footprint mapping (the crux): the atlas canvas cw/ch is the RAW HD sourceSize (the
@@ -984,14 +1033,14 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 			const float z = GpuWorldDrawZoom;
 			const int dw = (z == 1.0f) ? type.Width  : (int) std::lround(type.Width  * z);
 			const int dh = (z == 1.0f) ? type.Height : (int) std::lround(type.Height * z);
-			type.HDSprite->DrawAtlasFrameClipScaled(f, pos.x, pos.y, dw, dh, flip);
+			hdSprite->DrawAtlasFrameClipScaled(f, pos.x, pos.y, dw, dh, flip);
 			// Team-colour overlay: tint the `_team` mask to the player's canonical ramp colour
 			// (ramp[0], matching CPlayerColorGraphic::DrawPlayerColorFrameClipTex) and draw it over
 			// the base into the same footprint rect. Sparse: a building without team colour has no mask.
 			if (type.HDSpriteTeam && type.HDSpriteTeam->IsLoaded()) {
-				const std::string teamName = type.HDSpritePrefix.empty()
+				const std::string teamName = hdPrefix.empty()
 				                                 ? std::to_string(absFrame)
-				                                 : type.HDSpritePrefix + "_" + std::to_string(absFrame) + "_team";
+				                                 : hdPrefix + "_" + std::to_string(absFrame) + "_team";
 				const int tf = type.HDSpriteTeam->FrameByName(teamName.c_str());
 				if (tf >= 0) {
 					Uint8 r = 255, g = 255, b = 255;

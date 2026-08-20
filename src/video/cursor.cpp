@@ -36,6 +36,8 @@
 
 #include "stratagus.h"
 
+#include <cmath>
+
 #include "cursor.h"
 #include "intern_video.h"
 
@@ -246,12 +248,16 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 #endif
 	PushClipping();
 	vp.SetClipping();
-	DrawShadow(*CursorBuilding, CursorBuilding->StillFrame, screenPos);
+	// NG20: the HD draw path anchors a sprite on its CENTRE, but this passed the tile TOP-LEFT,
+	// so the ghost was offset (and invisible entirely when the classic sprite is absent, as it is
+	// for the winter buildings) -- leaving only the tint squares the owner reported.
+	const PixelPos ghostAnchor = screenPos + CursorBuilding->GetPixelSize() / 2;
+	DrawShadow(*CursorBuilding, CursorBuilding->StillFrame, ghostAnchor);
 	DrawUnitType(*CursorBuilding,
 	             CursorBuilding->Sprite.get(),
 	             GameSettings.Presets[ThisPlayer->Index].PlayerColor,
 	             CursorBuilding->StillFrame,
-	             screenPos);
+	             ghostAnchor);
 	if (CursorBuilding->CanAttack && CursorBuilding->Stats->Variables[ATTACKRANGE_INDEX].Value > 0) {
 		const PixelPos center(screenPos + CursorBuilding->GetPixelSize() / 2);
 		const int radius = (CursorBuilding->Stats->Variables[ATTACKRANGE_INDEX].Max + (CursorBuilding->TileWidth - 1)) * PixelTileSize.x + 1;
@@ -278,6 +284,8 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 	}
 
 	const int mask = CursorBuilding->MovementMask;
+	const int tileW = (int) std::lround(PixelTileSize.x * vp.Zoom);
+	const int tileH = (int) std::lround(PixelTileSize.y * vp.Zoom);
 	int h = CursorBuilding->TileHeight;
 	// reduce to view limits
 	h = std::min(h, vp.MapPos.y + vp.MapHeight - mpos.y);
@@ -299,8 +307,11 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 			} else {
 				color = ColorRed;
 			}
-			Video.FillTransRectangleClip(color, screenPos.x + w * PixelTileSize.x,
-										 screenPos.y + h * PixelTileSize.y, PixelTileSize.x, PixelTileSize.y, 95);
+			// NG20: step and size by the ZOOMED tile. PixelTileSize is the unzoomed tile, so at any
+			// zoom != 1 the tint squares drifted out of step with the tiles they mark -- wrong pitch
+			// and wrong size, which is the "neatitinka remastered scale" half of the report.
+			Video.FillTransRectangleClip(color, screenPos.x + w * tileW,
+										 screenPos.y + h * tileH, tileW, tileH, 95);
 		}
 	}
 	PopClipping();

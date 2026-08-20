@@ -2497,6 +2497,11 @@ void ImageDropDownWidget::draw(gcn::Graphics *graphics) /* override */
 	img->SetOriginalSize();
 
 	graphics->setFont(getFont());
+	// NG33: the closed field never set a colour, so the value was drawn in whatever colour the
+	// previous widget happened to leave on the graphics object -- on the parchment screens that is
+	// the dark label ink, measured as rgb(86,40,32) against the original client's pure white.
+	// The open list already does this correctly (ImageListBox::draw), so only the field was wrong.
+	graphics->setColor(getForegroundColor());
 
 	if (mListBox->getListModel() && mListBox->getSelected() >= 0)
 	{

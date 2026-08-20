@@ -227,7 +227,7 @@ static void DrawByHealthIcon(const CIcon *icon,
 		ApplyPaletteSwaps(swaps, unit, g.get());
 		s.Default.Sprite = s.Hover.Sprite = s.Clicked.Sprite = g;
 		s.Default.Frame = s.Hover.Frame = s.Clicked.Frame = icon->Frame;
-		DrawUIButton(&s, flags, pos.x, pos.y, text, playerColor);
+		DrawUIButton(&s, flags, pos.x, pos.y, text, /*scaleSpriteToStyle=*/true, playerColor);
 	}
 }
 
@@ -349,7 +349,7 @@ void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 			int yoffset = (s.Height - Preference.PressedIconFrameG->Height) / 2 + shift;
 			Preference.PressedIconFrameG->DrawClip(pos.x + xoffset, pos.y + yoffset);
 		}
-		DrawUIButton(&s, flags, pos.x + shift, pos.y + shift, text, player);
+		DrawUIButton(&s, flags, pos.x + shift, pos.y + shift, text, /*scaleSpriteToStyle=*/true, player);
 		if (flags & IconSelected) {
 			Video.DrawRectangle(ColorGreen, pos.x + shift, pos.y + shift, s.Width, s.Height);
 		}
@@ -371,11 +371,11 @@ void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 
 		if (flags & IconActive) { // Code to make a border appear around the icon when the mouse hovers over it.
 			Video.DrawRectangle(ColorGray, pos.x - 4, pos.y - 4, 54, 46);
-			DrawUIButton(&s, flags, pos.x, pos.y, text, player);
+			DrawUIButton(&s, flags, pos.x, pos.y, text, /*scaleSpriteToStyle=*/true, player);
 		}
 
 		if (flags & IconClicked) { // Shift the icon a bit to make it look like it's been pressed.
-			DrawUIButton(&s, flags, pos.x + 1, pos.y + 1, text, player);
+			DrawUIButton(&s, flags, pos.x + 1, pos.y + 1, text, /*scaleSpriteToStyle=*/true, player);
 			if (flags & IconSelected) {
 				Video.DrawRectangle(ColorGreen, pos.x + 1, pos.y + 1, 46, 38);
 			}
@@ -386,13 +386,13 @@ void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 
 			Video.DrawRectangle(ColorGray, pos.x - 4, pos.y - 4, 54, 46);
 		} else {
-			DrawUIButton(&s, flags, pos.x, pos.y, text, player);
+			DrawUIButton(&s, flags, pos.x, pos.y, text, /*scaleSpriteToStyle=*/true, player);
 			if (flags & IconSelected) {
 				Video.DrawRectangle(ColorGreen, pos.x, pos.y, 46, 38);
 			}
 		}
 	} else {
-		DrawUIButton(&s, flags, pos.x, pos.y, text, player);
+		DrawUIButton(&s, flags, pos.x, pos.y, text, /*scaleSpriteToStyle=*/true, player);
 	}
 }
 
