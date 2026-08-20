@@ -906,6 +906,36 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 							 const CUnitType &type, int frame, const PixelPos &screenPos)
 {
 	PixelPos pos = screenPos;
+
+	// NG21: draw the construction from the native HD art. Without this the whole construction stage
+	// was invisible: the classic land_construction_site.png is not in the HD deploy, so both branches
+	// below hit their "not resident" guards and returned without drawing anything.
+	// Stage mapping is the Remastered's own (constructions.lua construction-land): 0% and 25% use the
+	// two scaffold poses, and from 50% the building's OWN art takes over -- so only the Construction
+	// branch is a scaffold; the Main branch is the finished building's frame.
+	{
+		const int dw = (int) std::lround(type.TileWidth * PixelTileSize.x * GpuWorldDrawZoom);
+		const int dh = (int) std::lround(type.TileHeight * PixelTileSize.y * GpuWorldDrawZoom);
+		const PixelPos topLeft(screenPos.x - dw / 2, screenPos.y - dh / 2);
+		if (cframe.File == ConstructionFileType::Construction) {
+			std::string prefix;
+			std::shared_ptr<CAtlasGraphic> atlas = GetHDConstructionAtlas(type, prefix);
+			if (atlas && atlas->IsLoaded()) {
+				const int absFrame = (frame < 0) ? (-frame - 1) : frame;
+				const int f = atlas->FrameByName((prefix + "_" + std::to_string(absFrame)).c_str());
+				if (f >= 0) {
+					atlas->DrawAtlasFrameClipScaled(f, topLeft.x, topLeft.y, dw, dh,
+													(frame < 0) && type.Flip);
+					return;
+				}
+			}
+		} else {
+			// Main stage: hand it to the normal unit draw so it takes the building's HD path.
+			DrawUnitType(type, type.Sprite.get(), player, frame, topLeft);
+			return;
+		}
+	}
+
 	if (cframe.File == ConstructionFileType::Construction) {
 		if (!type.Construction) {
 			return; // NG9: null-guard -- a construction frame with no CConstruction crashed on deref

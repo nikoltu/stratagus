@@ -855,6 +855,11 @@ extern void SaveUnitTypes(CFile &file);              /// Save the unit-type tabl
 extern std::pair<CUnitType *, bool /*redefined*/>
 NewUnitTypeSlot(std::string_view ident); /// Allocate an empty unit-type slot
 /// Draw the sprite frame of unit-type
+// NG21: HD construction scaffold atlas for a building (see the definition for why the biome comes
+// from the building's own roster entry). Returns null when the building has no HD entry.
+extern std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building,
+														  std::string &outPrefix);
+
 extern void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite,
 						 int colorIndex, int frame, const PixelPos &screenPos);
 

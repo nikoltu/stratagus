@@ -974,6 +974,34 @@ static void EnsureHDUnitSprite(const CUnitType &type)
 	}
 }
 
+// NG21: resolve the HD construction-scaffold atlas for a building. The scaffold frames live in the
+// per-biome COMMON atlas (build_1_0/1, or s_build1_0/1 in winter), but the biome cannot be derived
+// from the construction file: summer, swamp and wasteland all share
+// neutral/buildings/land_construction_site.png and only winter differs. It also cannot be derived by
+// reading the biome out of the path, because the roster's biome tokens are transposed
+// (tilesets/swamp -> units_*_xswamp, tilesets/wasteland -> units_*_swamp). So take the BUILDING's own
+// resolved atlas (units_<race>_<biome>) and swap the race token for "common" -- that carries the
+// transposition across for free.
+std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building, std::string &outPrefix)
+{
+	LoadHDUnitMap();
+	std::string key = building.File;
+	for (char &c : key) { c = (char) std::tolower((unsigned char) c); }
+	auto it = g_hdUnitMap.find(key);
+	if (it == g_hdUnitMap.end()) {
+		return nullptr;
+	}
+	const std::string &atlas = it->second.atlas;          // units_<race>_<biome>
+	const size_t a = atlas.find('_');
+	const size_t b = (a == std::string::npos) ? std::string::npos : atlas.find('_', a + 1);
+	if (b == std::string::npos) {
+		return nullptr;
+	}
+	const std::string biome = atlas.substr(b + 1);
+	outPrefix = (biome == "winter") ? "s_build1" : "build_1";
+	return GetSharedNativeAtlas("units_common_" + biome + "_sprites");
+}
+
 void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorIndex, int frame, const PixelPos &screenPos)
 {
 	PixelPos pos = screenPos;
