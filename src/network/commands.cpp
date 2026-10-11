@@ -473,6 +473,7 @@ void SendCommandSpellCast(CUnit &unit, const Vec2i &pos, CUnit *dest, int spelli
 		CommandLog("spell-cast", &unit, flush, pos.x, pos.y, dest, nullptr, spellid);
 		CommandSpellCast(unit, pos, dest, *SpellTypeTable[spellid], flush);
 	} else {
+		Assert(IsNetworkSpellId(spellid));
 		NetworkSendCommand(MessageCommandSpellCast + spellid,
 						   unit, pos.x, pos.y, dest, nullptr, flush);
 	}
@@ -491,6 +492,7 @@ void SendCommandAutoSpellCast(CUnit &unit, int spellid, int on)
 		CommandLog("auto-spell-cast", &unit, EFlushMode::On, on, -1, nullptr, nullptr, spellid);
 		CommandAutoSpellCast(unit, spellid, on);
 	} else {
+		Assert(IsNetworkSpellId(spellid));
 		NetworkSendCommand(MessageCommandSpellCast + spellid,
 						   unit, on, -1, nullptr, nullptr, EFlushMode::On);
 	}
@@ -842,6 +844,10 @@ void ExecExtendedCommand(unsigned char type, int status,
 				UpdateFogOfWarChange();
 			}
 			/// CommandLog(...);
+			break;
+		case ExtendedMessagePause:
+			/// arg2: the player who paused. Not logged: a replay does not stop by itself.
+			NetworkExecPause(arg2);
 			break;
 		default:
 			DebugPrint("Unknown extended message %u/%s %u %u %u %u\n",

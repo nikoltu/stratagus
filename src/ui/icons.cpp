@@ -45,6 +45,7 @@
 #include "unit.h"
 #include "video.h"
 
+#include <cmath>
 #include <map>
 #include <memory>
 
@@ -231,9 +232,48 @@ static void DrawByHealthIcon(const CIcon *icon,
 	}
 }
 
+/**
+**  IG-T8 "Portrait Icon Style" (option_portrait_style_title: Scaled / Cropped). MEASURED in the
+**  running original client on the selected unit's info-panel icon, at TWO different UI scales so the
+**  rule could be told apart from the scale:
+**
+**    UI Scale Automatic:  Cropped 50 px wide, Scaled 36  -> 0.720
+**    UI Scale Classic:    Cropped 80 x 65.5,  Scaled 57 x 47.5 -> 0.7125 wide, 0.725 tall
+**
+**  In both modes the icon keeps the SAME top-left origin, the SAME aspect, and shows the SAME region
+**  of the art (compared at 4x zoom): "Scaled" is the whole icon -- frame, art and the bar under it --
+**  drawn uniformly smaller. So the port reproduces the measured observable: one uniform factor.
+**
+**  LABEL: STRONGLY SUPPORTED, not VERIFIED. Two UI scales agree to within 1%, but WHY the original
+**  lands on ~0.72 is not established (it is not fit-vs-fill of this art in this cell -- the art's own
+**  aspect is 207:171 = 1.2105 in Art/hd/HUD/Portrait-face.json, the same 46:38 as the classic sheet,
+**  and both modes render at that aspect). Confirmation still owed: a third measurement at UI Scale
+**  "Fixed" with the slider moved.
+**  SCOPE, disclosed: applied to the info-panel selected-unit icon only. Whether the original's
+**  setting also resizes the command-panel cells is NOT established -- the captures were taken with an
+**  empty command panel -- so those are left alone rather than guessed at.
+*/
+bool PortraitIconScaled = false;
+static constexpr double PORTRAIT_SCALED_FACTOR = 0.72;
+
+/// NG64: the factor currently in force (1 when Cropped), so Lua can size the portrait's health bar
+/// from the same constant instead of carrying its own copy.
+double GetPortraitIconScaleFactor()
+{
+	return PortraitIconScaled ? PORTRAIT_SCALED_FACTOR : 1.0;
+}
+
 void CIcon::DrawSingleSelectionIcon(const ButtonStyle &style, unsigned flags,
 						 const PixelPos &pos, const std::string &text, const CUnit &unit) const
 {
+	if (PortraitIconScaled && style.Width > 0 && style.Height > 0) {
+		ButtonStyle small(style);
+		small.Width = static_cast<int>(style.Width * PORTRAIT_SCALED_FACTOR + 0.5);
+		small.Height = static_cast<int>(style.Height * PORTRAIT_SCALED_FACTOR + 0.5);
+		DrawByHealthIcon(this, this->SingleSelectionG, small, flags, pos, text, unit,
+		                 this->PaletteSwaps);
+		return;
+	}
 	DrawByHealthIcon(this, this->SingleSelectionG, style, flags, pos, text, unit, this->PaletteSwaps);
 }
 
@@ -286,17 +326,33 @@ void CIcon::SetPaletteSwaps(std::vector<PaletteSwap> &newSwaps)
 **  to a placeholder (NumFrames != FRAME_STATES); we then draw nothing so classic installs are
 **  untouched. Frame order: 0 default,1 hovered,2 active,3 highlight,4 highlight_hovered,5 highlight_active.
 */
-static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos, int w, int h)
+/// PANEL-A: the cell is 44 base units high (132 px at k = 3, captures e01, u03) and its picture
+/// 46 units wide (138 px). A cell of the 4-column selection grid is 38 units wide and as high
+/// as the others (114 x 132 px, capture u11): its unit is read from the height.
+static constexpr int HD_CELL_UNITS_H = 44;
+static constexpr int HD_PICTURE_UNITS_W = 46;
+
+/// px of one base unit (of the 640x480 layout) in a cell `w` x `h` px: the cell is 52 x 44
+/// units, or narrower and 44 units high.
+static double HDCellUnit(int w, int h)
+{
+	const double uw = w / (double) hdicon::CELL_UNITS_W;
+	const double uh = h / (double) HD_CELL_UNITS_H;
+	return (h > 0 && uh > uw) ? uh : uw;
+}
+
+/// @return true when the frame was drawn (the picture then goes inside it, see DrawUnitIcon)
+static bool DrawHDCommandFrame(unsigned flags, const PixelPos &pos, int w, int h)
 {
 	static int state = 0;   // 0 = untried, 1 = active, -1 = disabled
 	static std::shared_ptr<CGraphic> frameG;
 	if (state == 0) {
-		frameG = CGraphic::New("ui/hd_cmd_frame.png", hdicon::CELL_W, hdicon::CELL_H);
+		frameG = CGraphic::New("ui/hd_cmd_frame.png", hdicon::FRAME_PX, hdicon::FRAME_PX);
 		frameG->Load();
 		state = (frameG && frameG->NumFrames >= hdicon::FRAME_STATES) ? 1 : -1;
 	}
 	if (state != 1) {
-		return;
+		return false;
 	}
 	int idx = (flags & IconSelected) ? 3 : 0;   // highlight vs default base
 	if (flags & IconClicked) {
@@ -304,15 +360,21 @@ static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos, int w, int h
 	} else if (flags & IconActive) {
 		idx += 1;                                // ..._hovered
 	}
-	// NG3: draw the frame scaled to the button's on-screen size (so a resolution-scaled / Oracle-sized
-	// command cell keeps a matching frame). DrawNineSlice with zero insets is a GPU-aware pure stretch;
-	// the icon (this->G) is likewise stretched to the button size by DrawUIButton, so they stay paired.
 	if (w <= 0 || h <= 0) {
 		w = hdicon::CELL_W;
 		h = hdicon::CELL_H;
 	}
-	const SDL_Rect dst = {pos.x, pos.y, w, h};
-	frameG->DrawNineSlice(dst, 0, 0, 0, 0, (unsigned) idx);
+	// M666-2: the skin's own rule -- the 80-px sprite nine-sliced at 25 px, 5 sprite px per base
+	// unit -- in a widget that is the visible cell plus the sprite's empty rim (1 unit a side).
+	// At k = 3: widget 162 x 138 at (-3, -3), corners 15 px, ring 9.6 px against the 9 px read in
+	// captures e01 and hi10 (outline 1, bevel 7, inner line 1).
+	const double u = HDCellUnit(w, h);
+	const int m = (int) std::lround(u * hdicon::FRAME_MARGIN_U);
+	const SDL_Rect dst = {pos.x - m, pos.y - m, w + 2 * m, h + 2 * m};
+	frameG->DrawNineSliceScaled(dst, hdicon::FRAME_SLICE,
+	                            (int) std::lround(u * hdicon::FRAME_SLICE / hdicon::FRAME_SCALE),
+	                            (unsigned) idx);
+	return true;
 }
 
 /**
@@ -326,9 +388,28 @@ static void DrawHDCommandFrame(unsigned flags, const PixelPos &pos, int w, int h
 void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 						 const PixelPos &pos, const std::string &text, int player) const
 {
-	DrawHDCommandFrame(flags, pos, style.Width, style.Height);
+	const bool framed = DrawHDCommandFrame(flags, pos, style.Width, style.Height);
 
 	ButtonStyle s(style);
+	// M666-2: inside the frame the picture is the widget less its padding (4 units), i.e. the
+	// visible cell less 3 units a side: 46 x 38 units, 138 x 114 px at (9, 9) for k = 3 (captures
+	// e01, hi10: picture x 27..164, y 507..620 in a cell at 18, 498).
+	PixelPos picPos(pos);
+	int pictureW = 0;   // > 0: the picture's own width, wider than the room inside the frame
+	if (framed && style.Width > 0 && style.Height > 0) {
+		const double u = HDCellUnit(style.Width, style.Height);
+		const int inset = (int) std::lround(u * (hdicon::PICTURE_PAD_U - hdicon::FRAME_MARGIN_U));
+		picPos.x += inset;
+		picPos.y += inset;
+		s.Width = style.Width - 2 * inset;
+		s.Height = style.Height - 2 * inset;
+		// A narrow cell is clearly under the 52 units: one unit of margin, so that a cell of
+		// the usual shape at another size (the Scaled portrait) never counts by rounding.
+		const int fullW = (int) std::lround(u * HD_PICTURE_UNITS_W);
+		if (style.Width < u * (hdicon::CELL_UNITS_W - 1) && fullW > s.Width) {
+			pictureW = fullW;
+		}
+	}
 
 	s.Default.Sprite = s.Hover.Sprite = s.Clicked.Sprite = this->G;
 	s.Default.Frame = s.Hover.Frame = s.Clicked.Frame = this->Frame;
@@ -391,8 +472,28 @@ void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 				Video.DrawRectangle(ColorGreen, pos.x, pos.y, 46, 38);
 			}
 		}
+	} else if (pictureW > 0) {
+		// PANEL-A: a narrow cell shows the MIDDLE of the picture at the picture's own size, it is
+		// not squeezed: the 96 px inside a 4-column cell are columns 21..116 of the 138-px
+		// picture (work/agent-orig-scenes captures u11 against u07 and u09, Grunt and
+		// Axethrower: mean difference 3.9 and 1.5 of 255 at 21, 7.2 / 11.9 at 20 / 22;
+		// squeezed 30; work/agent-prep-panels/tools/squeeze.py).
+		ButtonStyle pic(s);
+		pic.Width = pictureW;
+		pic.Default.BorderSize = pic.Hover.BorderSize = pic.Clicked.BorderSize = 0;
+		SDL_Rect room = {picPos.x, picPos.y, s.Width, s.Height};
+		PushClipping();
+		SetClipping(room.x, room.y, room.x + room.w - 1, room.y + room.h - 1);
+		SDL_SetClipRect(TheScreen, &room);
+		DrawUIButton(&pic, flags, picPos.x - (pictureW - s.Width) / 2, picPos.y, text,
+		             /*scaleSpriteToStyle=*/true, player);
+		SDL_SetClipRect(TheScreen, nullptr);
+		PopClipping();
+		// the style's own border goes round the part that shows
+		s.Default.Sprite = s.Hover.Sprite = s.Clicked.Sprite = nullptr;
+		DrawUIButton(&s, flags, picPos.x, picPos.y, "", /*scaleSpriteToStyle=*/true, player);
 	} else {
-		DrawUIButton(&s, flags, pos.x, pos.y, text, /*scaleSpriteToStyle=*/true, player);
+		DrawUIButton(&s, flags, picPos.x, picPos.y, text, /*scaleSpriteToStyle=*/true, player);
 	}
 }
 

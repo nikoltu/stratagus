@@ -41,7 +41,9 @@ public:
 
 	int testUpdateConstrFrame_Percent(CUnit &unit, int percent, int initialFrame = 9999)
 	{
-		const int progressOnePercent = unit.Type->Stats[0].Costs[TimeCost] * 6;
+		// One percent of the construction, as COrder_Built::UpdateConstructionFrame takes it
+		// (src/action/action_built.cpp): the data cost plus the measured extra time unit.
+		const int progressOnePercent = (unit.Type->Stats[0].Costs[TimeCost] + WC2_BUILD_EXTRA_TIME_UNITS) * WC2_BUILD_FRAMES_PER_TIME_UNIT;
 		return testUpdateConstrFrame_Progress(unit, percent * progressOnePercent, initialFrame);
 	}
 
@@ -165,12 +167,14 @@ TEST_CASE("COrder_Built Frame")
 
 		SUBCASE("by progress")
 		{
-			CHECK(order.testUpdateConstrFrame_Progress(unit,   0) == 0);
-			CHECK(order.testUpdateConstrFrame_Progress(unit,   5) == 0);
-			CHECK(order.testUpdateConstrFrame_Progress(unit,   6) == 1);
-			CHECK(order.testUpdateConstrFrame_Progress(unit, 594) == 6);
-			CHECK(order.testUpdateConstrFrame_Progress(unit, 595) == 6);
-			CHECK(order.testUpdateConstrFrame_Progress(unit, 600) == 7);
+			// One percent of progress for the time cost 1 of this test (see the helper above).
+			const int one = (1 + WC2_BUILD_EXTRA_TIME_UNITS) * WC2_BUILD_FRAMES_PER_TIME_UNIT;
+			CHECK(order.testUpdateConstrFrame_Progress(unit, 0) == 0);
+			CHECK(order.testUpdateConstrFrame_Progress(unit, one - 1) == 0);
+			CHECK(order.testUpdateConstrFrame_Progress(unit, one) == 1);
+			CHECK(order.testUpdateConstrFrame_Progress(unit, 99 * one) == 6);
+			CHECK(order.testUpdateConstrFrame_Progress(unit, 100 * one - 1) == 6);
+			CHECK(order.testUpdateConstrFrame_Progress(unit, 100 * one) == 7);
 		}
 	}
 

@@ -97,6 +97,30 @@ extern std::string Translate @ _(const std::string str);
 extern int SyncRand(void);
 extern int SyncRand(int max);
 extern bool CanAccessFile(const char *filename);
+
+// CF8: the Remastered's own campaign-progress store (GlobalSave.json). Keys are the
+// original's: "todOrc", "todHuman", "bdpOrc", "bdpHuman".
+$#include "globalsave.h"
+$#include "wc2strings.h"
+// TX1..TX9: the Remastered's own text (Data/Strings/<lang>.json), read from the player's
+// installation. RM_Str(key) returns "" when the key or the file is absent.
+extern bool LoadWC2Strings @ RM_LoadStrings(const std::string language);
+extern const std::string &GetWC2String @ RM_Str(const std::string key);
+extern int GetWC2StringCount @ RM_StrCount(void);
+extern int GetWC2Id @ RM_Id(const std::string family, const std::string displayName);
+extern int GetGlobalCampaignProgress(const std::string campaignKey);
+extern void SetGlobalCampaignProgress(const std::string campaignKey, int missionsCompleted);
+
+// Result record of a game started by a launch request (scripts/launch.lua).
+$#include "launchresult.h"
+extern bool WriteLaunchResult(const std::string text);
+extern bool WriteLaunchLoading(const std::string text);
+extern unsigned long LastGameCycle;
+
+// Messages to and commands from the activity hosting the engine.
+$#include "launcher_bridge.h"
+extern void LauncherPost(int what, int value);
+extern int LauncherPollCommand();
 void Exit(int err);
 
 $extern std::string CliMapName;

@@ -55,8 +55,11 @@
 #include "video.h"
 #include "widgets.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <optional>
+#include <string>
 
 /*----------------------------------------------------------------------------
 --  Variables
@@ -284,6 +287,247 @@ static void UiAddToGroup(unsigned group)
 	AddToGroup(&Selected[0], Selected.size(), group);
 }
 
+//-----------------------------------------------------------------------------
+//  TOUCH-R1: control groups on a touch screen
+//-----------------------------------------------------------------------------
+//
+//  Owner decision 2026-10-08, option A of TOUCH_ROUTES_OPTIONS (R1): a strip of group slots
+//  on the right edge of the map view. Tap = select the group, second tap = centre the view
+//  on it, hold = the selection becomes the group. Only stored groups and the next free slot
+//  are drawn. The original has no such element: the slots are drawn by code, no art is used.
+//  Owner's answers of 2026-10-08 to the open details: Q1 = A (dark plate, thin frame),
+//  Q2 = B (a tap on the free slot stores the selection there; video/sdl.cpp, SDL_FINGERUP).
+//
+//  Sizes are in HUD units. One unit is one pixel of the original's 640x480 layout at the
+//  HUD's present scale, which is the whole number CVideo::HudCanvas.Step (3 on a 2960x1848
+//  screen: side bar 176 units = 528 px), so the strip keeps its proportion to the HUD on
+//  every screen. Positions hang from the map view's top and right edges.
+
+constexpr int TouchGroupFirst = 1;    // TOUCH-R1: groups 1..9, as the keys 1..9 (group 0 has no slot)
+constexpr int TouchGroupLast = 9;     // TOUCH-R1: option A draws nine slots
+constexpr int TouchGroupSlotU = 30;   // TOUCH-R1 option A: slot 104 px at 3.415 px per unit; 90 px at step 3
+constexpr int TouchGroupGapU = 2;     // TOUCH-R1 option A: pitch 112 px - slot 104 px; 6 px at step 3
+constexpr int TouchGroupMarginU = 2;  // TOUCH-R1 option A: 8 px to the map view's right edge; 6 px at step 3
+constexpr int TouchGroupTopU = 36;    // TOUCH-R1 option A: slot 1 at y 217, map view top at y 94; 108 px at step 3
+
+// The slot text is drawn in the HUD's own face (the one the resource row uses, set by
+// SetResourcesFont in fonts.lua: `remaster_hud`), which follows the HUD step. Its cell is
+// much taller than its digits: in ui/fonts/blq55_small.png (cell 64 x 88) the digits 0..9
+// occupy rows 26..61 of the cell (measured on the sheet, alpha > 64; "1": 25..62). Two cells
+// stacked (2 x 59 px at step 3) do not fit a 90 px slot; two lines of digits (2 x 24 px) do,
+// so the lines are placed by these rows.
+constexpr int TouchGroupCellRows = 88;  // ui/fonts/blq55_small.png: cell height (fonts.lua, CGraphic 64 x 88)
+constexpr int TouchGroupInkTop = 26;    // ui/fonts/blq55_small.png: first row of the digits in the cell
+constexpr int TouchGroupInkRows = 36;   // ui/fonts/blq55_small.png: rows 26..61
+
+extern CFont *ResourcesFont; /// mainscr.cpp: the HUD face of the resource row (null: the classic game font)
+
+static int TouchGroupPressed = 0;     /// slot under a finger, 0 for none
+
+/// One HUD unit in pixels: the step k of the classic 640x480 layout (video/video.cpp,
+/// CVideo::ComputeHudCanvas). Not UI.MapArea.X / 176: the map area's left edge is the
+/// canvas's left edge plus 176 units, and the canvas is centred on a screen wider than 16:9.
+static int TouchHudUnit()
+{
+	return Video.HudCanvas.Step;
+}
+
+/// Lowest group without units, 0 if all nine are taken
+static int TouchGroupNextFree()
+{
+	for (int group = TouchGroupFirst; group <= TouchGroupLast; ++group) {
+		if (GetUnitsOfGroup(group).empty()) {
+			return group;
+		}
+	}
+	return 0;
+}
+
+bool UiTouchGroupStripShown()
+{
+	// Not for an observer and not in a replay: there are no own units to group.
+	// Not in the map-only mode: it has no HUD, and the unit is taken from the side bar.
+	return UiTouchMode() && GameRunning && !BigMapMode && !GameObserve
+		   && ReplayGameType == EReplayType::NoReplay
+		   && ThisPlayer != nullptr && UI.SelectedViewport != nullptr
+		   && TouchHudUnit() >= 1;
+}
+
+bool UiTouchGroupSlotRect(int group, int &x, int &y, int &w, int &h)
+{
+	if (group < TouchGroupFirst || group > TouchGroupLast || !UiTouchGroupStripShown()) {
+		return false;
+	}
+	const CViewport &vp = *UI.SelectedViewport;
+	const int u = TouchHudUnit();
+	const int slot = TouchGroupSlotU * u;
+	const int gap = TouchGroupGapU * u;
+	const int margin = TouchGroupMarginU * u;
+	const int top = TouchGroupTopU * u;
+
+	w = h = slot;
+	x = vp.GetBottomRightPos().x + 1 - margin - slot;
+	y = vp.GetTopLeftPos().y + top + (group - TouchGroupFirst) * (slot + gap);
+	// A slot that does not fit into the map view is not there at all.
+	return x >= vp.GetTopLeftPos().x && y + h <= vp.GetBottomRightPos().y + 1;
+}
+
+int UiTouchGroupSlotState(int group)
+{
+	int x, y, w, h;
+	if (!UiTouchGroupSlotRect(group, x, y, w, h)) {
+		return 0;
+	}
+	const std::vector<CUnit *> &units = GetUnitsOfGroup(group);
+	if (units.empty()) {
+		// The next free slot is offered while own units are selected.
+		if (Selected.empty() || Selected[0]->Player != ThisPlayer) {
+			return 0;
+		}
+		return group == TouchGroupNextFree() ? 1 : 0;
+	}
+	if (units.size() == Selected.size()
+		&& ranges::all_of(Selected, [group](const CUnit *unit) {
+			   return (unit->GroupId & (1u << group)) != 0;
+		   })) {
+		return 3;
+	}
+	return 2;
+}
+
+int UiTouchGroupSlotAt(const PixelPos &screenPos)
+{
+	for (int group = TouchGroupFirst; group <= TouchGroupLast; ++group) {
+		int x, y, w, h;
+		if (UiTouchGroupSlotState(group) != 0 && UiTouchGroupSlotRect(group, x, y, w, h)
+			&& screenPos.x >= x && screenPos.x < x + w && screenPos.y >= y && screenPos.y < y + h) {
+			return group;
+		}
+	}
+	return 0;
+}
+
+void UiTouchGroupPress(int group)
+{
+	TouchGroupPressed = group;
+}
+
+void UiTouchGroupRecall(int group)
+{
+	// The digit key without a modifier (CommandKey_Group).
+	if (UiTouchGroupSlotState(group) >= 2) {
+		UiSelectGroup(group);
+	}
+}
+
+void UiTouchGroupCentre(int group)
+{
+	// The digit key pressed twice (CommandKey_Group, ModifierDoublePress).
+	if (UiTouchGroupSlotState(group) >= 2) {
+		UiCenterOnGroup(group);
+	}
+}
+
+bool UiTouchGroupStore(int group)
+{
+	// Ctrl + digit (CommandKey_Group), for own units only: SetGroup takes Selected[0],
+	// and a group of foreign units could not be commanded.
+	if (UiTouchGroupSlotState(group) == 0 || Selected.empty() || Selected[0]->Player != ThisPlayer) {
+		return false;
+	}
+	UiDefineGroup(group);
+	PlayGameSound(GameSounds.Click.Sound.get(), MaxSampleVolume);
+	return true;
+}
+
+/// Frame of thickness t made of four filled bars (the filled rectangle is the primitive
+/// that goes to the GPU backbuffer in the HUD pass; see CVideo::FillTransRectangleClip).
+static void TouchGroupFrame(Uint32 color, unsigned char alpha, int x, int y, int w, int h, int t)
+{
+	Video.FillTransRectangleClip(color, x, y, w, t, alpha);
+	Video.FillTransRectangleClip(color, x, y + h - t, w, t, alpha);
+	Video.FillTransRectangleClip(color, x, y + t, t, h - 2 * t, alpha);
+	Video.FillTransRectangleClip(color, x + w - t, y + t, t, h - 2 * t, alpha);
+}
+
+/// The same frame, broken into dashes: the mark of the free slot.
+static void TouchGroupDashedFrame(Uint32 color, unsigned char alpha, int x, int y, int w, int h, int t, int dash)
+{
+	for (int d = 0; d < w; d += 2 * dash) {
+		const int len = std::min(dash, w - d);
+		Video.FillTransRectangleClip(color, x + d, y, len, t, alpha);
+		Video.FillTransRectangleClip(color, x + d, y + h - t, len, t, alpha);
+	}
+	for (int d = 0; d < h; d += 2 * dash) {
+		const int len = std::min(dash, h - d);
+		Video.FillTransRectangleClip(color, x, y + d, t, len, alpha);
+		Video.FillTransRectangleClip(color, x + w - t, y + d, t, len, alpha);
+	}
+}
+
+void DrawTouchGroupStrip()
+{
+	if (!UiTouchGroupStripShown()) {
+		return;
+	}
+	// The look is the owner's choice Q1 = A (TOUCH_OPEN_QUESTIONS.html): dark plate, thin
+	// frame, yellow when the group is the selection, dashed for the free slot.
+	const int t = std::max(1, (TouchHudUnit() + 1) / 2); // frame: half a unit, rounded up
+	const CFont &font = ResourcesFont ? *ResourcesFont : GetGameFont();
+	const CLabel label(font);
+	// Where the digits lie in the cell (see TouchGroupInkTop); the classic fallback face
+	// fills its cell.
+	const int cellH = font.Height();
+	const int inkTop = ResourcesFont ? cellH * TouchGroupInkTop / TouchGroupCellRows : 0;
+	const int inkH = ResourcesFont ? cellH * TouchGroupInkRows / TouchGroupCellRows : cellH;
+	const int lineGap = inkH / 3; // between the number and the count: a third of a digit's height
+
+	// The slots lie inside the map view by construction; the clip makes the primitives
+	// independent of whatever clip the HUD draws before this one left behind.
+	PushClipping();
+	UI.SelectedViewport->SetClipping();
+	for (int group = TouchGroupFirst; group <= TouchGroupLast; ++group) {
+		int x, y, w, h;
+		const int state = UiTouchGroupSlotState(group);
+		if (state == 0 || !UiTouchGroupSlotRect(group, x, y, w, h)) {
+			continue;
+		}
+		const std::string number = std::to_string(group);
+
+		if (state == 1) {
+			// next free slot: no plate, a dashed frame, the number
+			Video.FillTransRectangleClip(ColorBlack, x, y, w, h, 64);
+			TouchGroupDashedFrame(ColorGray, 255, x, y, w, h, t, 3 * t);
+			label.DrawCentered(x + w / 2, y + (h - inkH) / 2 - inkTop, number);
+		} else {
+			// stored group: dark plate, frame (yellow when it is the selection),
+			// the number above, the unit count below
+			Video.FillTransRectangleClip(ColorBlack, x, y, w, h, 160);
+			TouchGroupFrame(state == 3 ? ColorYellow : ColorGray, 255, x, y, w, h, t);
+			// Owner, 2026-10-08: the number large, the unit count small. The count takes the
+			// HUD's small face (scripts/fonts.lua "remaster_hud_small") when it is defined.
+			static CFont *countFont = CFont::Get("remaster_hud_small");
+			const std::string count = std::to_string(GetUnitsOfGroup(group).size());
+			if (countFont) {
+				const int smallH = countFont->Height();
+				const int smallInkTop = smallH * TouchGroupInkTop / TouchGroupCellRows;
+				const int smallInkH = smallH * TouchGroupInkRows / TouchGroupCellRows;
+				const int textY = y + (h - (inkH + lineGap + smallInkH)) / 2;
+				label.DrawCentered(x + w / 2, textY - inkTop, number);
+				CLabel(*countFont).DrawCentered(x + w / 2, textY + inkH + lineGap - smallInkTop, count);
+			} else {
+				const int textY = y + (h - (2 * inkH + lineGap)) / 2 - inkTop;
+				label.DrawCentered(x + w / 2, textY, number);
+				label.DrawCentered(x + w / 2, textY + inkH + lineGap, count);
+			}
+		}
+		if (group == TouchGroupPressed) {
+			Video.FillTransRectangleClip(ColorWhite, x, y, w, h, 64);
+		}
+	}
+	PopClipping();
+}
+
 /**
 **  Toggle sound on / off.
 */
@@ -332,7 +576,10 @@ static void UiToggleMusic()
 */
 void UiTogglePause()
 {
-	if (!IsNetworkGame()) {
+	if (IsNetworkGame()) {
+		// For everybody or not at all; the text comes when the pause begins on every device.
+		NetworkTogglePause();
+	} else {
 		GamePaused = !GamePaused;
 		if (GamePaused) {
 			UI.StatusLine.Set(_("Game Paused"));
@@ -1212,6 +1459,11 @@ void HandleKeyRepeat(unsigned, unsigned keychar)
 */
 bool HandleMouseScrollArea(const PixelPos &mousePos)
 {
+	// With no finger on the screen there is no pointer to rest in the margin; the position
+	// left over from a menu tap would otherwise scroll the map towards the top-left corner.
+	if (IsTouchPointerParked()) {
+		return false;
+	}
 	if (mousePos.x < ScrollMarginLeft) {
 		if (mousePos.y < ScrollMarginTop) {
 			CursorOn = ECursorOn::ScrollLeftUp;

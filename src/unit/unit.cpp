@@ -35,6 +35,8 @@
 
 #include "stratagus.h"
 
+#include "wc2strings.h"
+
 #include "unit.h"
 
 #include "action/action_attack.h"
@@ -65,8 +67,10 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "video.h"
+#include "wc2mission.h"
 
 #include <cmath>
+#include <set>
 
 /*----------------------------------------------------------------------------
 -- Documentation
@@ -728,6 +732,24 @@ void CUnit::AssignToPlayer(CPlayer &player)
 */
 CUnit *MakeUnit(const CUnitType &type, CPlayer *player)
 {
+	// CREATEUNIT-NOSTATS: AssignToPlayer reads type.Stats[player->Index].Variables[DEMAND_INDEX],
+	// and those Variables are a std::vector that UpdateStats fills only when a game starts. Called
+	// before that -- which a Lua script can do, and did twice while measuring NG82 -- the read runs
+	// off an EMPTY vector and the process dies with SIGSEGV at faultAddr 0x94. A `pcall` cannot
+	// catch it, so the script sees nothing and the game is simply gone.
+	//
+	// The guard belongs here rather than at the two script entry points (CclCreateUnit,
+	// CclShowMapLocation): both already handle a nullptr return, so this uses the contract they
+	// implement instead of adding a second one, and it covers any future caller for free.
+	if (player != nullptr && type.Stats[player->Index].Variables.size() <= DEMAND_INDEX) {
+		static std::set<std::string> reportedNoStats;
+		if (reportedNoStats.insert(type.Ident).second) {
+			ErrorPrint("MakeUnit('%s'): unit stats are not initialised yet (no game running) -- "
+			           "refusing, because creating it would read off an empty Variables vector\n",
+			           type.Ident.c_str());
+		}
+		return nullptr;
+	}
 	CUnit *unit = UnitManager->AllocUnit();
 	if (unit == nullptr) {
 		return nullptr;
@@ -2335,6 +2357,11 @@ PixelPos CUnit::GetMapPixelPosCenter() const
 */
 void LetUnitDie(CUnit &unit, bool suicide)
 {
+	// PANEL-A: before the unit leaves the selection (Remove below), so that its cell of the
+	// selection grid stays where it is, empty.
+	if (unit.Selected) {
+		SelectionCellUnitDied(unit);
+	}
 	unit.Variable[HP_INDEX].Value = std::min<int>(0, unit.Variable[HP_INDEX].Value);
 	unit.Moving = 0;
 	unit.TTL = 0;
@@ -2731,7 +2758,10 @@ static void HitUnit_LastAttack(const CUnit *attacker, CUnit &target)
 			}
 		}
 	}
-	target.Player->Notify(ColorRed, target.tilePos, _("%s attacked"), target.Type->Name.c_str());
+	// No text: the original prints no line for this event (time series of work/agent-orig-scenes2,
+	// SCENES2.md Q1: trainings, buildings and raids covered, none of message_training_complete,
+	// message_work_complete, message_under_attack seen). The minimap mark stays.
+	target.Player->Notify(ColorRed, target.tilePos, "%s", "");
 
 	if (attacker && !target.Type->Building) {
 		if (target.Player->AiEnabled) {
@@ -2750,20 +2780,30 @@ static bool HitUnit_IsUnitWillDie(const CUnit *attacker, const CUnit &target, in
 		   || (target.Variable[HP_INDEX].Value == 0);
 }
 
-static void HitUnit_IncreaseScoreForKill(CUnit &attacker, CUnit &target)
+/**
+**  The attacker's player and the attacker get the kill.
+**
+**  @param countOnly  the target belongs to a player who is out of the network game: the kill /
+**                    razing is counted, but it is worth no score points and no experience.
+*/
+static void HitUnit_IncreaseScoreForKill(CUnit &attacker, CUnit &target, bool countOnly)
 {
-	attacker.Player->Score += target.Variable[POINTS_INDEX].Value;
+	if (!countOnly) {
+		attacker.Player->Score += target.Variable[POINTS_INDEX].Value;
+	}
 	if (target.Type->Building) {
 		attacker.Player->TotalRazings++;
 	} else {
 		attacker.Player->TotalKills++;
 	}
-	if (UseHPForXp) {
-		attacker.Variable[XP_INDEX].Max += target.Variable[HP_INDEX].Value;
-	} else {
-		attacker.Variable[XP_INDEX].Max += target.Variable[POINTS_INDEX].Value;
+	if (!countOnly) {
+		if (UseHPForXp) {
+			attacker.Variable[XP_INDEX].Max += target.Variable[HP_INDEX].Value;
+		} else {
+			attacker.Variable[XP_INDEX].Max += target.Variable[POINTS_INDEX].Value;
+		}
+		attacker.Variable[XP_INDEX].Value = attacker.Variable[XP_INDEX].Max;
 	}
-	attacker.Variable[XP_INDEX].Value = attacker.Variable[XP_INDEX].Max;
 	attacker.Variable[KILL_INDEX].Value++;
 	attacker.Variable[KILL_INDEX].Max++;
 	attacker.Variable[KILL_INDEX].Enable = 1;
@@ -2783,7 +2823,7 @@ static void HitUnit_ApplyDamage(CUnit *attacker, CUnit &target, int damage)
 		}
 		target.Variable[HP_INDEX].Value -= damage - shieldDamage;
 	}
-	if (UseHPForXp && attacker && target.IsEnemy(*attacker)) {
+	if (UseHPForXp && attacker && !target.Player->Gone && target.IsEnemy(*attacker)) {
 		attacker->Variable[XP_INDEX].Value += damage;
 		attacker->Variable[XP_INDEX].Max += damage;
 	}
@@ -2996,6 +3036,9 @@ void HitUnit(CUnit *attacker, CUnit &target, int damage, const Missile *missile)
 		DebugPrint("Removed target hit\n");
 		return;
 	}
+	if (!MissionAllowsDamage(attacker, target)) {
+		return;
+	}
 
 	Assert(damage != 0 && target.CurrentAction() != UnitAction::Die && !target.Type->BoolFlag[VANISHES_INDEX].value);
 
@@ -3041,8 +3084,12 @@ void HitUnit(CUnit *attacker, CUnit &target, int damage, const Missile *missile)
 		if (attacker) {
 			//  Setting ai threshold counter to 0 so it can target other units
 			attacker->Threshold = 0;
-			if (target.IsEnemy(*attacker)) {
-				HitUnit_IncreaseScoreForKill(*attacker, target);
+			if (target.Player->Gone) {
+				// What a gone player left behind: counted for whoever destroys it, worth no
+				// points.
+				HitUnit_IncreaseScoreForKill(*attacker, target, true);
+			} else if (target.IsEnemy(*attacker)) {
+				HitUnit_IncreaseScoreForKill(*attacker, target, false);
 			}
 		}
 		LetUnitDie(target);

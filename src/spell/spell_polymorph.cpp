@@ -85,7 +85,9 @@ int Spell_Polymorph::Cast(CUnit &caster,
 	CUnitType &type = *this->NewForm;
 	const Vec2i pos(goalPos - type.GetHalfTileSize());
 
-	caster.Player->Score += target->Variable[POINTS_INDEX].Value;
+	if (!target->Player->Gone) { // what a gone player left behind is worth no points
+		caster.Player->Score += target->Variable[POINTS_INDEX].Value;
+	}
 	if (caster.IsEnemy(*target)) {
 		if (target->Type->Building) {
 			caster.Player->TotalRazings++;

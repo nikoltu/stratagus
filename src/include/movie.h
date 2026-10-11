@@ -136,6 +136,10 @@ public:
 /// Play a movie file
 extern int PlayMovie(const std::string &name);
 
+/// MV1: play a Remastered WebM cinematic (Android hardware decode). False = unsupported,
+/// so PlayMovie can fall back to its previous behaviour.
+extern bool PlayWebMMovie(const std::string &filename);
+
 //@}
 
 #endif // !__MOVIE_H__

@@ -412,6 +412,7 @@ public:
 	mutable std::shared_ptr<CAtlasGraphic> HDG;
 	mutable std::string HDPrefix;
 	mutable bool HDTried = false;
+	mutable std::string HDTileset;   /// the biome HDG was resolved for (HD-ART-STALE-TILESET)
 };
 
 /*----------------------------------------------------------------------------
@@ -639,6 +640,16 @@ extern void CleanMissiles();
 extern bool IsBurningBuildingFramesValid();
 
 extern void FreeBurningBuildingFrames();
+
+/// Current map's tileset name in the UNIT/effect atlas namespace (summer->forest, winter->winter,
+/// wasteland->swamp, swamp->xswamp). Empty before a map loads. Defined in missile.cpp, where the
+/// HD effect atlases already depend on it; shared -- NOT copied -- so a flying unit's ground shadow
+/// (unittype.cpp, GetHDShadowAtlas) resolves its per-tileset units_common_<tileset> atlas by the
+/// same rule. A second copy of this mapping is exactly the defect D5/NG-TERR1 recorded, where the
+/// swamp/wasteland pair was transposed in one copy only.
+extern std::string CurrentEffectTileset();
+/// EFFECT-ATLAS-LOADED-TWICE: the one cache of native HD atlases (unittype.cpp), also for effects.
+extern std::shared_ptr<CAtlasGraphic> GetSharedHDAtlas(const std::string &stem);
 
 //@}
 

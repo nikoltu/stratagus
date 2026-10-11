@@ -43,6 +43,7 @@
 #include "tileset.h"
 #include "unit.h"
 #include "unit_find.h"
+#include "unit_manager.h"
 #include "unittype.h"
 
 /*----------------------------------------------------------------------------
@@ -146,6 +147,176 @@ static bool AiCheckSurrounding(const CUnit &worker, const CUnitType &type, const
 	return obstacleCount == 0;
 }
 
+/**
+**  Check that a building on a fallback place leaves the ground around it in one piece.
+**
+**  A fallback place is one whose surrounding ring is partly taken (AiCheckSurrounding: fewer than
+**  five changes between taken and free). Such a building can close the only way between two parts
+**  of a base: seen on a small map, where a farm between the hall and the only gold mine in reach
+**  ended all gold income for the rest of the game. Asked here, on the tiles within `reach` of the
+**  ring and with the building's own tiles taken:
+**   - the free tiles of the ring are still joined to each other;
+**   - a gold mine (a resource building that is harvested from) or a depot of the player that
+**     touches the ring keeps a free tile at its side that is joined to them.
+**  A way round that leaves the looked-at tiles counts as none.
+**
+**  This is the engine's own placement, made safe; where the original places a building is not
+**  established.
+**
+**  @param worker  Worker to build (its own tile counts as free).
+**  @param type    Type of building.
+**  @param pos     map tile position for the building.
+**
+**  @return        True if the ground stays in one piece, false otherwise.
+*/
+static bool AiPlaceKeepsGroundJoined(const CUnit &worker, const CUnitType &type, const Vec2i &pos)
+{
+	const int reach = 8; // tiles looked at on each side of the ring: a detour longer than that is no way
+	const Vec2i ringMin(pos.x - 1, pos.y - 1);
+	const Vec2i ringMax(pos.x + type.TileWidth, pos.y + type.TileHeight);
+	const Vec2i boxMin(ringMin.x - reach, ringMin.y - reach);
+	const int boxWidth = ringMax.x - ringMin.x + 1 + 2 * reach;
+	const int boxHeight = ringMax.y - ringMin.y + 1 + 2 * reach;
+	std::vector<char> joined(static_cast<size_t>(boxWidth) * boxHeight, 0);
+
+	const auto index = [&](const Vec2i &tile) {
+		return static_cast<size_t>(tile.y - boxMin.y) * boxWidth + (tile.x - boxMin.x);
+	};
+	const auto inBox = [&](const Vec2i &tile) {
+		return tile.x >= boxMin.x && tile.x < boxMin.x + boxWidth && tile.y >= boxMin.y
+		       && tile.y < boxMin.y + boxHeight;
+	};
+	const auto inBuilding = [&](const Vec2i &tile) {
+		return tile.x > ringMin.x && tile.x < ringMax.x && tile.y > ringMin.y && tile.y < ringMax.y;
+	};
+
+	std::vector<Vec2i> ring;
+	for (int y = ringMin.y; y <= ringMax.y; ++y) {
+		for (int x = ringMin.x; x <= ringMax.x; ++x) {
+			if (x == ringMin.x || x == ringMax.x || y == ringMin.y || y == ringMax.y) {
+				ring.push_back(Vec2i(x, y));
+			}
+		}
+	}
+
+	// The free ground that can be walked to from the first free tile of the ring.
+	std::vector<Vec2i> todo;
+	for (const Vec2i &tile : ring) {
+		if (IsPosFree(tile, worker)) {
+			joined[index(tile)] = 1;
+			todo.push_back(tile);
+			break;
+		}
+	}
+	for (size_t head = 0; head < todo.size(); ++head) {
+		const Vec2i from = todo[head];
+		for (int dy = -1; dy <= 1; ++dy) {
+			for (int dx = -1; dx <= 1; ++dx) {
+				const Vec2i next(from.x + dx, from.y + dy);
+				if (!inBox(next) || joined[index(next)] || inBuilding(next) || !IsPosFree(next, worker)) {
+					continue;
+				}
+				joined[index(next)] = 1;
+				todo.push_back(next);
+			}
+		}
+	}
+
+	for (const Vec2i &tile : ring) {
+		if (IsPosFree(tile, worker) && !joined[index(tile)]) {
+			return false; // the building would stand between two parts of the free ground
+		}
+	}
+
+	// A mine or a depot at the ring must keep a free tile at its side.
+	for (const Vec2i &tile : ring) {
+		if (!Map.Info.IsPointOnMap(tile)) {
+			continue;
+		}
+		for (const CUnit *unit : Map.Field(tile)->UnitCache) {
+			if (!unit || !unit->Type || unit == &worker) {
+				continue;
+			}
+			const CUnitType &other = *unit->Type;
+			bool needsSide = other.GivesResource && other.BoolFlag[CANHARVEST_INDEX].value;
+			if (!needsSide && unit->Player == worker.Player) {
+				for (int i = 1; i < MaxCosts; ++i) {
+					if (other.CanStore[i]) {
+						needsSide = true;
+						break;
+					}
+				}
+			}
+			if (!needsSide) {
+				continue;
+			}
+			bool sideFree = false;
+			for (int y = unit->tilePos.y - 1; y <= unit->tilePos.y + other.TileHeight && !sideFree; ++y) {
+				for (int x = unit->tilePos.x - 1; x <= unit->tilePos.x + other.TileWidth; ++x) {
+					const Vec2i side(x, y);
+					if (inBox(side) && joined[index(side)]) {
+						sideFree = true;
+						break;
+					}
+				}
+			}
+			if (!sideFree) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/**
+**  Is a place on the way between a depot of the player and a resource it is harvested from?
+**
+**  The way is taken as the box that holds both the depot and the resource building when they
+**  lie at most `lane` tiles apart. A building put there on a FALLBACK place (one that touches
+**  other buildings) narrows the workers' road: seen on a small map, where a farm and a blacksmith
+**  left one tile between the hall and its gold mine, two workers met in it and no gold came home
+**  for the rest of the game (the ground was still in one piece, so the joined-ground rule let
+**  both places pass). This is the engine's own placement made safe, not the original's rule.
+**
+**  @param worker  Worker to build.
+**  @param type    Type of building.
+**  @param pos     map tile position for the building.
+**
+**  @return        True if the building would stand on such a way.
+*/
+static bool AiPlaceOnHaulWay(const CUnit &worker, const CUnitType &type, const Vec2i &pos)
+{
+	const int lane = 10; // tiles between a depot and a resource that still count as one yard
+	const int bx0 = pos.x, by0 = pos.y;
+	const int bx1 = pos.x + type.TileWidth - 1, by1 = pos.y + type.TileHeight - 1;
+	for (const CUnit *depot : worker.Player->GetUnits()) {
+		if (!depot || !depot->Type || !depot->IsAliveOnMap()) {
+			continue;
+		}
+		for (int res = 1; res < MaxCosts; ++res) {
+			if (!depot->Type->CanStore[res]) {
+				continue;
+			}
+			for (const CUnit *mine : UnitManager->GetUnits()) {
+				if (!mine || !mine->Type || !mine->IsAliveOnMap()
+					|| mine->Type->GivesResource != res
+					|| !mine->Type->BoolFlag[CANHARVEST_INDEX].value
+					|| depot->MapDistanceTo(*mine) > lane) {
+					continue;
+				}
+				const int x0 = std::min(depot->tilePos.x, mine->tilePos.x);
+				const int y0 = std::min(depot->tilePos.y, mine->tilePos.y);
+				const int x1 = std::max(depot->tilePos.x + depot->Type->TileWidth, mine->tilePos.x + mine->Type->TileWidth) - 1;
+				const int y1 = std::max(depot->tilePos.y + depot->Type->TileHeight, mine->tilePos.y + mine->Type->TileHeight) - 1;
+				if (bx0 <= x1 && bx1 >= x0 && by0 <= y1 && by1 >= y0) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 class BuildingPlaceFinder
 {
 public:
@@ -173,9 +344,8 @@ public:
 
 		BuildingPlaceFinder buildingPlaceFinder(worker, type, checkSurround);
 
-		return terrainTraversal.Run(buildingPlaceFinder)
-		         ? std::make_optional(buildingPlaceFinder.resultPos)
-		         : std::nullopt;
+		terrainTraversal.Run(buildingPlaceFinder);
+		return buildingPlaceFinder.result();
 	}
 
 	/**
@@ -201,9 +371,8 @@ public:
 
 		BuildingPlaceFinder buildingPlaceFinder(worker, type, checkSurround);
 
-		return terrainTraversal.Run(buildingPlaceFinder)
-		         ? std::make_optional(buildingPlaceFinder.resultPos)
-		         : std::nullopt;
+		terrainTraversal.Run(buildingPlaceFinder);
+		return buildingPlaceFinder.result();
 	}
 
 
@@ -219,6 +388,13 @@ private:
 	{
 	}
 	VisitResult Visit(TerrainTraversal &terrainTraversal, const Vec2i &pos, const Vec2i &from);
+
+	/// The place found: the one with free surroundings that ended the search, else the first
+	/// place kept as a fallback (see Visit), else none.
+	std::optional<Vec2i> result() const
+	{
+		return Map.Info.IsPointOnMap(resultPos) ? std::make_optional(resultPos) : std::nullopt;
+	}
 private:
 	const CUnit &worker;
 	const CUnitType &type;
@@ -240,8 +416,19 @@ VisitResult BuildingPlaceFinder::Visit(TerrainTraversal &terrainTraversal, const
 		if (AiCheckSurrounding(worker, type, pos, backupok) && checkSurround) {
 			resultPos = pos;
 			return VisitResult::Finished;
-		} else if (backupok && resultPos.x == -1) {
+		} else if (backupok && resultPos.x == -1
+				   && (!checkSurround || type.BoolFlag[SHOREBUILDING_INDEX].value
+					   || (AiPlaceKeepsGroundJoined(worker, type, pos)
+					       && !AiPlaceOnHaulWay(worker, type, pos)))) {
+			// A fallback place on land is taken only when the building does not cut the ground
+			// around it in two. Not asked for a building on top of a resource (no surroundings
+			// checked) nor for a shore building (its ring is part sea, part land by nature).
 			resultPos = pos;
+			if (!checkSurround) {
+				// Nothing later can replace this place (only a place with checked surroundings
+				// would): the rest of the search cannot change the answer.
+				return VisitResult::Finished;
+			}
 		}
 	}
 	if (CanMoveToMask(pos, movemask)

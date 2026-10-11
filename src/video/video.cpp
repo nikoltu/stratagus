@@ -94,6 +94,7 @@
 
 #include <SDL.h>
 #include <SDL_image.h>
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -145,6 +146,28 @@ extern void SdlUnlockScreen();      /// Do SDL hardware unlock
 /*----------------------------------------------------------------------------
 --  Variables
 ----------------------------------------------------------------------------*/
+
+// WORLD-ZOOM-RULE: the in-game picture and the HUD step, by the original's rule
+// (work/agent-zoom-rule/SPEC_WORLD_ZOOM_RULE.md R1, R2; see the contract in video.h).
+//   R1  k  = max(1, floor(Height / 480))            thresholds 960 / 1440 / 1920 probed both sides
+//   R2  Pw = min(Width,  round(Height * 16 / 9))     1366x768 -> 1365, 2560x1439 -> 2558
+//       Ph = min(Height, round(Width  *  3 / 4))     1000x776 -> 750, 500x400 -> 375
+//       centred. An odd remainder puts the extra black column / row on the right / bottom here;
+//       the original's side for it was read with +-1 px only (33 | 34 at 1400x750, 13 | 12 at
+//       500x400), so that single pixel is UNVERIFIED.
+// One scale for both axes by construction (rule 34: no squish, ever).
+void CVideo::ComputeHudCanvas()
+{
+	const int k = std::max(1, Height / 480);
+	const int pw = std::min(Width, (Height * 32 + 9) / 18);   // round(Height * 16 / 9)
+	const int ph = std::min(Height, (Width * 6 + 4) / 8);     // round(Width * 3 / 4)
+	HudCanvas.Step = k;
+	HudCanvas.Scale = k * 480.0 / 2160.0;
+	HudCanvas.W = pw;
+	HudCanvas.H = ph;
+	HudCanvas.X = (Width - pw) / 2;
+	HudCanvas.Y = (Height - ph) / 2;
+}
 
 CVideo Video;
 

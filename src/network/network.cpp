@@ -223,12 +223,15 @@
 #include "stratagus.h"
 
 #include "network.h"
+#include "network_test_hooks.h"
 
 #include "actions.h"
 #include "commands.h"
 #include "interface.h"
 #include "map.h"
 #include "net_lowlevel.h"
+#include "net_mesh_glue.h"
+#include "net_mesh_wire.h"
 #include "net_message.h"
 #include "netconnect.h"
 #include "parameters.h"
@@ -245,6 +248,7 @@
 #include <cstddef>
 #include <deque>
 #include <list>
+#include <memory>
 
 //----------------------------------------------------------------------------
 //  Declaration
@@ -297,7 +301,7 @@ bool NetworkInSync = true;                 /// Network is in sync
 
 CUDPSocket NetworkFildes;                  /// Network file descriptor
 
-static unsigned long NetworkLastFrame[PlayerMax]; /// Last frame received packet
+static unsigned long NetworkLastTick[PlayerMax];  /// Last tick (ms) received packet, 0 = never
 static unsigned long NetworkLastCycle[PlayerMax]; /// Last cycle received packet
 
 static unsigned int NetworkSyncSeeds[256];          /// Network sync seeds.
@@ -345,6 +349,42 @@ static CNetworkStat NetworkStat;
 #endif
 
 static int PlayerQuit[PlayerMax];          /// Player quit
+static int PlayerGone[PlayerMax];          /// Player quit has been executed
+static int PlayerQuitReason[PlayerMax];    /// Why (ENetQuitReason), valid once the quit has been executed
+static bool NetworkQuitAnnounced;          /// The local player has told the others of this game that he leaves
+static int NetworkPauseAsked = -1;         /// Player whose pause command ran in the cycle being executed, -1 = none
+
+static unsigned int NetworkMeshDropped;    /// Mesh datagrams dropped (not valid, or not from the address of the sender)
+static std::deque<std::pair<int, mesh::Msg>> NetworkMeshReceived; /// The last mesh messages accepted, for the tests
+
+/**
+**  The engine as the mesh model sees it (net_mesh_glue.h).
+*/
+class CNetworkMeshEngine : public CMeshGlueEngine
+{
+public:
+	void SendMesh(int hostSlot, const mesh::Msg &message) override;
+	void SendPacket(int hostSlot, int player, unsigned long cycle) override;
+	void InstallQuit(int player, unsigned long cycle, mesh::Reason reason) override;
+	void SetPaused(bool paused, int player) override;
+};
+
+static CNetworkMeshEngine NetworkMeshEngine;
+/// The model of the running mesh game, none in a star game and outside a game
+static std::unique_ptr<CMeshGlue> MeshGlue;
+
+/// A device which loads tells the others so at this interval (ms)
+static constexpr unsigned long MeshLoadingPingMs = 250;
+/// A device which has left repeats its quit at this interval (ms) while it still answers
+static constexpr unsigned long MeshQuitRepeatMs = 100;
+/// It reads its socket in steps of this length (ms) meanwhile
+static constexpr int MeshLingerPollMs = 10;
+/// and is gone after this time (ms) whatever the model says
+static constexpr unsigned long MeshLingerMaxMs = 5000;
+
+static unsigned long NetworkTicks();
+static bool IsNetworkCycleReady(unsigned long gameNetCycle);
+static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHost &host, bool relayed = false);
 
 //----------------------------------------------------------------------------
 //  Mid-Level api functions
@@ -363,8 +403,24 @@ static void NetworkBroadcast(const CNetworkPacket &packet, int numcommands, int 
 	packet.Serialize(buf.data(), numcommands);
 
 	// Send to all clients.
-	if (NetConnectType == 1) { // server
+	if (NetMesh) { // every device sends to every other device
+		for (int i = 0; i < PlayerMax; ++i) {
+			if (i == NetLocalHostsSlot) {
+				continue; // skip self
+			}
+			if (Hosts[i].IsValid()) {
+				const CHost host(Hosts[i].Host, Hosts[i].Port);
+				if (Hosts[i].PlyNr == player) {
+					continue;
+				}
+				NetworkFildes.Send(host, buf.data(), buf.size());
+			}
+		}
+	} else if (NetConnectType == 1) { // server
 		for (int i = 0; i < NetPlayers; ++i) {
+			if (i == NetLocalHostsSlot) {
+				continue; // skip self
+			}
 			if (Hosts[i].IsValid()) {
 				const CHost host(Hosts[i].Host, Hosts[i].Port);
 				if (Hosts[i].PlyNr == player) {
@@ -380,14 +436,147 @@ static void NetworkBroadcast(const CNetworkPacket &packet, int numcommands, int 
 }
 
 /**
-**  Network send packet. Build it from queue and broadcast.
+**  Send message to one host.
 **
-**  @param ncq  Outgoing network queue start.
+**  @param host         Host to send to.
+**  @param packet       Packet to send.
+**  @param numcommands  Number of commands.
 */
-static void NetworkSendPacket(const CNetworkCommandQueue(&ncq)[MaxNetworkCommands])
+static void NetworkSendTo(const CHost &host, const CNetworkPacket &packet, int numcommands)
 {
-	CNetworkPacket packet;
+	const unsigned int size = packet.Size(numcommands);
+	std::vector<unsigned char> buf(size);
+	packet.Serialize(buf.data(), numcommands);
 
+	NetworkFildes.Send(host, buf.data(), buf.size());
+}
+
+/**
+**  Send a mesh message to the device in a host slot.
+**
+**  @param hostIndex  Host slot of the receiver.
+**  @param message    Message; its players are host slots (net_mesh_wire.h).
+**
+**  @return  false if there is no such device or the message cannot be sent.
+*/
+bool NetworkSendMesh(int hostIndex, const mesh::Msg &message)
+{
+	if (hostIndex < 0 || hostIndex >= PlayerMax || hostIndex == NetLocalHostsSlot
+		|| !Hosts[hostIndex].IsValid()) {
+		return false;
+	}
+	unsigned char buf[mesh::kWireMaxSize];
+	const size_t size = mesh::Serialize(message, NetLocalHostsSlot, buf, sizeof(buf));
+	if (size == 0) {
+		DebugPrint("Mesh message of kind %d cannot be sent\n", int(message.kind));
+		return false;
+	}
+	const CHost host(Hosts[hostIndex].Host, Hosts[hostIndex].Port);
+	NetworkFildes.Send(host, buf, size);
+	return true;
+}
+
+/**
+**  Send a mesh message to every other device.
+**
+**  @param message  Message; its players are host slots (net_mesh_wire.h).
+*/
+void NetworkBroadcastMesh(const mesh::Msg &message)
+{
+	for (int i = 0; i < PlayerMax; ++i) {
+		NetworkSendMesh(i, message);
+	}
+}
+
+/**
+**  A mesh message of another device has arrived.
+**
+**  @param hostIndex  Host slot of the sender, checked against the address it came from.
+**  @param message    Message; its players are host slots (net_mesh_wire.h).
+**
+**  It goes to the model; the last ones are kept for the tests.
+*/
+static void NetworkMeshMessage(int hostIndex, const mesh::Msg &message)
+{
+	if (NetworkMeshReceived.size() == 64) {
+		NetworkMeshReceived.pop_front();
+	}
+	NetworkMeshReceived.emplace_back(hostIndex, message);
+	if (MeshGlue) {
+		// The model answers in its tick; a device whose game stands (pause) still has to answer.
+		const unsigned long now = NetworkTicks();
+		MeshGlue->OnMeshMessage(hostIndex, message, now);
+		MeshGlue->Tick(now);
+	}
+}
+
+/**
+**  Parse a mesh datagram (first byte MessageMesh): a probe of the setup or a message
+**  of the model. It is taken only from the address of the host slot it names.
+**
+**  @param buf   Datagram.
+**  @param len   Size received.
+**  @param host  Host the datagram comes from.
+*/
+static void NetworkParseMeshEvent(const unsigned char *buf, int len, const CHost &host)
+{
+	const int index = FindHostIndexBy(host);
+	const size_t size = len < 0 ? 0 : len;
+	bool ack = false;
+	int from = -1;
+
+	if (mesh::DeserializeProbe(buf, size, &ack, &from)) {
+		// Probes travel before the game, when the mesh is not on yet.
+		if (index == -1 || index != from || index == NetLocalHostsSlot || !Hosts[index].IsValid()) {
+			++NetworkMeshDropped;
+			return;
+		}
+		if (ack) {
+			NetworkMeshProbeAnswered(index);
+		} else {
+			unsigned char answer[mesh::kWireProbeSize];
+			const size_t n = mesh::SerializeProbe(true, NetLocalHostsSlot, answer, sizeof(answer));
+			if (n != 0) {
+				NetworkFildes.Send(host, answer, n);
+			}
+		}
+		return;
+	}
+	const unsigned char *relayed = nullptr;
+	size_t relayedSize = 0;
+	if (MeshGlue && mesh::DeserializeRelay(buf, size, &from, &relayed, &relayedSize)) {
+		// The command packet of another player, passed on by a device which holds it.
+		if (index == -1 || index != from || index == NetLocalHostsSlot || !Hosts[index].IsValid()
+			|| relayedSize < CNetworkPacketHeader::Size()) {
+			++NetworkMeshDropped;
+			return;
+		}
+		NetworkParseInGameEvent(relayed, int(relayedSize), host, true);
+		return;
+	}
+	mesh::Msg message;
+	if (!NetMesh || !mesh::Deserialize(buf, size, &message, &from)
+		|| index == -1 || index != from || index == NetLocalHostsSlot || !Hosts[index].IsValid()) {
+#ifdef DEBUG
+		const std::string hostStr = host.toString();
+		DebugPrint("Mesh datagram of %d bytes from %s dropped\n", len, hostStr.c_str());
+#endif
+		++NetworkMeshDropped;
+		return;
+	}
+	NetworkMeshMessage(index, message);
+}
+
+/**
+**  Build network packet from queue.
+**
+**  @param ncq     Outgoing network queue start.
+**  @param packet  Packet to build.
+**
+**  @return  Number of commands in the packet.
+*/
+static int NetworkBuildPacket(const CNetworkCommandQueue(&ncq)[MaxNetworkCommands], CNetworkPacket &packet)
+{
 	// Build packet of up to MaxNetworkCommands messages.
 	int numcommands = 0;
 	packet.Header.Cycle = ncq[0].Time & 0xFF;
@@ -401,7 +590,329 @@ static void NetworkSendPacket(const CNetworkCommandQueue(&ncq)[MaxNetworkCommand
 	for (; i < MaxNetworkCommands; ++i) {
 		packet.Header.Type[i] = MessageNone;
 	}
+	return numcommands;
+}
+
+/**
+**  Network send packet. Build it from queue and broadcast.
+**
+**  @param ncq  Outgoing network queue start.
+*/
+static void NetworkSendPacket(const CNetworkCommandQueue(&ncq)[MaxNetworkCommands])
+{
+	CNetworkPacket packet;
+	const int numcommands = NetworkBuildPacket(ncq, packet);
+
 	NetworkBroadcast(packet, numcommands);
+}
+
+/**
+**  Real time for the time-out of players.
+**
+**  @return  Ticks in ms, never 0 (0 is "never received a packet").
+*/
+static unsigned long NetworkTicks()
+{
+	return std::max(GetTicks(), 1ul);
+}
+
+//----------------------------------------------------------------------------
+//  Mesh: the model beside the command queue (net_mesh_glue.h)
+//----------------------------------------------------------------------------
+
+void CNetworkMeshEngine::SendMesh(int hostSlot, const mesh::Msg &message)
+{
+	NetworkSendMesh(hostSlot, message);
+}
+
+/**
+**  Send the held packet of a player for a cycle to one device: the own one as the
+**  packet it is, the one of another player as a relay.
+*/
+void CNetworkMeshEngine::SendPacket(int hostSlot, int player, unsigned long cycle)
+{
+	if (hostSlot < 0 || hostSlot >= PlayerMax || hostSlot == NetLocalHostsSlot || !Hosts[hostSlot].IsValid()
+		|| player < 0 || player >= PlayerMax || !ThisPlayer) {
+		return;
+	}
+	const CNetworkCommandQueue(&ncq)[MaxNetworkCommands] = NetworkIn[cycle & 0xFF][player];
+	if (ncq[0].Time != cycle) {
+		return; // not held (any more)
+	}
+	const CHost host(Hosts[hostSlot].Host, Hosts[hostSlot].Port);
+	CNetworkPacket packet;
+	if (player == ThisPlayer->Index) {
+		const int numcommands = NetworkBuildPacket(ncq, packet);
+		NetworkSendTo(host, packet, numcommands);
+		return;
+	}
+	// The packet as its origin sent it: the commands which were stored for that cycle.
+	int numcommands = 0;
+	packet.Header.Cycle = cycle & 0xFF;
+	packet.Header.OrigPlayer = player;
+	for (int i = 0; i < MaxNetworkCommands && ncq[i].Type != MessageNone; ++i) {
+		if (ncq[i].Time != cycle) {
+			continue;
+		}
+		packet.Header.Type[numcommands] = ncq[i].Type;
+		packet.Command[numcommands] = ncq[i].Data;
+		++numcommands;
+	}
+	for (int i = numcommands; i < MaxNetworkCommands; ++i) {
+		packet.Header.Type[i] = MessageNone;
+	}
+	std::vector<unsigned char> bytes(packet.Size(numcommands));
+	packet.Serialize(bytes.data(), numcommands);
+	unsigned char buf[mesh::kWireRelayMaxSize];
+	const size_t size = mesh::SerializeRelay(bytes.data(), bytes.size(), NetLocalHostsSlot, buf, sizeof(buf));
+	if (size != 0) {
+		NetworkFildes.Send(host, buf, size);
+	}
+}
+
+/**
+**  The devices agreed that a player is out from a cycle on: his quit goes into his
+**  place of that cycle, where NetworkExecCommands finds it on every device.
+*/
+void CNetworkMeshEngine::InstallQuit(int player, unsigned long cycle, mesh::Reason reason)
+{
+	if (player < 0 || player >= PlayerMax) {
+		return;
+	}
+	CNetworkCommandQueue(&ncq)[MaxNetworkCommands] = NetworkIn[cycle & 0xFF][player];
+	PlayerQuit[player] = 1;
+	if (ncq[0].Time == cycle) {
+		for (int i = 0; i < MaxNetworkCommands && ncq[i].Type != MessageNone; ++i) {
+			if (ncq[i].Time == cycle && ncq[i].Type == MessageQuit) {
+				return; // he left himself, his own quit is held
+			}
+		}
+	}
+	// Whatever else is held for that cycle did not reach every device.
+	CNetworkCommandQuit nc;
+	nc.player = player;
+	// The cycle is the same on every device, so the reason is. Lost at the first cycle a packet
+	// of his was needed: nobody holds one, he has not run a cycle of this game.
+	if (reason == mesh::Reason::Left) {
+		nc.reason = NetQuitLeft;
+	} else if (cycle <= CNetworkParameter::Instance.NetworkLag + 1) {
+		nc.reason = NetQuitNeverStarted;
+	} else {
+		nc.reason = NetQuitLost;
+	}
+	ncq[0].Time = cycle;
+	ncq[0].Type = MessageQuit;
+	ncq[0].Data.resize(nc.Size());
+	nc.Serialize(&ncq[0].Data[0]);
+	for (int i = 1; i < MaxNetworkCommands; ++i) {
+		ncq[i].Clear();
+	}
+}
+
+/**
+**  The game is paused for everybody, or goes on (NET_PAUSE_SPEC.md). The same on every
+**  device: who did it is told in the message line, the scripts show the pause.
+*/
+void CNetworkMeshEngine::SetPaused(bool paused, int player)
+{
+	const char *name = (player >= 0 && player < PlayerMax) ? Players[player].Name.c_str() : "";
+
+	GamePaused = paused;
+	if (GameRunning) { // the message line belongs to a game on the screen
+		if (paused) {
+			SetMessage(_("Paused by %s"), name);
+		} else {
+			SetMessage(_("Resumed by %s"), name);
+		}
+	}
+	ErrorPrint("NETPAUSE %s by player %d (%s) after cycle %lu\n",
+	           paused ? "paused" : "resumed", player, name, GameCycle);
+}
+
+/**
+**  The pause command of a player is executed. The model is told when the cycle is
+**  done: the pause begins after it, on every device.
+**
+**  @param player  Player number.
+*/
+void NetworkExecPause(int player)
+{
+	if (MeshGlue && NetworkPauseAsked == -1) {
+		NetworkPauseAsked = player;
+	}
+}
+
+/**
+**  The local player presses Pause. A game that runs is paused for everybody by a
+**  command of the stream; a paused one goes on for everybody at once.
+**
+**  @return  False if nothing was done: no mesh game, the game has not begun, this device is out.
+*/
+bool NetworkTogglePause()
+{
+	if (!MeshGlue || !ThisPlayer || MeshGlue->Held() || MeshGlue->Lingering() || MeshGlue->Model().IsOut()) {
+		return false;
+	}
+	if (MeshGlue->Paused()) {
+		MeshGlue->OnResume(NetworkTicks());
+		NetworkInSync = IsNetworkCycleReady(GameCycle + CNetworkParameter::Instance.gameCyclesPerUpdate);
+	} else {
+		NetworkSendExtendedCommand(ExtendedMessagePause, 0, ThisPlayer->Index, 0, 0, 0);
+	}
+	return true;
+}
+
+bool NetworkIsPaused()
+{
+	return MeshGlue && MeshGlue->Paused();
+}
+
+/**
+**  Start the model of a mesh game. The game is a mesh with a model only if the table
+**  of the devices is the one the model counts with; otherwise it stays as it was.
+**
+**  @param params  Time bounds of the model.
+*/
+static void NetworkMeshStart(const mesh::Params &params)
+{
+	MeshGlue.reset();
+	if (!NetMesh || !IsNetworkGame() || !ThisPlayer) {
+		return;
+	}
+	if (NetPlayers < 2 || NetPlayers > mesh::kMaxPlayers || NetLocalHostsSlot < 0 || NetLocalHostsSlot >= NetPlayers
+		|| CNetworkParameter::Instance.gameCyclesPerUpdate != 1
+		|| CNetworkParameter::Instance.NetworkLag != mesh::kLag) {
+		DebugPrint("Mesh game without the model: %d hosts\n", NetPlayers);
+		return;
+	}
+	// Host slot -> player number. The model and the wire count in host slots.
+	std::vector<int> slotPlayers;
+	for (int i = 0; i < NetPlayers; ++i) {
+		if (i == NetLocalHostsSlot) {
+			slotPlayers.push_back(ThisPlayer->Index);
+		} else if (Hosts[i].IsValid()) {
+			slotPlayers.push_back(Hosts[i].PlyNr);
+		} else {
+			DebugPrint("Mesh game without the model: host slot %d is empty\n", i);
+			return;
+		}
+	}
+	MeshGlue = std::make_unique<CMeshGlue>(NetworkMeshEngine, slotPlayers, NetLocalHostsSlot, params, NetworkTicks());
+}
+
+/**
+**  The command queue has (or already had) the packet of a player for a cycle, or
+**  something else came from a device: tell the model.
+*/
+static void NetworkMeshPacketSeen(int hostIndex, int player, unsigned long cycle, bool relayed)
+{
+	if (!MeshGlue) {
+		return;
+	}
+	const CNetworkCommandQueue(&ncq)[MaxNetworkCommands] = NetworkIn[cycle & 0xFF][player];
+	if (ncq[0].Time != cycle) {
+		if (!relayed) {
+			MeshGlue->OnHeard(hostIndex, NetworkTicks());
+		}
+		return;
+	}
+	bool quit = false;
+	for (int i = 0; i < MaxNetworkCommands && ncq[i].Type != MessageNone; ++i) {
+		quit = quit || (ncq[i].Time == cycle && ncq[i].Type == MessageQuit);
+	}
+	MeshGlue->OnPacket(hostIndex, player, cycle, quit, NetworkTicks());
+}
+
+/// Mesh: the bounds asked for by the scripts, in seconds; 0 = the model's default
+static int MeshDropSeconds = 0;
+static int MeshLoadSeconds = 0;
+
+/**
+**  Mesh: the bound of one absence and the bound of a live slow loader, for the games
+**  started from now on.
+**
+**  @param dropSeconds  Seconds a silent player is waited for in the game, 0 = the default.
+**  @param loadSeconds  Seconds a loading player is waited for at the start, 0 = the default.
+*/
+void NetworkSetMeshTimeouts(int dropSeconds, int loadSeconds)
+{
+	MeshDropSeconds = dropSeconds > 0 ? dropSeconds : 0;
+	MeshLoadSeconds = loadSeconds > 0 ? loadSeconds : 0;
+}
+
+/**
+**  Who a mesh game waits for.
+*/
+CNetworkWaitState NetworkGetWaitState()
+{
+	if (!MeshGlue) {
+		return CNetworkWaitState();
+	}
+	return MeshGlue->WaitState(NetworkTicks());
+}
+
+/**
+**  Why a player is out of the network game.
+**
+**  @param player  Player number.
+**
+**  @return  ENetQuitReason, -1 while his quit has not been executed.
+*/
+int NetworkGetQuitReason(int player)
+{
+	if (player < 0 || player >= PlayerMax || !PlayerGone[player]) {
+		return -1;
+	}
+	return PlayerQuitReason[player];
+}
+
+/**
+**  Mesh game: the game has not begun on every device (B.4). No cycle runs and no
+**  command of the local player is taken until every device has loaded, or the ones
+**  which did not are removed.
+*/
+bool NetworkIsHeld()
+{
+	return MeshGlue && MeshGlue->Held();
+}
+
+/**
+**  The own load of the game is done and the game loop begins. Mesh game: from now
+**  on the others are told so, and the wait for them has its bounds.
+*/
+void NetworkGameLoaded()
+{
+	if (MeshGlue) {
+		MeshGlue->OnLoaded(NetworkTicks());
+	}
+}
+
+/**
+**  Called again and again while a game loads. Mesh game: tell the others that this
+**  device is alive and still loads, so that they do not take it for a dead one.
+**  Nothing is read here; what the others send waits on the socket for the game loop.
+*/
+void NetworkLoadingPing()
+{
+	static unsigned long lastPing;
+
+	if (!NetMesh || !IsNetworkGame() || NetConnectRunning || GameRunning
+		|| (MeshGlue && MeshGlue->Loaded())) {
+		return;
+	}
+	const unsigned long now = NetworkTicks();
+	if (now - lastPing < MeshLoadingPingMs) {
+		return;
+	}
+	lastPing = now;
+	if (MeshGlue) {
+		MeshGlue->Tick(now); // before the end of the load the model sends its "still loading" only
+	} else {
+		// The map loads and the game is not set up yet: the same message without the model.
+		mesh::Msg message;
+		message.kind = mesh::Kind::Loading;
+		NetworkBroadcastMesh(message);
+	}
 }
 
 //----------------------------------------------------------------------------
@@ -461,6 +972,7 @@ void ExitNetwork1()
 	NetworkStat.print();
 #endif
 
+	MeshGlue.reset();
 	NetworkFildes.Close();
 	NetExit(); // machine dependent setup
 
@@ -524,9 +1036,24 @@ void NetworkOnStartGame()
 	NetworkFirstDesyncSampleCycle = 0;
 	NetworkGameInSync = true;
 	ranges::fill(PlayerQuit, 0);
-	ranges::fill(NetworkLastFrame, 0);
+	ranges::fill(PlayerGone, 0);
+	ranges::fill(PlayerQuitReason, 0);
+	NetworkQuitAnnounced = false;
+	ranges::fill(NetworkLastTick, 0);
 	ranges::fill(NetworkLastCycle, 0);
 	ResetSyncDebugCycleHistory();
+	mesh::Params params;
+	if (MeshDropSeconds > 0) {
+		params.dropMs = MeshDropSeconds * 1000;
+	}
+	if (MeshLoadSeconds > 0) {
+		params.loadMs = MeshLoadSeconds * 1000;
+	}
+	NetworkMeshStart(params);
+	if (MeshGlue) {
+		// Held (B.4): no cycle runs until every device has loaded.
+		NetworkInSync = false;
+	}
 }
 
 //----------------------------------------------------------------------------
@@ -556,6 +1083,9 @@ void NetworkSendCommand(int command,
                         const CUnitType *type,
                         EFlushMode flush)
 {
+	if (NetworkIsHeld()) {
+		return; // the game has not begun: nobody gives an order ahead of the others
+	}
 	CNetworkCommandQueue ncq;
 
 	ncq.Time = GameCycle;
@@ -599,6 +1129,9 @@ void NetworkSendCommand(int command,
 void NetworkSendExtendedCommand(int command, int arg1, int arg2, int arg3,
 								int arg4, int status)
 {
+	if (NetworkIsHeld()) {
+		return; // the game has not begun
+	}
 	CNetworkCommandQueue ncq;
 
 	ncq.Time = GameCycle;
@@ -630,7 +1163,7 @@ void NetworkSendSelection(CUnit **units, int count)
 		return ThisPlayer->Index != host.PlyNr && host.IsValid()
 		    && Players[host.PlyNr].Team == ThisPlayer->Team;
 	});
-	if (!hasteammates) {
+	if (!hasteammates || NetworkIsHeld()) {
 		return;
 	}
 	// Build and send packets to cover all units.
@@ -715,7 +1248,19 @@ static bool IsNetworkCommandReady(unsigned long gameNetCycle)
 	return true;
 }
 
-static void ParseResendCommand(const CNetworkPacket &packet)
+/**
+**  The next cycle may run. In a mesh game the model decides (it knows who is out and
+**  who is frozen); the queue is asked as well, the two must never differ.
+*/
+static bool IsNetworkCycleReady(unsigned long gameNetCycle)
+{
+	if (MeshGlue && !MeshGlue->CanExecute(gameNetCycle)) {
+		return false;
+	}
+	return IsNetworkCommandReady(gameNetCycle);
+}
+
+static void ParseResendCommand(const CNetworkPacket &packet, const CHost &host)
 {
 	if (!ThisPlayer) {
 		DebugPrint("Ignoring resend command before local player is initialized\n");
@@ -733,7 +1278,10 @@ static void ParseResendCommand(const CNetworkPacket &packet)
 		// Asking for a cycle we haven't gotten to yet, ignore for now
 		return;
 	}
-	NetworkSendPacket(NetworkIn[gameNetCycle & 0xFF][ThisPlayer->Index]);
+	// Only the asker misses the packet.
+	CNetworkPacket own;
+	const int numcommands = NetworkBuildPacket(NetworkIn[gameNetCycle & 0xFF][ThisPlayer->Index], own);
+	NetworkSendTo(host, own, numcommands);
 	// Check if a player quit this cycle
 	for (int j = 0; j < NetPlayers; ++j) {
 		if (!Hosts[j].IsValid()) {
@@ -745,12 +1293,13 @@ static void ParseResendCommand(const CNetworkPacket &packet)
 			if (ncq->Time && ncq->Type == MessageQuit) {
 				CNetworkPacket np;
 				np.Header.Cycle = ncq->Time & 0xFF;
+				np.Header.OrigPlayer = Hosts[j].PlyNr; // the player who quit, not the sender
 				np.Header.Type[0] = MessageQuit;
 				np.Command[0] = ncq->Data;
 				for (int k = 1; k < MaxNetworkCommands; ++k) {
 					np.Header.Type[k] = MessageNone;
 				}
-				NetworkBroadcast(np, 1);
+				NetworkSendTo(host, np, 1);
 				break;
 			}
 		}
@@ -764,8 +1313,10 @@ static bool IsAValidCommand_Command(const CNetworkPacket &packet, int index, con
 	const unsigned int slot = nc.Unit;
 	const CUnit *unit = slot < UnitManager->GetUsedSlotCount() ? &UnitManager->GetSlotUnit(slot) : nullptr;
 
-	if (unit && (unit->Player->Index == player
-				 || Players[player].IsTeamed(*unit) || unit->Player->Type == PlayerTypes::PlayerNeutral)) {
+	// Nobody commands the units of a player who has quit.
+	if (unit && !PlayerGone[unit->Player->Index]
+		&& (unit->Player->Index == player
+			|| Players[player].IsTeamed(*unit) || unit->Player->Type == PlayerTypes::PlayerNeutral)) {
 		return true;
 	} else {
 		return false;
@@ -801,7 +1352,7 @@ static bool IsAValidCommand(const CNetworkPacket &packet, int index, const int p
 	// FIXME: not all values in nc have been validated
 }
 
-static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHost &host)
+static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHost &host, bool relayed)
 {
 	if (!ThisPlayer) {
 		DebugPrint("Ignoring in-game network event before local player is initialized\n");
@@ -811,19 +1362,36 @@ static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHo
 	int commands;
 	packet.Deserialize(buf, len, &commands);
 
+	// A packet is taken only from the address a player is known at.
 	int player = packet.Header.OrigPlayer;
-	if (player == 255) {
-		const int index = FindHostIndexBy(host);
-		if (index == -1 || PlayerQuit[Hosts[index].PlyNr]) {
+	const int index = FindHostIndexBy(host);
+	if (index == -1 || (player == 255 && PlayerQuit[Hosts[index].PlyNr])) {
 #ifdef DEBUG
-			const std::string hostStr = host.toString();
-			DebugPrint("Not a host in play: %s\n", hostStr.c_str());
+		const std::string hostStr = host.toString();
+		DebugPrint("Not a host in play: %s\n", hostStr.c_str());
 #endif
+		return;
+	}
+	if (MeshGlue && !MeshGlue->Accepts(index)) {
+		// Frozen by a removal round, or removed: nothing of his is taken; the model may answer.
+		MeshGlue->OnHeard(index, NetworkTicks());
+		return;
+	}
+	if (relayed) {
+		// Passed on by another device: it must be the packet of a player of this game.
+		if (!MeshGlue || player == ThisPlayer->Index || MeshGlue->SlotOfPlayer(player) == -1
+			|| PlayerGone[player]) {
 			return;
 		}
+	} else if (player == 255) {
 		player = Hosts[index].PlyNr;
+	} else if (player != Hosts[index].PlyNr
+			   && (NetMesh || NetConnectType == 1 || index != 0 || player >= PlayerMax)) {
+		// Only the server passes on the packets of other players, and in a mesh nobody does.
+		DebugPrint("Player %d sent a packet of player %d\n", Hosts[index].PlyNr, player);
+		return;
 	}
-	if (NetConnectType == 1) {
+	if (NetConnectType == 1 && !NetMesh) {
 		if (player != 255) {
 			NetworkBroadcast(packet, commands, player);
 		}
@@ -832,7 +1400,40 @@ static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHo
 		DebugPrint("Bad packet read\n");
 		return;
 	}
+	if (MeshGlue) {
+		// With the model a quit is the leaver's own, and a request is no content of a relay.
+		for (int i = 0; i != commands; ++i) {
+			if (packet.Header.Type[i] == MessageResend && relayed) {
+				return;
+			}
+			if (packet.Header.Type[i] == MessageQuit) {
+				CNetworkCommandQuit nc;
+				nc.Deserialize(&packet.Command[i][0]);
+				if (nc.player != player) {
+					DebugPrint("Player %d sent the quit of player %d\n", player, nc.player);
+					return;
+				}
+			}
+		}
+	}
 	NetworkLastCycle[player] = packet.Header.Cycle;
+	// Destination cycle (time to execute).
+	unsigned long gameNetCycle = ((GameCycle + 128) & ~0xFF) | packet.Header.Cycle;
+	if (gameNetCycle > GameCycle + 128) {
+		gameNetCycle -= 0x100;
+	}
+	if (commands == 0 || packet.Header.Type[0] != MessageResend) {
+		// The first packet of a player for a cycle wins, a later one changes nothing.
+		// A packet for a cycle already executed comes too late.
+		if (gameNetCycle <= GameCycle
+			|| NetworkIn[packet.Header.Cycle][player][0].Time == gameNetCycle) {
+			if (!relayed) {
+				NetworkLastTick[player] = NetworkTicks(); // still a sign of life
+			}
+			NetworkMeshPacketSeen(index, player, gameNetCycle, relayed);
+			return;
+		}
+	}
 	// Parse the packet commands.
 	for (int i = 0; i != commands; ++i) {
 		// Handle some messages.
@@ -846,21 +1447,21 @@ static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHo
 			}
 		}
 		if (packet.Header.Type[i] == MessageResend) {
-			ParseResendCommand(packet);
+			ParseResendCommand(packet, host);
+			if (MeshGlue) {
+				MeshGlue->OnHeard(index, NetworkTicks());
+			}
 			return;
 		}
 		// Receive statistic
-		NetworkLastFrame[player] = FrameCounter;
+		if (!relayed) {
+			NetworkLastTick[player] = NetworkTicks();
+		}
 
 		bool validCommand = IsAValidCommand(packet, i, player);
 		// Place in network in
 		if (validCommand) {
-			// Destination cycle (time to execute).
-			unsigned long n = ((GameCycle + 128) & ~0xFF) | packet.Header.Cycle;
-			if (n > GameCycle + 128) {
-				n -= 0x100;
-			}
-			NetworkIn[packet.Header.Cycle][player][i].Time = n;
+			NetworkIn[packet.Header.Cycle][player][i].Time = gameNetCycle;
 			NetworkIn[packet.Header.Cycle][player][i].Type = packet.Header.Type[i];
 			NetworkIn[packet.Header.Cycle][player][i].Data = packet.Command[i];
 		} else {
@@ -873,11 +1474,12 @@ static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHo
 	for (int i = commands; i != MaxNetworkCommands; ++i) {
 		NetworkIn[packet.Header.Cycle][player][i].Time = 0;
 	}
+	NetworkMeshPacketSeen(index, player, gameNetCycle, relayed);
 	// Waiting for this time slot
 	if (!NetworkInSync) {
 		const int networkUpdates = CNetworkParameter::Instance.gameCyclesPerUpdate;
 		unsigned long n = ((GameCycle / networkUpdates) + 1) * networkUpdates;
-		if (IsNetworkCommandReady(n) == true) {
+		if (IsNetworkCycleReady(n) == true) {
 			NetworkInSync = true;
 		}
 	}
@@ -906,6 +1508,12 @@ void NetworkEvent()
 		return;
 	}
 
+	// Mesh datagrams, also while the room still runs (the probes)
+	if (len > 0 && buf[0] == MessageMesh) {
+		NetworkParseMeshEvent(buf.data(), len, host);
+		return;
+	}
+
 	if (OnlineContextHandler->handleUDP(buf.data(), len, host)) {
 		return;
 	}
@@ -924,19 +1532,54 @@ void NetworkEvent()
 }
 
 /**
-**  Quit the game.
+**  Mesh game, the local player has left (B.6 step 2): stay until the others had their
+**  time to ask for his last packets. The model answers their requests and says when
+**  it is enough (no request for a while, or its cap). The quit itself is repeated
+**  meanwhile, so that a device which lost it need not notice that first.
+**
+**  @param quit  The quit of the local player in his place of the queue.
+*/
+static void NetworkMeshLinger(const CNetworkCommandQueue(&quit)[MaxNetworkCommands])
+{
+	const unsigned long start = NetworkTicks();
+	unsigned long lastSent = start;
+
+	while (MeshGlue->Lingering() && NetworkTicks() - start < MeshLingerMaxMs) {
+		if (NetworkFildes.HasDataToRead(MeshLingerPollMs) > 0) {
+			std::array<unsigned char, 1024> buf;
+			CHost host;
+			const int len = NetworkFildes.Recv(buf.data(), buf.size(), &host);
+			// The game is over here: only what the model answers is read.
+			if (len > 0 && buf[0] == MessageMesh) {
+				NetworkParseMeshEvent(buf.data(), len, host);
+			}
+		}
+		const unsigned long now = NetworkTicks();
+		if (now - lastSent >= MeshQuitRepeatMs) {
+			lastSent = now;
+			NetworkSendPacket(quit);
+		}
+		MeshGlue->Tick(now);
+	}
+}
+
+/**
+**  Quit the game: tell the others, once per game. Called while the cycle of the game
+**  is still the one it stopped at.
 */
 void NetworkQuitGame()
 {
-	if (!ThisPlayer || IsNetworkGame() == false) {
+	if (!ThisPlayer || IsNetworkGame() == false || NetworkQuitAnnounced) {
 		return;
 	}
+	NetworkQuitAnnounced = true;
 	const int gameCyclesPerUpdate = CNetworkParameter::Instance.gameCyclesPerUpdate;
 	const int NetworkLag = CNetworkParameter::Instance.NetworkLag;
 	const int n = (GameCycle + gameCyclesPerUpdate) / gameCyclesPerUpdate * gameCyclesPerUpdate + NetworkLag;
 	CNetworkCommandQueue(&ncqs)[MaxNetworkCommands] = NetworkIn[n & 0xFF][ThisPlayer->Index];
 	CNetworkCommandQuit nc;
 	nc.player = ThisPlayer->Index;
+	nc.reason = NetQuitLeft;
 	ncqs[0].Type = MessageQuit;
 	ncqs[0].Time = n;
 	ncqs[0].Data.resize(nc.Size());
@@ -946,6 +1589,12 @@ void NetworkQuitGame()
 		ncqs[i].Data.clear();
 	}
 	NetworkSendPacket(ncqs);
+	if (MeshGlue) {
+		MeshGlue->OnQuit(NetworkTicks());
+		NetworkMeshLinger(ncqs);
+		// This device takes no part any more; a game which loads next has no model yet.
+		MeshGlue.reset();
+	}
 }
 
 static void NetworkExecCommand_Sync(const CNetworkCommandQueue &ncq, int player)
@@ -1043,15 +1692,32 @@ static void NetworkExecCommand_Chat(const CNetworkCommandQueue &ncq)
 	CommandLog("chat", nullptr, EFlushMode::On, -1, -1, nullptr, nc.Text.c_str(), -1);
 }
 
+/**
+**  The quit of a player is executed: he is out for good.
+**
+**  The one place a quit of the command stream ends in. Also called by the debug quit of the
+**  debug bridge, which has no stream.
+**
+**  @param player  Player number.
+**  @param reason  ENetQuitReason.
+*/
+void NetworkExecQuit(int player, int reason)
+{
+	NetworkRemovePlayer(player);
+	PlayerGone[player] = 1;
+	PlayerQuitReason[player] = reason;
+	CommandLog("quit", nullptr, EFlushMode::On, player, -1, nullptr, nullptr, -1);
+	CommandQuit(player, reason);
+}
+
 static void NetworkExecCommand_Quit(const CNetworkCommandQueue &ncq)
 {
 	Assert((ncq.Type & 0x7F) == MessageQuit);
 	CNetworkCommandQuit nc;
 
 	nc.Deserialize(&ncq.Data[0]);
-	NetworkRemovePlayer(nc.player);
-	CommandLog("quit", nullptr, EFlushMode::On, nc.player, -1, nullptr, nullptr, -1);
-	CommandQuit(nc.player);
+	const int reason = nc.reason < NetQuitReasonCount ? nc.reason : NetQuitLeft;
+	NetworkExecQuit(nc.player, reason);
 }
 
 static void NetworkExecCommand_ExtendedCommand(const CNetworkCommandQueue &ncq)
@@ -1182,7 +1848,45 @@ void NetworkCommands()
 	// Send messages to all clients (other players)
 	NetworkSendCommands(gameNetCycle + CNetworkParameter::Instance.NetworkLag);
 	NetworkExecCommands(gameNetCycle);
-	NetworkInSync = IsNetworkCommandReady(gameNetCycle + CNetworkParameter::Instance.gameCyclesPerUpdate);
+	if (MeshGlue) {
+		const unsigned long now = NetworkTicks();
+		MeshGlue->OnExecuted(gameNetCycle, now);
+		if (NetworkPauseAsked != -1) {
+			// The pause begins after this cycle; the test below then holds the next one.
+			MeshGlue->OnPause(NetworkPauseAsked, now);
+		}
+		MeshGlue->Tick(now);
+	}
+	NetworkPauseAsked = -1;
+	NetworkInSync = IsNetworkCycleReady(gameNetCycle + CNetworkParameter::Instance.gameCyclesPerUpdate);
+}
+
+/**
+**  A player timed out: place his quit in the next cycle and tell the others.
+**
+**  @param playerIndex  Player number
+*/
+static void NetworkTimeOutPlayer(int playerIndex)
+{
+	const unsigned int nextGameNetCycle = GameCycle / CNetworkParameter::Instance.gameCyclesPerUpdate + 1;
+	CNetworkCommandQuit nc;
+	nc.player = playerIndex;
+	CNetworkCommandQueue *ncq = &NetworkIn[nextGameNetCycle & 0xFF][playerIndex][0];
+	ncq->Time = nextGameNetCycle * CNetworkParameter::Instance.gameCyclesPerUpdate;
+	ncq->Type = MessageQuit;
+	ncq->Data.resize(nc.Size());
+	nc.Serialize(&ncq->Data[0]);
+	PlayerQuit[playerIndex] = 1;
+
+	// The packet names the player it is about and carries his quit.
+	CNetworkPacket np;
+	np.Header.Cycle = ncq->Time & 0xFF;
+	np.Header.OrigPlayer = playerIndex;
+	np.Header.Type[0] = ncq->Type;
+	np.Header.Type[1] = MessageNone;
+	np.Command[0] = ncq->Data;
+
+	NetworkBroadcast(np, 1, playerIndex);
 }
 
 static void CheckPlayerThatTimeOut(int hostIndex)
@@ -1191,11 +1895,12 @@ static void CheckPlayerThatTimeOut(int hostIndex)
 		return;
 	}
 	const int playerIndex = Hosts[hostIndex].PlyNr;
-	const unsigned long lastFrame = NetworkLastFrame[playerIndex];
-	if (!lastFrame) {
+	const unsigned long lastTick = NetworkLastTick[playerIndex];
+	if (!lastTick) {
 		return;
 	}
-	const int secs = (FrameCounter - lastFrame) / CyclesPerSecond;
+	// Real time: a count of frames runs at the speed of the display.
+	const int secs = (NetworkTicks() - lastTick) / 1000;
 	// FIXME: display a menu while we wait
 	const int timeoutInS = CNetworkParameter::Instance.timeoutInS;
 	if (3 <= secs && secs < timeoutInS && FrameCounter % CyclesPerSecond == 0) {
@@ -1203,23 +1908,8 @@ static void CheckPlayerThatTimeOut(int hostIndex)
 				   (timeoutInS - secs) / 60, (timeoutInS - secs) % 60);
 	}
 	if (secs >= timeoutInS) {
-		const unsigned int nextGameNetCycle = GameCycle / CNetworkParameter::Instance.gameCyclesPerUpdate + 1;
-		CNetworkCommandQuit nc;
-		nc.player = playerIndex;
-		CNetworkCommandQueue *ncq = &NetworkIn[nextGameNetCycle & 0xFF][playerIndex][0];
-		ncq->Time = nextGameNetCycle * CNetworkParameter::Instance.gameCyclesPerUpdate;
-		ncq->Type = MessageQuit;
-		ncq->Data.resize(nc.Size());
-		nc.Serialize(&ncq->Data[0]);
-		PlayerQuit[playerIndex] = 1;
+		NetworkTimeOutPlayer(playerIndex);
 		SetMessage("%s", _("Timed out"));
-
-		CNetworkPacket np;
-		np.Header.Cycle = ncq->Time & 0xFF;
-		np.Header.Type[0] = ncq->Type;
-		np.Header.Type[1] = MessageNone;
-
-		NetworkBroadcast(np, 1);
 	}
 }
 
@@ -1248,6 +1938,44 @@ static void NetworkResendCommands()
 }
 
 /**
+**  Mesh game: let the model ask for what is missing, wait for the silent and remove
+**  the lost, then ask it whether the next cycle may run.
+*/
+static void NetworkMeshUpdate()
+{
+	MeshGlue->Tick(NetworkTicks());
+	NetworkInSync = IsNetworkCycleReady(GameCycle + 1);
+	if (MeshGlue->Paused()) {
+		GamePaused = true; // a window that closes lets the game run again; not this pause
+	}
+}
+
+/**
+**  Mesh game: the text of the wait, once a second.
+*/
+static void NetworkMeshShowWaiting()
+{
+	if (NetworkWaitScripted()) {
+		// The scripts show the wait themselves (Lua NetWaitFrame).
+		return;
+	}
+	if (FrameCounter % CyclesPerSecond != 0) {
+		return;
+	}
+	const CNetworkWaitState state = NetworkGetWaitState();
+	// FIXME: display a menu while we wait
+	if (state.SelfOut) {
+		SetMessage("%s", _("Connection to the game lost"));
+	} else if (state.Player != -1 && state.Removing) {
+		SetMessage(_("Removing player \"%s\""), Players[state.Player].Name.c_str());
+	} else if (state.Player != -1) {
+		const int secs = (state.MsLeft + 999) / 1000;
+		SetMessage(_("Waiting for player \"%s\": %d:%02d"), Players[state.Player].Name.c_str(),
+				   secs / 60, secs % 60);
+	}
+}
+
+/**
 **  Recover network.
 */
 void NetworkRecover()
@@ -1259,6 +1987,12 @@ void NetworkRecover()
 	if (FrameCounter % CNetworkParameter::Instance.gameCyclesPerUpdate != 0) {
 		return;
 	}
+	if (MeshGlue) {
+		// No time-out by the own clock and no quit made up here: the devices agree on it.
+		NetworkMeshUpdate();
+		NetworkMeshShowWaiting();
+		return;
+	}
 	for (int i = 0; i < NetPlayers; ++i) {
 		if (ThisPlayer->Index == Hosts[i].PlyNr) {
 			continue; // skip self
@@ -1268,6 +2002,136 @@ void NetworkRecover()
 	NetworkResendCommands();
 	const unsigned int nextGameNetCycle = GameCycle / CNetworkParameter::Instance.gameCyclesPerUpdate + 1;
 	NetworkInSync = IsNetworkCommandReady(nextGameNetCycle);
+}
+
+//----------------------------------------------------------------------------
+//  Test hooks
+//----------------------------------------------------------------------------
+
+/**
+**  Parse an in-game packet as if it had been received from host.
+**
+**  @param buf   Packet.
+**  @param len   Size of the packet.
+**  @param host  Host the packet comes from.
+*/
+void NetworkTestParseInGameEvent(const unsigned char *buf, int len, const CHost &host)
+{
+	NetworkParseInGameEvent(buf, len, host);
+}
+
+/**
+**  Get the stored command of a player for a cycle.
+**
+**  @param cycle   Cycle to execute the command.
+**  @param player  Player number.
+**  @param index   Index of the command in the packet.
+**  @param type    Out: command type.
+**  @param data    Out: command content (network format).
+**
+**  @return  false if the store holds no such command of that cycle.
+*/
+bool NetworkTestGetCommand(unsigned long cycle, int player, int index,
+                           unsigned char &type, std::vector<unsigned char> &data)
+{
+	const CNetworkCommandQueue &ncq = NetworkIn[cycle & 0xFF][player][index];
+
+	if (ncq.Time != cycle) {
+		return false;
+	}
+	type = ncq.Type;
+	data = ncq.Data;
+	return true;
+}
+
+/**
+**  Time out a player now, without the wait and without the message on the screen.
+**
+**  @param player  Player number.
+*/
+void NetworkTestTimeOutPlayer(int player)
+{
+	NetworkTimeOutPlayer(player);
+}
+
+/**
+**  Player is marked as quit.
+**
+**  @param player  Player number.
+*/
+bool NetworkTestPlayerQuit(int player)
+{
+	return PlayerQuit[player] != 0;
+}
+
+/**
+**  Handle a mesh datagram as if it had been received from host.
+**
+**  @param buf   Datagram.
+**  @param len   Size of the datagram.
+**  @param host  Host the datagram comes from.
+*/
+void NetworkTestParseMeshEvent(const unsigned char *buf, int len, const CHost &host)
+{
+	NetworkParseMeshEvent(buf, len, host);
+}
+
+/**
+**  Take the mesh messages accepted since the last call.
+**
+**  @return  Host slot of the sender and message, oldest first.
+*/
+std::vector<std::pair<int, mesh::Msg>> NetworkTestTakeMeshMessages()
+{
+	std::vector<std::pair<int, mesh::Msg>> res(NetworkMeshReceived.begin(), NetworkMeshReceived.end());
+
+	NetworkMeshReceived.clear();
+	return res;
+}
+
+/**
+**  Number of mesh datagrams dropped.
+*/
+unsigned int NetworkTestMeshDropped()
+{
+	return NetworkMeshDropped;
+}
+
+/**
+**  Start the model of a mesh game with the given time bounds (NetMesh must be on).
+**
+**  @return  false if the game is none the model counts with.
+*/
+bool NetworkTestMeshStart(const mesh::Params &params)
+{
+	NetworkMeshStart(params);
+	return MeshGlue != nullptr;
+}
+
+/**
+**  End the model of the mesh game.
+*/
+void NetworkTestMeshStop()
+{
+	MeshGlue.reset();
+}
+
+/**
+**  What NetworkRecover does in a mesh game, without the text on the screen.
+*/
+void NetworkTestMeshUpdate()
+{
+	if (MeshGlue) {
+		NetworkMeshUpdate();
+	}
+}
+
+/**
+**  The model of the running mesh game, null if there is none.
+*/
+const CMeshGlue *NetworkTestMeshGlue()
+{
+	return MeshGlue.get();
 }
 
 //@}

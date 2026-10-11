@@ -264,9 +264,27 @@ static bool AiBuildBuilding(const CUnitType &type, CUnitType &building, const Ve
 	std::vector<CUnit *> table = FindPlayerUnitsByType(*AiPlayer->Player, type, true);
 
 	// Remove all workers on the way building something
+	std::vector<CUnit *> gatherers;
+	for (CUnit *unit : table) {
+		// A worker that is out gathering and stands on the map can be called off to build when
+		// the idle ones find no place (see below). Not one that was called off a moment ago: its
+		// gathering order is still the current one until its next action, with the build order
+		// behind it, and a second build order would throw the first away unreported.
+		if (IsAlreadyWorking(*unit) && !unit->Removed && unit->Orders.size() == 1
+			&& unit->CurrentAction() == UnitAction::Resource && !unit->CurrentOrder()->Finished) {
+			gatherers.push_back(unit);
+		}
+	}
 	ranges::erase_if(table, [](const CUnit *unit) { return IsAlreadyWorking(*unit); });
 	if (table.empty()) {
-		// No workers available to build
+		// No idle worker: one that is gathering builds (seen: a base whose only idle worker
+		// stood in a closed pocket never got a farm, with every other worker in the mine run).
+		for (size_t i = 0; i < gatherers.size() && i < 3; ++i) {
+			if (auto pos = AiFindBuildingPlace(*gatherers[i], building, nearPos)) {
+				CommandBuildBuilding(*gatherers[i], *pos, building, EFlushMode::On);
+				return true;
+			}
+		}
 		return false;
 	}
 
@@ -277,6 +295,14 @@ static bool AiBuildBuilding(const CUnitType &type, CUnitType &building, const Ve
 		CommandBuildBuilding(candidate, *pos, building, EFlushMode::On);
 		return true;
 	} else {
+		// The idle worker found no place from where it stands: let a gathering one try from its
+		// own position (at most three, the search is costly).
+		for (size_t i = 0; i < gatherers.size() && i < 3; ++i) {
+			if (auto pos = AiFindBuildingPlace(*gatherers[i], building, nearPos)) {
+				CommandBuildBuilding(*gatherers[i], *pos, building, EFlushMode::On);
+				return true;
+			}
+		}
 		//when first worker can't build then rest also won't be able (save CPU)
 		if (Map.Info.IsPointOnMap(nearPos)) {
 			//Crush CPU !!!!!
@@ -822,10 +848,56 @@ void AiAddUpgradeToRequest(CUnitType &type)
 }
 
 /**
+**  Take back the "made" count of building requests that nothing stands for any more.
+**
+**  A building request counts as made from the moment a worker is ordered to build it. The worker
+**  reports when it cannot reach the place or cannot build; an order that is replaced before the
+**  building is started reports nothing, and the request would wait for ever. What stands for a
+**  made building is a building site of the type or a worker that still holds the order.
+*/
+static void AiReleaseLostBuildOrders()
+{
+	const auto isMadeBuilding = [](const AiBuildQueue &queue) { return queue.Made && queue.Type->Building; };
+	if (ranges::none_of(AiPlayer->UnitTypeBuilt, isMadeBuilding)) {
+		return;
+	}
+	std::array<int, UnitTypeMax> pending{};
+	for (const CUnit *unit : AiPlayer->Player->GetUnits()) {
+		if (!unit->IsAlive()) {
+			continue;
+		}
+		if (unit->CurrentAction() == UnitAction::Built) {
+			++pending[unit->Type->Slot];
+			continue;
+		}
+		if (unit->Removed && unit->Container && unit->Container->CurrentAction() == UnitAction::Built) {
+			continue; // the worker inside its building site: the site is counted
+		}
+		for (const auto &order : unit->Orders) {
+			if (order->Action == UnitAction::Build) {
+				++pending[static_cast<const COrder_Build &>(*order).GetUnitType().Slot];
+			}
+		}
+	}
+	for (AiBuildQueue &queue : AiPlayer->UnitTypeBuilt) {
+		if (!isMadeBuilding(queue)) {
+			continue;
+		}
+		int &left = pending[queue.Type->Slot];
+		if (left < static_cast<int>(queue.Made)) {
+			queue.Made = left;
+		}
+		left -= queue.Made;
+	}
+}
+
+/**
 **  Check what must be built / trained.
 */
 static void AiCheckingWork()
 {
+	AiReleaseLostBuildOrders();
+
 	// Supply has the highest priority
 	if (AiPlayer->NeedSupply) {
 		if (AiPlayer->UnitTypeBuilt.empty() || AiPlayer->UnitTypeBuilt[0].Type->Stats[AiPlayer->Player->Index].Variables[SUPPLY_INDEX].Value == 0) {

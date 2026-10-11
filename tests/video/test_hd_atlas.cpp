@@ -33,6 +33,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -1326,6 +1327,327 @@ TEST_CASE("hd_atlas DrawAtlasFrameClipScaled bounds safety: invalid frame indice
 	}
 	CHECK(allSentinel);
 	SDL_UnlockSurface(h.screen);
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+// ===========================================================================
+// Classic view — palette colouring of an indexed page
+// ===========================================================================
+
+TEST_CASE("hd_atlas expandPalette6: value x 4, alpha 255, index 0 keyed only on request")
+{
+	// Synthetic palette: entry i = (i & 63, (i * 3) & 63, 63 - (i & 63)).
+	std::vector<uint8_t> ppl(768);
+	for (int i = 0; i < 256; ++i) {
+		ppl[i * 3 + 0] = static_cast<uint8_t>(i & 63);
+		ppl[i * 3 + 1] = static_cast<uint8_t>((i * 3) & 63);
+		ppl[i * 3 + 2] = static_cast<uint8_t>(63 - (i & 63));
+	}
+	ppl[0] = 5; ppl[1] = 6; ppl[2] = 7; // index 0 carries a real colour
+
+	uint8_t tile[256][4];
+	hdatlas::expandPalette6(ppl.data(), false, tile);
+	bool allTimesFour = true;
+	for (int i = 0; i < 256; ++i) {
+		for (int c = 0; c < 3; ++c) {
+			if (tile[i][c] != ppl[i * 3 + c] * 4) {
+				allTimesFour = false;
+			}
+		}
+		if (tile[i][3] != 255) {
+			allTimesFour = false;
+		}
+	}
+	CHECK(allTimesFour);
+	// Tiles: index 0 is a normal, opaque colour.
+	CHECK(tile[0][0] == 20);
+	CHECK(tile[0][1] == 24);
+	CHECK(tile[0][2] == 28);
+	CHECK(tile[0][3] == 255);
+	// The brightest 6-bit value is 252, not 255.
+	CHECK(tile[63][0] == 252);
+
+	uint8_t sprite[256][4];
+	hdatlas::expandPalette6(ppl.data(), true, sprite);
+	CHECK(sprite[0][3] == 0);
+	CHECK(sprite[0][0] == 0);
+	CHECK(std::memcmp(sprite[1], tile[1], 4 * 255) == 0); // every other index is unchanged
+}
+
+TEST_CASE("hd_atlas LoadTexturePacker colours an indexed page by the given palette and keeps only the prefix")
+{
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+	fs::path dir = caseDir("palette_page");
+
+	// 16x8 indexed page: two 8x8 cells. Pixel index = 0..3 by position; the PNG's own palette
+	// is all red, so a result coloured by it would be plainly wrong.
+	const int pw = 16, ph = 8;
+	SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, pw, ph, 8, SDL_PIXELFORMAT_INDEX8);
+	REQUIRE(s != nullptr);
+	SDL_Color red[256];
+	for (int i = 0; i < 256; ++i) {
+		red[i] = SDL_Color{255, 0, 0, 255};
+	}
+	SDL_SetPaletteColors(s->format->palette, red, 0, 256);
+	auto indexAt = [](int x, int y) -> uint8_t { return static_cast<uint8_t>((x + y * 3) & 3); };
+	SDL_LockSurface(s);
+	for (int y = 0; y < ph; ++y) {
+		for (int x = 0; x < pw; ++x) {
+			static_cast<uint8_t *>(s->pixels)[y * s->pitch + x] = indexAt(x, y);
+		}
+	}
+	SDL_UnlockSurface(s);
+	const int rc = IMG_SavePNG(s, (dir / "page.png").string().c_str());
+	SDL_FreeSurface(s);
+	REQUIRE(rc == 0);
+	{
+		// The writer may not keep the page indexed in every SDL_image build; then there is nothing to test.
+		SDL_Surface *back = IMG_Load((dir / "page.png").string().c_str());
+		REQUIRE(back != nullptr);
+		const bool indexed = back->format->BytesPerPixel == 1;
+		SDL_FreeSurface(back);
+		if (!indexed) {
+			MESSAGE("SDL_image did not write an indexed PNG - skipping the palette page test");
+			h.shutdown();
+			return;
+		}
+	}
+	const std::string json =
+	    "{\"frames\": {\n"
+	    "\"Other/thing_0\": {\"frame\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"rotated\": false,"
+	    " \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"sourceSize\": {\"w\":8,\"h\":8}},\n"
+	    "\"Tiles/tile_0\": {\"frame\": {\"x\":8,\"y\":0,\"w\":8,\"h\":8}, \"rotated\": false,"
+	    " \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"sourceSize\": {\"w\":8,\"h\":8}}\n"
+	    "}, \"meta\": {\"image\": \"page.png\"}}\n";
+	writeBytes(dir / "page.json", std::vector<uint8_t>(json.begin(), json.end()));
+
+	// 6-bit palette: index i -> (10 + i, 20 + i, 30 + i).
+	std::vector<uint8_t> ppl(768, 0);
+	for (int i = 0; i < 4; ++i) {
+		ppl[i * 3 + 0] = static_cast<uint8_t>(10 + i);
+		ppl[i * 3 + 1] = static_cast<uint8_t>(20 + i);
+		ppl[i * 3 + 2] = static_cast<uint8_t>(30 + i);
+	}
+
+	CAtlasGraphic g;
+	REQUIRE(g.LoadTexturePacker((dir / "page.json").string(), false, false, ppl.data(), true, "Tiles/tile_"));
+	CHECK(g.NumFrames() == 1);
+	CHECK(g.FrameByName("Other/thing_0") == -1);
+	const int frame = g.FrameByName("Tiles/tile_0");
+	REQUIRE(frame >= 0);
+
+	SDL_SetRenderDrawColor(h.renderer, 1, 2, 3, 255);
+	SDL_RenderClear(h.renderer);
+	const int dstX = 10, dstY = 12;
+	SDL_Rect dst = {dstX, dstY, 8, 8};
+	g.DrawAtlasFrameFull(frame, dst);
+	SDL_RenderPresent(h.renderer);
+
+	SDL_LockSurface(h.screen);
+	const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+	bool exact = true;
+	for (int y = 0; y < 8; ++y) {
+		for (int x = 0; x < 8; ++x) {
+			const int idx = indexAt(8 + x, y); // the second cell of the page
+			const uint8_t *got = sp + static_cast<size_t>(dstY + y) * h.screen->pitch
+			                     + static_cast<size_t>(dstX + x) * 4;
+			// Index 0 included: opaque (10, 20, 30) x 4, not a hole.
+			if (got[0] != (10 + idx) * 4 || got[1] != (20 + idx) * 4 || got[2] != (30 + idx) * 4
+				|| got[3] != 255) {
+				exact = false;
+			}
+		}
+	}
+	CHECK(exact);
+	SDL_UnlockSurface(h.screen);
+
+	// A page that is not indexed cannot be coloured by a palette: the load must fail, not guess.
+	fs::path dir2 = caseDir("palette_page_rgba");
+	CHECK(writePagePng(dir2 / "page.png", pw, ph, patternPixels(pw, ph)));
+	writeBytes(dir2 / "page.json", std::vector<uint8_t>(json.begin(), json.end()));
+	CAtlasGraphic g2;
+	CHECK_FALSE(g2.LoadTexturePacker((dir2 / "page.json").string(), false, false, ppl.data(), true, "Tiles/tile_"));
+	CHECK_FALSE(g2.IsLoaded());
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+// ===========================================================================
+// Classic view — fog masks cut from the same indexed page
+// ===========================================================================
+
+TEST_CASE("hd_atlas classicFogDither: black where column + row inside the cell is even")
+{
+	int kept = 0;
+	bool alternates = true;
+	for (int y = 0; y < 32; ++y) {
+		for (int x = 0; x < 32; ++x) {
+			kept += hdatlas::classicFogDither(x, y);
+			if (x > 0 && hdatlas::classicFogDither(x, y) == hdatlas::classicFogDither(x - 1, y)) {
+				alternates = false;
+			}
+			if (y > 0 && hdatlas::classicFogDither(x, y) == hdatlas::classicFogDither(x, y - 1)) {
+				alternates = false;
+			}
+		}
+	}
+	CHECK(kept == 512); // half of a 32x32 cell
+	CHECK(alternates);
+	CHECK(hdatlas::classicFogDither(0, 0));
+	CHECK_FALSE(hdatlas::classicFogDither(1, 0));
+	// An even cell size keeps the pattern unbroken from one cell to the next.
+	CHECK(hdatlas::classicFogDither(31, 5) != hdatlas::classicFogDither(0, 5));
+}
+
+TEST_CASE("hd_atlas LoadTexturePacker cuts fog masks keyed, with dithered copies and two full cells")
+{
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+	fs::path dir = caseDir("palette_fog_masks");
+
+	// 16x8 indexed page: a tile cell (indices 1..3) and a mask cell (index 2 on its left half and on
+	// one lone pixel, index 0 elsewhere).
+	const int pw = 16, ph = 8;
+	SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, pw, ph, 8, SDL_PIXELFORMAT_INDEX8);
+	REQUIRE(s != nullptr);
+	SDL_Color red[256];
+	for (int i = 0; i < 256; ++i) {
+		red[i] = SDL_Color{255, 0, 0, 255};
+	}
+	SDL_SetPaletteColors(s->format->palette, red, 0, 256);
+	auto maskAt = [](int x, int y) -> bool { return x < 4 || (x == 6 && y == 2); };
+	SDL_LockSurface(s);
+	for (int y = 0; y < ph; ++y) {
+		for (int x = 0; x < pw; ++x) {
+			static_cast<uint8_t *>(s->pixels)[y * s->pitch + x] =
+			    x < 8 ? static_cast<uint8_t>(1 + (x + y) % 3) : static_cast<uint8_t>(maskAt(x - 8, y) ? 2 : 0);
+		}
+	}
+	SDL_UnlockSurface(s);
+	const int rc = IMG_SavePNG(s, (dir / "page.png").string().c_str());
+	SDL_FreeSurface(s);
+	REQUIRE(rc == 0);
+	{
+		SDL_Surface *back = IMG_Load((dir / "page.png").string().c_str());
+		REQUIRE(back != nullptr);
+		const bool indexed = back->format->BytesPerPixel == 1;
+		SDL_FreeSurface(back);
+		if (!indexed) {
+			MESSAGE("SDL_image did not write an indexed PNG - skipping the fog mask test");
+			h.shutdown();
+			return;
+		}
+	}
+	const std::string json =
+	    "{\"frames\": {\n"
+	    "\"Tiles/tile_0\": {\"frame\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"rotated\": false,"
+	    " \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"sourceSize\": {\"w\":8,\"h\":8}},\n"
+	    "\"Fog/mask_1\": {\"frame\": {\"x\":8,\"y\":0,\"w\":8,\"h\":8}, \"rotated\": false,"
+	    " \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"sourceSize\": {\"w\":8,\"h\":8}}\n"
+	    "}, \"meta\": {\"image\": \"page.png\"}}\n";
+	writeBytes(dir / "page.json", std::vector<uint8_t>(json.begin(), json.end()));
+
+	// 6-bit palette: index i -> (10 + i, 20 + i, 30 + i); index 0 carries a colour too.
+	std::vector<uint8_t> ppl(768, 0);
+	for (int i = 0; i < 4; ++i) {
+		ppl[i * 3 + 0] = static_cast<uint8_t>(10 + i);
+		ppl[i * 3 + 1] = static_cast<uint8_t>(20 + i);
+		ppl[i * 3 + 2] = static_cast<uint8_t>(30 + i);
+	}
+	const uint8_t ink[3] = {12 * 4, 22 * 4, 32 * 4}; // index 2
+	const uint8_t bg[3] = {1, 2, 3};
+
+	// Without a mask prefix the mask frame is not kept (the S0 behaviour).
+	{
+		CAtlasGraphic plain;
+		REQUIRE(plain.LoadTexturePacker((dir / "page.json").string(), false, false, ppl.data(), true, "Tiles/tile_"));
+		CHECK(plain.NumFrames() == 1);
+		CHECK(plain.FrameByName("Fog/mask_1") == -1);
+	}
+
+	CAtlasGraphic g;
+	REQUIRE(g.LoadTexturePacker((dir / "page.json").string(), false, false, ppl.data(), true,
+	                            "Tiles/tile_", "Fog/mask_"));
+	CHECK(g.NumFrames() == 5);
+	const int tile = g.FrameByName("Tiles/tile_0");
+	const int mask = g.FrameByName("Fog/mask_1");
+	const int maskDither = g.FrameByName("Fog/mask_1_dither");
+	const int solid = g.FrameByName("Fog/mask_solid");
+	const int solidDither = g.FrameByName("Fog/mask_solid_dither");
+	REQUIRE(tile >= 0);
+	REQUIRE(mask >= 0);
+	REQUIRE(maskDither >= 0);
+	REQUIRE(solid >= 0);
+	REQUIRE(solidDither >= 0);
+
+	// Draw one frame over the background and say, per pixel, whether it must be the masks' colour.
+	auto drawnAs = [&](int frame, uint8_t alpha, const std::function<bool(int, int)> &inked) -> bool {
+		SDL_SetRenderDrawColor(h.renderer, bg[0], bg[1], bg[2], 255);
+		SDL_RenderClear(h.renderer);
+		SDL_Rect dst = {10, 12, 8, 8};
+		g.DrawAtlasFrameFullAlpha(frame, dst, alpha);
+		SDL_RenderPresent(h.renderer);
+		SDL_LockSurface(h.screen);
+		const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+		bool exact = true;
+		for (int y = 0; y < 8; ++y) {
+			for (int x = 0; x < 8; ++x) {
+				const uint8_t *got = sp + static_cast<size_t>(12 + y) * h.screen->pitch
+				                     + static_cast<size_t>(10 + x) * 4;
+				const uint8_t *want = inked(x, y) ? ink : bg;
+				if (got[0] != want[0] || got[1] != want[1] || got[2] != want[2]) {
+					exact = false;
+				}
+			}
+		}
+		SDL_UnlockSurface(h.screen);
+		return exact;
+	};
+	// The mask: its own pixels, opaque; index 0 leaves the ground as it is.
+	CHECK(drawnAs(mask, 255, [&](int x, int y) { return maskAt(x, y); }));
+	// The dithered mask: the mask's pixels on the checkerboard only.
+	CHECK(drawnAs(maskDither, 255, [&](int x, int y) { return maskAt(x, y) && hdatlas::classicFogDither(x, y); }));
+	// The full cells: all of it, and the checkerboard alone.
+	CHECK(drawnAs(solid, 255, [](int, int) { return true; }));
+	CHECK(drawnAs(solidDither, 255, [](int x, int y) { return hdatlas::classicFogDither(x, y); }));
+
+	// The tile beside the masks is still opaque and coloured by the palette.
+	{
+		SDL_SetRenderDrawColor(h.renderer, bg[0], bg[1], bg[2], 255);
+		SDL_RenderClear(h.renderer);
+		SDL_Rect dst = {10, 12, 8, 8};
+		g.DrawAtlasFrameFull(tile, dst);
+		SDL_RenderPresent(h.renderer);
+		SDL_LockSurface(h.screen);
+		const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+		bool exact = true;
+		for (int y = 0; y < 8; ++y) {
+			for (int x = 0; x < 8; ++x) {
+				const int idx = 1 + (x + y) % 3;
+				const uint8_t *got = sp + static_cast<size_t>(12 + y) * h.screen->pitch
+				                     + static_cast<size_t>(10 + x) * 4;
+				if (got[0] != (10 + idx) * 4 || got[1] != (20 + idx) * 4 || got[2] != (30 + idx) * 4) {
+					exact = false;
+				}
+			}
+		}
+		SDL_UnlockSurface(h.screen);
+		CHECK(exact);
+	}
 
 	g.~CAtlasGraphic();
 	new (&g) CAtlasGraphic();

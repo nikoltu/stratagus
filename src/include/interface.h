@@ -296,6 +296,48 @@ extern void HandleCursorMove(int *x, int *y);
 extern void HandleMouseMove(const PixelPos &pos);
 /// Called if the mouse exits the game window (only for some videomodes)
 extern void HandleMouseExit();
+/// A touch ended: no HUD button is under a pointer any more (the cursor is not moved)
+extern void UIClearButtonHover();
+
+//
+// Touch routes (TOUCH-R1, R2, R4, R5, R7: owner decision 2026-10-08). The original has no
+// touch input, so none of this has an original counterpart.
+//
+/// True where the pointer is a finger: a building is placed by a confirming tap on its
+/// preview, and a double tap on empty ground clears the selection.
+inline bool UiTouchMode()
+{
+#ifdef __ANDROID__
+	return true;
+#else
+	return false;
+#endif
+}
+/// TOUCH-R2: may the hold order now being given be followed by queued waypoints? (mouse.cpp)
+extern bool UITouchOrderChainAllowed();
+/// TOUCH-R5: may a tap-then-drag now add its box to the selection? (mouse.cpp)
+extern bool UITouchAddBoxAllowed();
+/// TOUCH-R5: bring back the selection the first tap of the pair has just cleared (mouse.cpp)
+extern void UITouchRestoreClearedSelection();
+
+/// TOUCH-R1: is the group strip on screen and taking touches? (interface.cpp)
+extern bool UiTouchGroupStripShown();
+/// TOUCH-R1: group number (1..9) of the drawn slot at a screen point, 0 if none
+extern int UiTouchGroupSlotAt(const PixelPos &screenPos);
+/// TOUCH-R1: screen rectangle of a group's slot; false if the strip is off or the slot does not fit
+extern bool UiTouchGroupSlotRect(int group, int &x, int &y, int &w, int &h);
+/// TOUCH-R1: 0 not drawn, 1 next free slot, 2 stored, 3 stored and equal to the selection
+extern int UiTouchGroupSlotState(int group);
+/// TOUCH-R1: the slot under a finger (drawn pressed); 0 for none
+extern void UiTouchGroupPress(int group);
+/// TOUCH-R1: tap on a slot: select the group
+extern void UiTouchGroupRecall(int group);
+/// TOUCH-R1: second tap on a slot: centre the view on the group
+extern void UiTouchGroupCentre(int group);
+/// TOUCH-R1: hold on a slot, or tap on the free slot: the selection becomes the group. False if nothing was stored
+extern bool UiTouchGroupStore(int group);
+/// TOUCH-R1: draw the strip (in-game HUD pass)
+extern void DrawTouchGroupStrip();
 
 /// Update KeyModifiers if a key is pressed
 extern bool HandleKeyModifiersDown(unsigned keycode, unsigned keychar);
@@ -365,6 +407,13 @@ bool HandleCommandKey(int key);
 /// Cancel the building input mode
 extern void CancelBuildingMode();
 
+/// PANEL-A: the cells of the selection grid -- the selected units in the order they are shown,
+/// nullptr for the cell of a unit that died (src/ui/mainscr.cpp). Empty with fewer than two units.
+extern const std::vector<CUnit *> &GetSelectionCells();
+/// PANEL-A: the buttons that `cells` cells are drawn in (UI.SelectedButtons or the narrow grid)
+extern const std::vector<CUIButton> &GetSelectionCellButtons(size_t cells);
+/// PANEL-A: a unit is about to die: its cell of the selection grid stays, empty
+extern void SelectionCellUnitDied(const CUnit &unit);
 /// Draw menu button area
 extern void DrawMenuButtonArea();
 /// Draw user defined buttons
@@ -392,6 +441,12 @@ extern void SetMaxMessageCount(int newMax);
 
 /// Draw the timer
 extern void DrawTimer();
+/// Draw the plate of a waiting network game (filled by the scripts)
+extern void DrawNetWaitPlate();
+/// Take the plate of a waiting network game away
+extern void ClearNetWaitPlate();
+/// Lua SetNetWaitPlate: show or hide that plate
+extern int CclSetNetWaitPlate(struct lua_State *l);
 /// Draw the current mission objectives overlay
 extern void DrawObjectives();
 /// Update the timer

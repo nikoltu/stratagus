@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The game's window: no system starting window, so the window that started the game
+         stays on screen until this one has drawn its first frame. -->
+    <style name="GameTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

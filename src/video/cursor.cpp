@@ -248,10 +248,13 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 #endif
 	PushClipping();
 	vp.SetClipping();
-	// NG20: the HD draw path anchors a sprite on its CENTRE, but this passed the tile TOP-LEFT,
-	// so the ghost was offset (and invisible entirely when the classic sprite is absent, as it is
-	// for the winter buildings) -- leaving only the tint squares the owner reported.
-	const PixelPos ghostAnchor = screenPos + CursorBuilding->GetPixelSize() / 2;
+	// The preview is drawn like the building itself: from the footprint's top-left, at the
+	// viewport zoom when the world is drawn straight to the screen (in the offscreen render the
+	// upscale applies the zoom).
+	const float savedGpuZoom = GpuWorldDrawZoom;
+	const float ghostZoom = (TheScreen != vp.GetMapRenderSurface()) ? vp.Zoom : 1.0f;
+	GpuWorldDrawZoom = ghostZoom;
+	const PixelPos ghostAnchor = screenPos;
 	DrawShadow(*CursorBuilding, CursorBuilding->StillFrame, ghostAnchor);
 	DrawUnitType(*CursorBuilding,
 	             CursorBuilding->Sprite.get(),
@@ -259,10 +262,13 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 	             CursorBuilding->StillFrame,
 	             ghostAnchor);
 	if (CursorBuilding->CanAttack && CursorBuilding->Stats->Variables[ATTACKRANGE_INDEX].Value > 0) {
-		const PixelPos center(screenPos + CursorBuilding->GetPixelSize() / 2);
-		const int radius = (CursorBuilding->Stats->Variables[ATTACKRANGE_INDEX].Max + (CursorBuilding->TileWidth - 1)) * PixelTileSize.x + 1;
+		const PixelPos half(CursorBuilding->GetPixelSize() / 2);
+		const PixelPos center(screenPos.x + (int) std::lround(half.x * ghostZoom),
+		                      screenPos.y + (int) std::lround(half.y * ghostZoom));
+		const int radius = (int) std::lround(((CursorBuilding->Stats->Variables[ATTACKRANGE_INDEX].Max + (CursorBuilding->TileWidth - 1)) * PixelTileSize.x + 1) * ghostZoom);
 		Video.DrawCircleClip(ColorRed, center.x, center.y, radius);
 	}
+	GpuWorldDrawZoom = savedGpuZoom;
 
 	//
 	//  Draw the allow overlay
@@ -322,9 +328,63 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 */
 static void DrawBuildingCursor()
 {
-	const CViewport &vp = *UI.MouseViewport;
-	const Vec2i mpos = vp.ScreenToTilePos(CursorScreenPos);
-	DrawBuildingCursorViewport(vp, mpos);
+	// When zoomed, CViewport::Draw renders the preview inside the zoom
+	// offscreen so it upscales correctly; drawing here too would double it.
+	for (CViewport *vp = UI.Viewports; vp < UI.Viewports + UI.NumViewports; ++vp) {
+		Vec2i mpos;
+		if (vp->Zoom == 1.0f && GetBuildingPreviewTile(*vp, mpos)) {
+			DrawBuildingCursorViewport(*vp, mpos);
+		}
+	}
+}
+
+// TOUCH-R7 (owner decision 2026-10-08, option B): with a finger there is no pointer for the
+// preview to follow, so the preview stands on a map tile of its own. A tap or a drag puts it
+// there (ui/mouse.cpp); a tap on it places the building. It keeps its tile while the view is
+// panned or zoomed. Owner's answers of 2026-10-08: Q3 = A, no preview until the map is first
+// touched; Q4 = B, the finger marks the middle of the building (ui/mouse.cpp,
+// TouchPlacementTile). The tile kept here is the footprint's top-left one, which is what
+// DrawBuildingCursorViewport and the build command take.
+static const CUnitType *BuildingPreviewType = nullptr; /// type the tile was set for
+static const CViewport *BuildingPreviewViewport = nullptr;
+static Vec2i BuildingPreviewTilePos(0, 0);
+
+void SetBuildingPreviewTile(const CViewport &vp, const Vec2i &tilePos)
+{
+	BuildingPreviewType = CursorBuilding;
+	BuildingPreviewViewport = &vp;
+	BuildingPreviewTilePos = tilePos;
+}
+
+void ResetBuildingPreview()
+{
+	BuildingPreviewType = nullptr;
+	BuildingPreviewViewport = nullptr;
+}
+
+/**
+**  Where the building-placement preview is drawn, and where a building is placed.
+**
+**  With a mouse: the tile under the pointer, while the pointer is on the map. With a
+**  finger (UiTouchMode): the tile the preview was put on; none until the first touch.
+*/
+bool GetBuildingPreviewTile(const CViewport &vp, Vec2i &tilePos)
+{
+	if (!CursorBuilding) {
+		return false;
+	}
+	if (UiTouchMode()) {
+		if (BuildingPreviewType != CursorBuilding || BuildingPreviewViewport != &vp) {
+			return false;
+		}
+		tilePos = BuildingPreviewTilePos;
+		return true;
+	}
+	if (&vp != UI.MouseViewport || CursorOn != ECursorOn::Map) {
+		return false;
+	}
+	tilePos = vp.ScreenToTilePos(CursorScreenPos);
+	return true;
 }
 
 
@@ -351,10 +411,8 @@ void DrawCursor()
 		const PixelPos cursorStartScreenPos = UI.MouseViewport->MapToScreenPixelPos(CursorStartMapPos);
 
 		DrawVisibleRectangleCursor(cursorStartScreenPos, CursorScreenPos);
-	} else if (CursorBuilding && CursorOn == ECursorOn::Map && (!UI.MouseViewport || UI.MouseViewport->Zoom == 1.0f)) {
+	} else if (CursorBuilding) {
 		// Selecting position for building.
-		// When zoomed, CViewport::Draw renders the preview inside the zoom
-		// offscreen so it upscales correctly; drawing here too would double it.
 		DrawBuildingCursor();
 	}
 

@@ -100,6 +100,51 @@ public:
 
 	void Load();
 
+	/// NG84: mark this font's sheet as authored for a logical screen height (3840x2160 HUD space).
+	/// Load() then scales the glyph sheet by Video.Height / AuthoredHeight BEFORE the glyph widths
+	/// are measured, so the text keeps its size relative to the scaled HUD on any screen. 0 = off,
+	/// which is what the classic fixed-pixel fonts keep.
+	void SetAuthoredHeight(int height) { AuthoredHeight = height; AuthoredWidth = 0; }
+
+	/// NG84: the authored SIZE of the layout this sheet belongs to (the HUD's 3840x2160 space). The
+	/// scale then matches what the layout itself uses -- ComputeUniformScale's aspect-preserving
+	/// min(W/aw, H/ah) -- instead of height alone. On a screen whose fit is width-limited the two
+	/// differ (here 0.7708 vs 0.8083) and text drawn at the height factor is ~5% too big for its box.
+	void SetAuthoredSize(int width, int height) { AuthoredWidth = width; AuthoredHeight = height; }
+
+	/// WORLD-ZOOM-RULE: a face of the in-game HUD. Its sheet is baked for the HUD's art space
+	/// `height` units high (2160) and is scaled by the HUD's own step scale,
+	/// CVideo::HudCanvas.Scale * 2160 / height -- not by the 16:9 fit above, which stays the rule of
+	/// the menus and in-game windows. Evidence: digit "0" of the resource row is 25 px high at a
+	/// 2960x1848 client (work/agent-zoom-rule/captures/c_k_2960x1848.png, rows 11..35) = 38.25 units
+	/// at 0.6667; the fit would give 29.5.
+	void SetAuthoredHud(int height) { AuthoredWidth = 0; AuthoredHeight = height; AuthoredHud = true; }
+
+	/// NG84: declare the SPACE advance in the same authored units as the sheet. The engine's default
+	/// is `G->Width / 2` -- half a whole cell -- which for a proportional HD face is roughly twice
+	/// what the original client shows between words. Scaled by the same factor as the sheet.
+	void SetSpaceAdvance(int authoredPx) { SpaceAdvance = authoredPx; }
+
+	/// NG101: declare the LINE ADVANCE in the same authored units as the sheet. It belongs on the
+	/// FONT rather than on a label because the original's leading is a property of the typeface, not
+	/// of one widget: measured pitch/ink is 1.90 on the menu face (tips-menu, 82.5/43.5) and 1.92 on
+	/// the small face (NG84's objectives, 72/37.5), while ours -- taking the pitch from the sheet's
+	/// CELL -- is 2.26. Scaled by the same factor as the sheet; 0 keeps the cell height, which is
+	/// what every classic fixed-pixel font uses.
+	void SetLineHeight(int authoredPx) { LineHeightAuthored = authoredPx; }
+	int LineHeight() const;
+
+	/// HUD-TEXT-SHADOW: the drop shadow of the original's HUD text, `units` of the classic 640x480
+	/// HUD down and right of every glyph (k px at the HUD step k), black, opaque. 0 = none.
+	/// Data/skins/skins.json, skin `hud_widget_text`: "drop_text_color": [0, 0, 0],
+	/// "drop_text_offset": [1, 1]. Measured: every ink pixel moved by (3, 3) is black (mean 1.2 of
+	/// 255) under the captions "Menu" / "Pause" at a 2960x1848 client (k = 3,
+	/// work/agent-zoom-rule/captures/c_k_2960x1848.png); (2, 2) at k = 2 under the info-panel rows
+	/// and the hit-point figure (work/agent-hud/captures/o41_o1_peon.png).
+	void SetHudShadow(int units) { ShadowUnits = units; }
+	/// The shadow's offset in pixels on this screen; 0 when the face has none.
+	int ShadowOffset() const;
+
 	std::shared_ptr<CGraphic> GetGraphic() const;
 
 	template<bool CLIP>
@@ -115,6 +160,19 @@ private:
 	std::vector<char> CharWidth; /// Real font width (starting with ' ')
 	std::shared_ptr<CGraphic> G; /// Graphic object used to draw
 	bool is_normal = true;
+	int AuthoredHeight = 0;      /// NG84: logical screen height this sheet was baked for (0 = unscaled)
+	int AuthoredWidth = 0;       /// NG84: authored layout width (0 = scale by height alone)
+	bool AuthoredHud = false;    /// WORLD-ZOOM-RULE: scale with the HUD step instead of the screen fit
+	int SpaceAdvance = 0;        /// NG84: declared SPACE advance in authored units (0 = engine default)
+	int LineHeightAuthored = 0;  /// NG101: declared LINE advance in authored units (0 = use the cell)
+	int ShadowUnits = 0;         /// HUD-TEXT-SHADOW: drop shadow offset in HUD units (0 = none)
+	int LetterSpacing = 1;       /// NG84: px added after each glyph. 1 = the classic bitmap-font rule;
+	                             /// 0 once a real advance table is loaded, because a true advance
+	                             /// already contains the glyph's right side bearing.
+
+private:
+	void LoadAdvanceTable();
+	double AuthoredScale() const;
 };
 
 #define MaxFontColors 9
@@ -158,6 +216,11 @@ extern CFont &GetGameFont();   /// Normal font used in game
 extern bool IsGameFontReady(); /// true when GameFont is provided
 
 extern int FontCodePage;
+
+/// HUD-FOOD-RED: the colour of the glyphs of a baked HD face drawn from now on (white = as
+/// baked). Those faces are white in palette indices no font colour reaches, so a coloured figure
+/// cannot be had by a CFontColor; the caller sets the tint, draws, and sets white again.
+extern void SetGlyphTint(unsigned char r, unsigned char g, unsigned char b);
 
 /// Set the default text colors for normal and reverse text
 extern void SetDefaultTextColors(const std::string &normal, const std::string &reverse);

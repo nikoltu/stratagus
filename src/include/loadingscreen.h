@@ -49,6 +49,11 @@ extern bool IsLoadingScreenActive();
 /// Free the loading-screen art. Safe to call when the screen was never shown.
 extern void HideLoadingScreen();
 
+/// Tell the loading screen that a frame has just been put on screen. When the hosting
+/// activity draws the loading screen, the first frame after loading ended is what lets it
+/// take its screen away.
+extern void LoadingFramePresented();
+
 //@}
 
 #endif // !__LOADINGSCREEN_H__

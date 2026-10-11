@@ -45,11 +45,18 @@
 
 #include "movie.h"
 
+#include "debug_bridge.h"
+
 #include "iolib.h"
 #include "network.h"
 #include "sound.h"
 #include "sound_server.h"
 #include "video.h"
+
+#include <memory>
+#include <guisan.hpp>
+
+extern std::unique_ptr<gcn::Gui> Gui;
 
 #include <SDL.h>
 #include <SDL_endian.h>
@@ -270,6 +277,39 @@ int PlayMovie(const std::string &name)
 	const int videoHeight = Video.Height;
 	const std::string filename = LibraryFileName(name);
 
+	// NG67: a movie can now be asked for from the BOOT path (the "Play Introduction" option plays
+	// the Remastered intro before the main menu exists). Both movie players pump the GUI while they
+	// run, and guisan throws "No top widget set" (gui.cpp:133) when nothing is installed -- which
+	// took the process down the first time the option was switched on. StartMap already solves this
+	// the same way for CreateGame: install a blank top widget for the duration and put the old one
+	// back afterwards. Doing it here makes playback safe from ANY context, not just the one call
+	// site that happened to crash.
+	struct GuiTopGuard {
+		std::unique_ptr<gcn::Container> temp;
+		explicit GuiTopGuard()
+		{
+			if (Gui && Gui->getTop() == nullptr) {
+				temp = std::make_unique<gcn::Container>();
+				temp->setDimension(gcn::Rectangle(0, 0, Video.Width, Video.Height));
+				temp->setOpaque(false);
+				Gui->setTop(temp.get());
+			}
+		}
+		~GuiTopGuard()
+		{
+			if (temp && Gui) {
+				Gui->setTop(nullptr);
+			}
+		}
+	} guiTopGuard;
+
+	// MV1: the Remastered's cinematics are WebM (VP8/VP9), which this Theora decoder cannot open.
+	// Hand those to the platform decoder; a false return means "unsupported here", and we fall
+	// through to the old behaviour rather than pretending the clip played.
+	if (filename.size() > 5 && filename.compare(filename.size() - 5, 5, ".webm") == 0) {
+		return PlayWebMMovie(filename) ? 0 : -1;
+	}
+
 	CFile f;
 	if (f.open(filename.c_str(), CL_OPEN_READ) == -1) {
 		ErrorPrint("Can't open file '%s'\n", name.c_str());
@@ -347,6 +387,9 @@ int PlayMovie(const std::string &name)
 	const unsigned int start_ticks = SDL_GetTicks();
 	bool need_data = true;
 	while (!MovieStop) {
+		// NG83: same reason as the WebM path -- keep the watchdog heartbeat alive while a clip
+		// plays, so normal playback is not reported as a stall and a real wedge still is.
+		DBG_CHECKPOINT("movie:theora");
 		if (need_data) {
 			if (!TheoraProcessData(data)) {
 				break;

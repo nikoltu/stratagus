@@ -1366,9 +1366,14 @@ void COrder_Resource::Execute(CUnit &unit)
 
 	// Stop gathering the resource.
 	if (this->State == SUB_STOP_GATHERING) {
+		const bool wasInside = unit.Container != nullptr;
 		if (StopGathering(unit)) {
 			this->State = SUB_MOVE_TO_DEPOT;
 			unit.pathFinderData->output.Cycles = 0; //moving counter
+			if (wasInside && !unit.Container) {
+				unit.Wait = WC2_WORKER_EXIT_STAND_FRAMES; // stands beside the mine first
+				return;
+			}
 		} else {
 			return;
 		}
@@ -1415,6 +1420,9 @@ void COrder_Resource::Execute(CUnit &unit)
 			// So, we pass through SUB_START_RESOURCE the very instant it
 			// goes out of the depot.
 			//HandleActionResource(order, unit);
+			if (!unit.Container) {
+				unit.Wait = WC2_WORKER_EXIT_STAND_FRAMES; // stands beside the hall first
+			}
 		}
 	}
 }

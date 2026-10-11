@@ -35,6 +35,8 @@
 ----------------------------------------------------------------------------*/
 
 #include "stratagus.h"
+
+#include "wc2strings.h"
 #include "player.h"
 
 #include "action/action_upgradeto.h"
@@ -761,6 +763,7 @@ void CPlayer::Init(PlayerTypes type)
 	this->Demand = 0;
 	this->NumBuildings = 0;
 	this->Score = 0;
+	this->Gone = false;
 
 	this->Color = PlayerColorsRGB[NumPlayers][0];
 
@@ -829,6 +832,7 @@ void CPlayer::Clear()
 	ranges::fill(TotalResources, 0);
 	TotalRazings = 0;
 	TotalKills = 0;
+	Gone = false;
 	this->LostMainFacilityTimer = 0;
 	Color = 0;
 	UpgradeTimers.Clear();
@@ -1025,20 +1029,25 @@ ECheckLimit CPlayer::CheckLimits(const CUnitType &type) const
 {
 	//  Check game limits.
 	if (type.Building && NumBuildings >= BuildingLimit) {
-		Notify("%s", _("Building Limit Reached"));
+		Notify("%s", WC2Msg("message_cannot_create_units", _("Building Limit Reached")));
 		return ECheckLimit::BuildingLimitReached;
 	}
 	if (!type.Building && (this->GetUnitCount() - NumBuildings) >= UnitLimit) {
-		Notify("%s", _("Unit Limit Reached"));
+		Notify("%s", WC2Msg("message_cannot_create_units", _("Unit Limit Reached")));
 		return ECheckLimit::UnitLimitReached;
 	}
 	if (this->Demand + type.Stats[this->Index].Variables[DEMAND_INDEX].Value > this->Supply
 	    && type.Stats[this->Index].Variables[DEMAND_INDEX].Value) {
-		Notify("%s", _("Insufficient Supply, increase Supply."));
+		// NG48: the Remastered's own wording. `Data/Strings/enUS.json` ships
+		// stat_txt_438 = "Not enough food...build more farms." and the sibling resource
+		// messages stat_txt_439/440/441 ("Not enough gold...mine more gold." etc.), which
+		// CPlayer::CheckCosts already composes byte-for-byte. The supply line was the one
+		// that still used Stratagus wording ("Insufficient Supply, increase Supply.").
+		Notify("%s", _("Not enough food...build more farms."));
 		return ECheckLimit::InsufficientSupply;
 	}
 	if (this->GetUnitCount() >= TotalUnitLimit) {
-		Notify("%s", _("Total Unit Limit Reached"));
+		Notify("%s", WC2Msg("message_cannot_create_units", _("Total Unit Limit Reached")));
 		return ECheckLimit::TotalUnitLimitReached;
 	}
 	if (GetUnitTotalCount(type) >= Allow.Units[type.Slot]) {
@@ -1405,6 +1414,9 @@ void CPlayer::Notify(IntColor color, const Vec2i &pos, const char *fmt, ...) con
 	vsnprintf(temp, sizeof(temp) - 1, fmt, va);
 	va_end(va);
 	UI.Minimap.AddEvent(pos, color);
+	if (temp[0] == 0) {
+		return; // an event with a mark on the minimap and no text
+	}
 	if (this == ThisPlayer) {
 		SetMessageEvent(pos, "%s", temp);
 	} else {

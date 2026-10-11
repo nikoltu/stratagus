@@ -203,6 +203,14 @@ static int CclPlaySound(lua_State *l)
 	return 0;
 }
 
+/// The sound a Lua sound id stands for; null when the id is void (its file was not found),
+/// so a missing file leaves the game sound unset instead of dereferencing nothing.
+static std::shared_ptr<CSound> SoundFromUserData(const LuaUserData *data)
+{
+	CSound *sound = data ? reinterpret_cast<CSound *>(data->Data) : nullptr;
+	return sound ? sound->shared_from_this() : nullptr;
+}
+
 static void SetSoundConfigRace(lua_State *l, int j, SoundConfig soundConfigs[])
 {
 	if (!lua_istable(l, j + 1) || lua_rawlen(l, j + 1) != 2) {
@@ -220,7 +228,7 @@ static void SetSoundConfigRace(lua_State *l, int j, SoundConfig soundConfigs[])
 		LuaError(l, "Sound id expected");
 	}
 	lua_pop(l, 1);
-	soundConfigs[raceIndex].Sound = reinterpret_cast<CSound *>(data->Data)->shared_from_this();
+	soundConfigs[raceIndex].Sound = SoundFromUserData(data);
 }
 
 /**
@@ -246,13 +254,13 @@ static int CclDefineGameSounds(lua_State *l)
 				|| (data = (LuaUserData *)lua_touserdata(l, j + 1))->Type != LuaSoundType) {
 				LuaError(l, "Sound id expected");
 			}
-			GameSounds.Click.Sound = reinterpret_cast<CSound *>(data->Data)->shared_from_this();
+			GameSounds.Click.Sound = SoundFromUserData(data);
 		} else if (value == "transport-docking") {
 			if (!lua_isuserdata(l, j + 1)
 				|| (data = (LuaUserData *)lua_touserdata(l, j + 1))->Type != LuaSoundType) {
 				LuaError(l, "Sound id expected");
 			}
-			GameSounds.Docking.Sound = reinterpret_cast<CSound *>(data->Data)->shared_from_this();
+			GameSounds.Docking.Sound = SoundFromUserData(data);
 		} else if (value == "placement-error") {
 			SetSoundConfigRace(l, j, GameSounds.PlacementError);
 		} else if (value == "placement-success") {
@@ -278,7 +286,7 @@ static int CclDefineGameSounds(lua_State *l)
 				LuaError(l, "Sound id expected");
 			}
 			lua_pop(l, 1);
-			GameSounds.NotEnoughRes[raceIndex][resId].Sound = reinterpret_cast<CSound *>(data->Data)->shared_from_this();
+			GameSounds.NotEnoughRes[raceIndex][resId].Sound = SoundFromUserData(data);
 		} else if (value == "not-enough-food") {
 			SetSoundConfigRace(l, j, GameSounds.NotEnoughFood);
 		} else if (value == "rescue") {
@@ -290,7 +298,7 @@ static int CclDefineGameSounds(lua_State *l)
 				|| (data = (LuaUserData *)lua_touserdata(l, j + 1))->Type != LuaSoundType) {
 				LuaError(l, "Sound id expected");
 			}
-			GameSounds.ChatMessage.Sound = reinterpret_cast<CSound *>(data->Data)->shared_from_this();
+			GameSounds.ChatMessage.Sound = SoundFromUserData(data);
 		} else {
 			LuaError(l, "Unsupported tag: %s", value.data());
 		}

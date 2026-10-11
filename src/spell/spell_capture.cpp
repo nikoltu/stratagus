@@ -92,7 +92,9 @@ int Spell_Capture::Cast(CUnit &caster,
 			return 1;
 		}
 	}
-	caster.Player->Score += target->Variable[POINTS_INDEX].Value;
+	if (!target->Player->Gone) { // what a gone player left behind is worth no points
+		caster.Player->Score += target->Variable[POINTS_INDEX].Value;
+	}
 	if (caster.IsEnemy(*target)) {
 		if (target->Type->Building) {
 			caster.Player->TotalRazings++;

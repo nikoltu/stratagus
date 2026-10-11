@@ -279,6 +279,7 @@ public:
 	int TotalResources[MaxCosts]{};
 	int TotalRazings = 0;
 	int TotalKills = 0;      /// How many unit killed
+	bool Gone = false;       /// finally out of a network game: the quit command has run (CommandQuit)
 
 	int LostMainFacilityTimer { 0 };/// The timer for when the player lost the last town hall
 									/// (to make the player's units be revealed)

@@ -814,7 +814,8 @@ bool CanAccessFile(const char *filename)
 		if (base == "icons_hd.png" || base == "hd_cmd_frame.png"
 			|| base == "hud_TopLeft.png" || base == "hud_TileableLeft.png"
 			|| base == "f5_menu.png"
-			|| base == "hud_btn_small.png" || base == "hud_btn_small_pressed.png") {
+			|| base == "hud_btn_small.png" || base == "hud_btn_small_pressed.png"
+			|| base == "hud_complete_bar.png") {
 			return true;
 		}
 		return false;

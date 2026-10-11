@@ -160,6 +160,12 @@ class CUserInterface
 	CUIButton *SingleSelectedButton;
 
 	vector<CUIButton> SelectedButtons;
+	vector<CUIButton> SelectedButtonsWide;
+	int SelectedBarInset;
+	int SelectedBarGap;
+	int SelectedBarHeight;
+	int SelectedBarSeat;
+	CColor SelectedBarTrack;
 	CFont *MaxSelectedFont;
 	int MaxSelectedTextX;
 	int MaxSelectedTextY;
@@ -188,6 +194,9 @@ class CUserInterface
 
 	CFont *MessageFont;
 	int MessageScrollSpeed;
+	// NG14: where the in-game message band starts, relative to the map area's top-left.
+	int MessageOffsetX;
+	int MessageOffsetY;
 
 	CUIButton MenuButton;
 	CUIButton NetworkMenuButton;
@@ -344,6 +353,10 @@ class BasicContainer : public Widget
 class ScrollArea : public BasicContainer
 {
 	ScrollArea();
+	// NG58: a scroll area over the stone dialog must NOT paint its own background -- gcn::ScrollArea
+	// has had setOpaque all along, it simply was not bound, so Lua could only recolour the box.
+	virtual void setOpaque(bool opaque);
+	virtual bool isOpaque() const;
 	virtual void setContent(Widget *widget);
 	virtual Widget *getContent();
 	virtual void setScrollbarWidth(int width);
@@ -351,6 +364,24 @@ class ScrollArea : public BasicContainer
 	tolua_outside virtual void scrollToBottom();
 	tolua_outside virtual void scrollToTop();
 };
+
+// NG104: gcn::ScrollArea reacts only to its arrows, bar and marker, so on a touch device every
+// row below the fold of a too-tall panel is unreachable. TouchScrollArea adds the finger
+// drag-to-scroll and is what every script-built scroll panel must use -- hence the alias below,
+// which keeps the existing `ScrollArea()` call sites working unchanged.
+class TouchScrollArea : public ScrollArea
+{
+	TouchScrollArea();
+	// NG130: the Remastered scrollbar art, so a bare scroll column can look like every list.
+	void setUpButtonImage(CGraphicPtr image);
+	void setDownButtonImage(CGraphicPtr image);
+	void setVBarImage(CGraphicPtr image);
+	void setMarkerImage(CGraphicPtr image);
+};
+
+$[
+ScrollArea = TouchScrollArea
+$]
 
 class ImageWidget : public Widget
 {
@@ -379,6 +410,7 @@ class CImageButton : public Button
 	void setNormalImage(CGraphicPtr image);
 	void setPressedImage(CGraphicPtr image);
 	void setDisabledImage(CGraphicPtr image);
+	void setHoverImage(CGraphicPtr image);
 };
 
 $renaming CImageButton @ ImageButton
@@ -466,6 +498,7 @@ class ImageSlider : public Slider
 	void setMarkerImage(CGraphicPtr image);
 	void setBackgroundImage(CGraphicPtr image);
 	void setDisabledBackgroundImage(CGraphicPtr image);
+	void setTrackColors(int fr, int fg, int fb, int ur, int ug, int ub, int thickness);
 };
 
 class Label : public Widget
@@ -538,7 +571,7 @@ class ImageListBox : public ListBox
 {
 };
 
-class ListBoxWidget : public ScrollArea
+class ListBoxWidget : public TouchScrollArea
 {
 	ListBoxWidget(unsigned int width, unsigned int height);
 	void setList(lua_State *lua, lua_Object *lo);
@@ -549,13 +582,22 @@ class ListBoxWidget : public ScrollArea
 class ImageListBoxWidget : public ListBoxWidget
 {
 	ImageListBoxWidget(unsigned int width, unsigned int height);
+	// NG108: bound HERE and not inherited on purpose -- gcn::Widget::setForegroundColor is not
+	// virtual, so a call dispatched on Widget would set the scroll area's colour and leave the row
+	// text alone. This binding routes it to the inner list box.
+	void setForegroundColor(const Color color);
 	void setList(lua_State *lua, lua_Object *lo);
 	void setSelected (int selected);
 	int getSelected();
 	void setItemImage(CGraphicPtr image);
+	void setUnselectedItemImage(CGraphicPtr image);
 	void setLockedIcon(CGraphicPtr image);
 	void setLockedItemImage(CGraphicPtr image);
+	// NG114: list rows take the same hover/active plates the dropdown rows got in CF5(b).
+	void setHoverItemImage(CGraphicPtr image);
+	void setActiveItemImage(CGraphicPtr image);
 	void setUnlockedCount(int n);
+	void setRowHeight(int h);
 	void setUpButtonImage(CGraphicPtr image);
 	void setUpPressedButtonImage(CGraphicPtr image);
 	void setDownButtonImage(CGraphicPtr image);
@@ -602,6 +644,8 @@ class ScrollingWidget : public ScrollArea
 	void restart();
 	void setSpeed(float speed);
 	float getSpeed();
+	void setSpeedPerSecond(float speed);
+	void setRestY(int y);
 };
 
 class DropDown : public BasicContainer
@@ -625,6 +669,10 @@ class ImageDropDownWidget : public DropDown
 	void setList(lua_State *lua, lua_Object *lo);
 	void setSize(int width, int height);
 	void setItemImage(CGraphicPtr image);
+	// CF5(b): the open list's hover and pressed row plates (Remastered dropdown_open_hover /
+	// dropdown_open_active). Unbound leaves the single-plate behaviour every other list has.
+	void setHoverItemImage(CGraphicPtr image);
+	void setActiveItemImage(CGraphicPtr image);
 	void setDownNormalImage(CGraphicPtr image);
 	void setDownPressedImage(CGraphicPtr image);
 };

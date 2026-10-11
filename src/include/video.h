@@ -75,6 +75,9 @@ extern bool GpuWorldDrawActive;
 // so that text keeps the CPU path. Requires TheRenderer and a paletted font (an RGBA glyph
 // texture is built per font+colour); non-paletted fonts fall back to the CPU blit.
 extern bool GpuFontToBackbuffer;
+/// Brightness of the glyphs drawn on the GPU font path from now on; 255 = as baked. The baked HD
+/// faces are white in indices no font colour reaches, so a dim caption cannot be had by a colour.
+extern void SetGlyphShade(unsigned char shade);
 
 // GPU-pipeline (HUD sprites): when true, CGraphic::DrawFrameClip[X] / DrawSubClip / DrawSubClipTrans
 // route RGBA (mTexture) HUD blits straight to the backbuffer (RenderCopy) at 1:1 screen pixels
@@ -94,6 +97,18 @@ extern bool GpuHudDrawActive;
 // DESTINATION SIZE is multiplied by this zoom. Defaults to 1.0 => identical to the classic Zoom==1
 // path (lround(W*1)==W), so nothing changes off the zoomed path.
 extern float GpuWorldDrawZoom;
+
+// Classic view: one presentation-only switch between the Remastered art and the classic art of the
+// game folder. Draw code and Lua read it; simulation, AI, network and save code must not. Default
+// false. A part whose classic art is missing keeps drawing the Remastered art.
+extern void SetClassicView(bool on);
+extern bool IsClassicView();
+
+// SPRITE-SCALE-TRUE: native HD pixels per map tile. Every Remastered terrain frame is 216 x 216
+// (EVIDENCE-SST-001: Data/Art/hd/bgs/bgs_{Forest,Ice,Swamp,XSwamp}.json sourceSize), and the unit,
+// building and effect sheets are drawn at the same density (EVIDENCE-SST-002; captures M7-M12 of
+// SPEC_SPRITE_SCALE_TRUE.md). One screen pixel per native pixel = PixelTileSize * zoom / 216.
+constexpr int HdNativeTilePx = 216;
 
 // World internal-resolution scale (0.25..1.0). When < 1.0 the zoomed in-game world (terrain, units,
 // missiles, particles, fog) is rendered into a GPU target texture at this fraction of the viewport
@@ -215,6 +230,11 @@ public:
 	// as the border insets (in source pixels). See ComputeNineSlice (nineslice.h).
 	void DrawNineSlice(const SDL_Rect &dest, int left, int top, int right, int bottom,
 					   unsigned frame = 0, SDL_Surface *surface = TheScreen) const;
+	// HUD-020: nine-slice whose border is drawn at another size than it has in the picture:
+	// srcBorder source pixels on every side become dstBorder screen pixels. The original states
+	// its frames this way (skins.json: "9slice" in sprite pixels, "scale" to logical units).
+	void DrawNineSliceScaled(const SDL_Rect &dest, int srcBorder, int dstBorder,
+							 unsigned frame = 0) const;
 	void DrawFrameTrans(unsigned frame, int x, int y, int alpha,
 						SDL_Surface *surface = TheScreen) const;
 	void DrawFrameClipTrans(unsigned frame, int x, int y, int alpha,
@@ -370,7 +390,19 @@ public:
 	// fogMask: the source is a fog-of-war mask atlas (bgs_Fow: all-black palette, tRNS per-index
 	// alpha). Index-0 colour-keying is skipped so the authored alpha survives the RGBA conversion,
 	// and the pages are bilinear-filtered so mask gradients stay smooth when scaled to tile size.
-	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false, bool fogMask = false);
+	// palette: classic view. 256 x 3 bytes of 6-bit values (a tileset .ppl as read from the game
+	// folder). The page must be 8-bit indexed; it is coloured through this palette (value x 4) and
+	// not through the PNG's own one, index 0 opaque. The page is not uploaded whole: only the kept
+	// frames are cut into a small texture.
+	// nearest: keep nearest sampling on every page (it overrides the bilinear filter of fogMask).
+	// framePrefix: keep only the frames whose name starts with this text (e.g. "Forest/forest_").
+	// maskPrefix: with a palette only. The frames whose name starts with this text are kept too, as
+	// fog masks: index 0 is nothing. Each gets a second frame "<name>_dither" that keeps only the
+	// checkerboard pixels (hdatlas::classicFogDither), and two full cells of the masks' colour are
+	// added: "<maskPrefix>solid" and "<maskPrefix>solid_dither".
+	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false, bool fogMask = false,
+	                       const unsigned char *palette = nullptr, bool nearest = false,
+	                       const char *framePrefix = nullptr, const char *maskPrefix = nullptr);
 	bool IsLoaded() const { return !pages.empty(); }
 
 	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.
@@ -393,6 +425,15 @@ public:
 	// page via SDL_SetTextureColorMod (reset to 255 after) for the player-colour `_team` mask.
 	void DrawAtlasFrameClipScaled(int frame, int dstX, int dstY, int dstW, int dstH, bool flip,
 	                              uint8_t r = 255, uint8_t g = 255, uint8_t b = 255) const;
+
+	// SPRITE-SCALE-TRUE: draw one frame at `s` screen pixels per native HD pixel with the frame's
+	// OWN untrimmed canvas (cw x ch) centred on (cx, cy). The caller passes no size: the canvas is
+	// read from the frame record, so a frame or a team mask whose canvas differs from its family's
+	// is still placed right. For world art s = PixelTileSize.x * GpuWorldDrawZoom / HdNativeTilePx.
+	// The four edges are rounded, not the size, so a body and its mask cannot drift apart.
+	// `flip` and the (r,g,b) tint behave as in DrawAtlasFrameClipScaled.
+	void DrawAtlasFrameCentred(int frame, float cx, float cy, float s, bool flip,
+	                           uint8_t r = 255, uint8_t g = 255, uint8_t b = 255) const;
 
 	// World HD (P1): draw the whole frame scaled into an explicit on-screen rect. Unlike
 	// DrawAtlasFrameClip there is NO canvas-centre and NO GpuWorldDrawZoom: the caller supplies
@@ -585,6 +626,31 @@ public:
 	int Height = 0;
 	int WindowWidth = 0;
 	int WindowHeight = 0;
+
+	// WORLD-ZOOM-RULE: the IN-GAME picture and the HUD scale, as the original computes them
+	// (work/agent-zoom-rule/SPEC_WORLD_ZOOM_RULE.md, rules R1..R4, 46 client sizes; 2960x1848
+	// measured directly on captures g_2960x1848.png / c_k_2960x1848.png):
+	//   Step  k = max(1, floor(Height / 480))                        -- the height alone decides
+	//   picture (X, Y, W, H) = the framebuffer clamped to an aspect between 4:3 and 16:9, centred;
+	//                          black outside it, none inside it (3440x1440 -> 2560x1440 at x 440)
+	//   Scale = k * 480 / 2160  -- px per unit of the HUD's 2160-high art space (k / 4.5)
+	// The HUD is the classic 640x480 layout times k, anchored at the picture's top-left; the map
+	// view starts at X + 176 * k and runs to the picture's right and bottom edges; a world tile is
+	// 32 * k px. NOTE: H is the picture's height, NOT 2160 * Scale -- the HUD art ends at
+	// Y + 2160 * Scale (= 480 * k) and the side bar's tileable strip fills the rest down to Y + H.
+	//
+	// MENUS AND IN-GAME WINDOWS DO NOT USE Scale (the Game Menu rows of capture
+	// work/agent-hud/captures/o34_h1_menu_open.png are 592 px wide at a 1684x1031 client:
+	// 1350 units at min(W/3840, H/2160) = 0.4385, not at k / 4.5 = 0.4444).
+	//
+	// It is computed ONCE, here, and read everywhere else: the NG87..NG93 family was one transform
+	// copied nine times, and the rule that came out of it is that the formula is called, never copied.
+	struct {
+		int X = 0, Y = 0, W = 0, H = 0;   // the picture rect in framebuffer px
+		double Scale = 1.0;              // px per HUD unit (2160-high art space) = Step * 480 / 2160
+		int Step = 1;                    // k: whole multiple of the classic 640x480 layout
+	} HudCanvas;
+	void ComputeHudCanvas();
 	double VerticalPixelSize = 1.;
 	sdl2::CursorPtr blankCursor;
 	int Depth = 0;
@@ -654,6 +720,9 @@ extern void SetClipping(int left, int top, int right, int bottom);
 /// lazily from RealizeVideoMemory for non-UpdateDisplay present paths). EndFrame presents.
 extern void BeginFrame();
 extern void EndFrame();
+/// While an in-game window is up, or the game stands paused: the game drawn so far this frame is
+/// shown in greys. `live`: keep the kept frame up to date (no window: the HUD is in use).
+extern void GreyFrameUnderMenu(bool menuUp, bool live = false);
 
 /// Realize video memory.
 extern void RealizeVideoMemory();
@@ -691,6 +760,9 @@ extern const char *SdlKey2Str(int key);
 extern bool SdlGetGrabMouse();
 /// Toggle mouse grab mode
 extern void ToggleGrabMouse(int mode);
+
+/// No finger on the screen since the last tap in a menu (touch devices only)
+extern bool IsTouchPointerParked();
 
 extern EventCallback GameCallbacks;   /// Game callbacks
 extern EventCallback EditorCallbacks; /// Editor callbacks

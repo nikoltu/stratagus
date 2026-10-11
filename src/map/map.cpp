@@ -362,6 +362,10 @@ void CMap::Clean(const bool isHardClean /* = false*/)
 	this->HDTileAtlasTried = false;
 	this->HDTileAtlasImageFile.clear();
 	this->HDTileAtlasFrameForTile.clear();
+	this->ClassicTileAtlas = nullptr;
+	this->ClassicTileAtlasFrameForTile.clear();
+	this->ClassicFogFrames.clear();
+	this->ClassicFogDitherFrames.clear();
 
 	FlagRevealMap = MapRevealModes::cHidden;
 	ReplayRevealMap = false;

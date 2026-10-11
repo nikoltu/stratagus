@@ -351,6 +351,7 @@ public:
 	CUIUserButton() = default;
 
 	bool Clicked = false;    // true if button is clicked, false otherwise
+	bool Dim = false;        // caption drawn dim: the button stands for a state, it cannot be used now
 	CUIButton Button;        // User button
 };
 
@@ -393,6 +394,17 @@ public:
 	CUIButton *SingleSelectedButton = nullptr;    /// Button for single selected unit
 
 	std::vector<CUIButton> SelectedButtons;/// Selected buttons
+	/// PANEL-A: the cells of the narrow grid, used when more units are selected than
+	/// SelectedButtons holds (the original: 3 columns up to 9 units, 4 columns above; captures
+	/// u03 u07 u09 u11 of work/agent-orig-scenes). Empty = no second grid.
+	std::vector<CUIButton> SelectedButtonsWide;
+	/// PANEL-A: the hit-point bar under a cell of the selection grid, in pixels, set from Lua.
+	/// SelectedBarHeight 0 = the classic bar (UiDrawLifeBar).
+	int SelectedBarInset = 0;   /// fill starts this far inside the cell's left and right edge
+	int SelectedBarGap = 0;     /// fill starts this far under the cell's bottom edge
+	int SelectedBarHeight = 0;  /// height of the fill
+	int SelectedBarSeat = 0;    /// black around the fill, each side
+	CColor SelectedBarTrack;    /// the unfilled part
 	CFont *MaxSelectedFont = nullptr;             /// Font type to use
 	int MaxSelectedTextX = 0;               /// position to place '+#' text
 	int MaxSelectedTextY = 0;               /// if > maximum units selected
@@ -442,6 +454,11 @@ public:
 	CMapArea MapArea;                   /// geometry of the whole map area
 	CFont *MessageFont = nullptr;       /// Font used for messages
 	int MessageScrollSpeed = 5;         /// Scroll speed in seconds for messages
+	/// NG14: where the in-game message band starts, as an offset from the map area's top-left.
+	/// Stratagus draws messages at MapArea + 8, which on the Remastered HUD is inside the resource
+	/// bar's own band. The Remastered puts them lower; see the derivation in ui.lua. 0 = classic.
+	int MessageOffsetX = 0;
+	int MessageOffsetY = 0;
 
 	// Menu buttons
 	CUIButton MenuButton;               /// menu button

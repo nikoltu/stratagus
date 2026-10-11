@@ -46,8 +46,13 @@ class CHost;
 #define NetworkProtocolMajorVersion StratagusMajorVersion
 /// Network protocol minor version (maximum 99)
 #define NetworkProtocolMinorVersion StratagusMinorVersion
-/// Network protocol patch level (maximum 99)
-#define NetworkProtocolPatchLevel   StratagusPatchLevel
+/// Network protocol patch level (maximum 99). Above the engine's: +1 since the Config message
+/// grew by the mesh byte and MessageMesh exists, +2 since the State message carries the mesh
+/// byte and the Config ack the probe mask, +3 since a mesh game runs with the model (relay on
+/// request, removal round), +4 since the quit command carries its reason and a mesh game
+/// begins behind the start barrier, +5 since a pause is a command of the stream and a mesh
+/// message (a pause for everybody). A build without them is refused at Hello.
+#define NetworkProtocolPatchLevel   (StratagusPatchLevel + 5)
 /// Network protocol version (1,2,3) -> 10203
 #define NetworkProtocolVersion \
 	(NetworkProtocolMajorVersion * 10000 + NetworkProtocolMinorVersion * 100 + \
@@ -99,6 +104,7 @@ extern int NetConnectRunning;              /// Network menu: Setup mode active
 extern int NetConnectType;              /// Network menu: Setup mode active
 extern int NetLocalHostsSlot;              /// Network menu: Slot # in Hosts array of local client
 extern int NetLocalPlayerNumber;           /// Player number of local client
+extern bool NetMesh;                       /// This game: every device sends to every device, nobody forwards
 
 extern std::string NetworkMapName;         /// Name of the map received with ICMMap
 extern std::string NetworkMapFragmentName; /// Name of the map currently loading via ICMMapNeeded
@@ -123,7 +129,7 @@ extern void NetworkApplyClientSetupStateChange(CServerSetup &serverSetup,
                                                int hostIndex);
 extern void NetworkCompactHosts();
 extern std::vector<int> NetworkRemoteHostIndices();
-extern void NetworkServerStartGame();       /// Server user has finally hit the start game button
+extern bool NetworkServerStartGame();       /// Server user has finally hit the start game button
 extern void NetworkGamePrepareGameSettings();
 
 extern int GetNetworkState();
@@ -135,9 +141,14 @@ extern int NetworkSetupServerAddress(const std::string &serveraddr, int port);  
 extern void NetworkProcessClientRequest();  /// Menu Loop: Send out client request messages
 extern void NetworkProcessServerRequest();  /// Menu Loop: Send out server request messages
 extern void NetworkServerResyncClients();   /// Menu Loop: Server: Mark clients state to send state info message
+extern bool NetworkServerClientsSynced();   /// Menu Loop: Server: all connected clients are in sync
 extern void NetworkDetachFromServer();      /// Menu Loop: Client: Send GoodBye to the server and detach
 
 extern void NetworkSendICMessage(CUDPSocket &socket, const CHost &host, const CInitMessage_Header &msg);
+
+extern void SetNetMesh(bool mesh);          /// Server: ask for the mesh in the games started from now on
+extern bool GetNetMesh();                   /// Server: the mesh is asked for
+extern void NetworkMeshProbeAnswered(int hostIndex); /// Client: the peer in that host slot answered our probe
 
 //@}
 

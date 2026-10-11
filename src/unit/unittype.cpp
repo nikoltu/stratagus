@@ -34,6 +34,7 @@
 ----------------------------------------------------------------------------*/
 
 #include "unittype.h"
+#include "network.h"
 
 #include "animation.h"
 #include "animation/animation_exactframe.h"
@@ -58,6 +59,7 @@
 #include <cctype>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -761,13 +763,20 @@ void SaveUnitTypes(CFile &file)
 **
 **  @return       Unit-type pointer.
 */
-CUnitType &UnitTypeByIdent(std::string_view ident)
+CUnitType *UnitTypeByIdentOrNull(std::string_view ident)
 {
 	auto ret = UnitTypeMap.find(ident);
-	if (ret != UnitTypeMap.end()) {
-		return *(*ret).second;
+	return ret != UnitTypeMap.end() ? (*ret).second.get() : nullptr;
+}
+
+CUnitType &UnitTypeByIdent(std::string_view ident)
+{
+	if (CUnitType *type = UnitTypeByIdentOrNull(ident)) {
+		return *type;
 	}
-	ErrorPrint("Unknown unitType '%s'\n", ident.data());
+	// `ident` is a string_view and is NOT guaranteed null-terminated, so `%s` with .data() reads
+	// past the end whenever the view is a slice of a longer buffer. Print the exact length instead.
+	ErrorPrint("Unknown unitType '%.*s'\n", (int) ident.size(), ident.data());
 	ExitFatal(1);
 }
 
@@ -827,6 +836,13 @@ std::pair<CUnitType *, bool> NewUnitTypeSlot(std::string_view ident)
 struct HDUnitMapEntry { std::string atlas; std::string prefix; };
 static std::unordered_map<std::string, HDUnitMapEntry> g_hdUnitMap;
 static bool g_hdUnitMapTried = false;
+// ART-CYCLES: families whose picture moves while the unit stands (Dark Portal and Runestone glow,
+// winter Church / Goblin Alchemist, sunk-ship rings, Circle of Power). Keyed by frame prefix; the
+// numbers are optional keys of hd_units_map.json: "cycle_frames" (pictures in the loop) and
+// "cycle_step10" (game cycles per picture, times ten) as measured on the original
+// (work/agent-orig-art/ORIG_ART.md). No key, no cycle.
+struct HDCycle { int frames = 0; int step10 = 0; };
+static std::unordered_map<std::string, HDCycle> g_hdCycle;
 
 static void LoadHDUnitMap()
 {
@@ -834,40 +850,65 @@ static void LoadHDUnitMap()
 		return;
 	}
 	g_hdUnitMapTried = true;
+	// HD-MISS-INVISIBLE: this map is the single point of failure for ALL unit rendering -- 0 of its
+	// mapped paths has a classic PNG to fall back to, so anything that does not resolve renders
+	// NOTHING. Every early return below used to be silent, which made a half-loaded map
+	// indistinguishable from a loaded one. ErrorPrint, not DebugPrint: this has to be visible
+	// without a runtime flag.
 	const fs::path resolved = LibraryFileName("hd_units_map.json");
 	if (resolved.empty()) {
+		ErrorPrint("hd_units_map.json NOT FOUND -- no unit will draw its HD sprite\n");
 		return;
 	}
 	std::error_code ec;
 	const uintmax_t sz = fs::file_size(resolved, ec);
 	if (ec || sz == 0 || sz > (uintmax_t) 8 * 1024 * 1024) {
+		ErrorPrint("hd_units_map.json unusable size (%s, %llu bytes) -- map not loaded\n",
+		           resolved.string().c_str(), (unsigned long long) sz);
 		return;
 	}
 	std::string text;
 	{
 		auto fp = std::make_unique<CFile>();
 		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+			ErrorPrint("hd_units_map.json could not be opened (%s) -- map not loaded\n",
+			           resolved.string().c_str());
 			return;
 		}
 		text.resize((size_t) sz);
 		const bool ok = (size_t) fp->read(&text[0], (size_t) sz) == (size_t) sz;
 		fp->close();
 		if (!ok) {
+			ErrorPrint("hd_units_map.json short read (expected %llu bytes) -- map not loaded\n",
+			           (unsigned long long) sz);
 			return;
 		}
 	}
 	content::JsonValue root;
 	std::string jerr;
 	if (!content::parseJson(text, root, jerr) || !root.isObject() || !root.object) {
+		ErrorPrint("hd_units_map.json did not parse as an object (%s) -- map not loaded\n",
+		           jerr.c_str());
 		return;
 	}
+	int skipped = 0;
 	for (const auto &kv : *root.object) {
 		const content::JsonValue *a = kv.second.find("atlas");
 		const content::JsonValue *p = kv.second.find("prefix");
 		if (a && p) {
 			g_hdUnitMap[kv.first] = { a->asString(), p->asString() };
+			const content::JsonValue *cf = kv.second.find("cycle_frames");
+			const content::JsonValue *cs = kv.second.find("cycle_step10");
+			if (cf && cs && cf->asInt() > 1 && cs->asInt() > 0) {
+				g_hdCycle[p->asString()] = { (int) cf->asInt(), (int) cs->asInt() };
+			}
+		} else {
+			++skipped;
+			ErrorPrint("hd_units_map.json entry '%s' has no atlas/prefix -- skipped, it will draw nothing\n",
+			           kv.first.c_str());
 		}
 	}
+	ErrorPrint("hd_units_map.json loaded: %d entries, %d skipped\n", (int) g_hdUnitMap.size(), skipped);
 }
 
 // Shared native atlas cache: many unit types map to the same atlas (e.g. every human land unit ->
@@ -885,6 +926,13 @@ static std::shared_ptr<CAtlasGraphic> GetSharedNativeAtlas(const std::string &st
 	}
 	cache[stem] = atlas;
 	return atlas;
+}
+
+// EFFECT-ATLAS-LOADED-TWICE: the effects (missile.cpp) kept a cache of their own and loaded the
+// biome's common atlas a second time at the first shot of a fight. They share this one now.
+std::shared_ptr<CAtlasGraphic> GetSharedHDAtlas(const std::string &stem)
+{
+	return GetSharedNativeAtlas(stem);
 }
 
 // NG15/NG22: resolve the HD atlas+prefix for an ARBITRARY sprite path. The per-type cache below is
@@ -924,12 +972,72 @@ static bool ResolveHDForFile(const std::string &file,
 	return sprites && sprites->IsLoaded();
 }
 
+// Frame lookup by number, in the spellings the original's atlases use:
+//   "<prefix>_<N>"                 the common case
+//   "<prefix>_f<N>"                Circle of Power (prefix carries the "_0")
+//   "<prefix>_<N>_f0"              a frame that ships only as a cycle (winter Church, winter Goblin
+//                                  Alchemist: s_church_0_f0..f2, s_inv_0_f0..f2) -- first cycle frame
+//   "<prefix>_<N>_f0_b<biome>"     the same, with one picture per biome (sunk-ship remains:
+//                                  death_30_f0_bf / _bl / _bs / _bx)
+// Each later spelling is tried only when every earlier one is absent, so nothing that resolves
+// today changes. `suffix` is appended to all of them ("" for the body, "_team" for the mask).
+static int HDFrameByNumber(const CAtlasGraphic &atlas, const std::string &prefix, int n,
+                           const char *suffix)
+{
+	const std::string num = std::to_string(n);
+	int f = atlas.FrameByName((prefix + "_" + num + suffix).c_str());
+	if (f < 0) {
+		f = atlas.FrameByName((prefix + "_f" + num + suffix).c_str());
+	}
+	if (f < 0) {
+		f = atlas.FrameByName((prefix + "_" + num + "_f0" + suffix).c_str());
+	}
+	if (f < 0) {
+		const std::string ts = CurrentEffectTileset();
+		const char *biome = ts == "forest" ? "_bf" : ts == "swamp" ? "_bl" : ts == "winter" ? "_bs"
+		                    : ts == "xswamp" ? "_bx" : nullptr;
+		if (biome) {
+			f = atlas.FrameByName((prefix + "_" + num + "_f0" + biome + suffix).c_str());
+		}
+	}
+	return f;
+}
+
+// ART-CYCLES: step `k` of the cycle that belongs to frame `n` of a family, in the spellings the
+// original's atlases use: "<prefix>_<N>_f<k>" (portal, Runestone, winter Church), the same with
+// the biome letter (sunk-ship rings), and "<prefix>_f<k>" for a family whose prefix already
+// carries the frame number (Circle of Power: vcircle_0_f0..).
+static int HDCycleFrame(const CAtlasGraphic &atlas, const std::string &prefix, int n, int k)
+{
+	const std::string base = prefix + "_" + std::to_string(n) + "_f" + std::to_string(k);
+	int f = atlas.FrameByName(base.c_str());
+	if (f < 0) {
+		const std::string ts = CurrentEffectTileset();
+		const char *biome = ts == "forest" ? "_bf" : ts == "swamp" ? "_bl" : ts == "winter" ? "_bs"
+		                    : ts == "xswamp" ? "_bx" : nullptr;
+		if (biome) {
+			f = atlas.FrameByName((base + biome).c_str());
+		}
+	}
+	if (f < 0 && n == 0) {
+		f = atlas.FrameByName((prefix + "_f" + std::to_string(k)).c_str());
+	}
+	return f;
+}
+
 static void EnsureHDUnitSprite(const CUnitType &type)
 {
-	if (type.HDSpriteTried) {
+	// HD-ART-STALE-TILESET: the next mission of a campaign runs in the same process and its
+	// tileset script gives a building another File (tilesets/winter/... -> tilesets/summer/...).
+	// The art resolved for the old File must not be kept: a summer map drew winter buildings.
+	if (type.HDSpriteTried && type.HDSpriteFile == type.File) {
 		return;
 	}
 	type.HDSpriteTried = true;
+	type.HDSpriteFile = type.File;
+	type.HDSprite.reset();
+	type.HDSpriteTeam.reset();
+	type.HDSpritePrefix.clear();
 
 	const std::string &file = type.File;
 	if (file.size() < 4 || file.compare(file.size() - 4, 4, ".png") != 0) {
@@ -985,6 +1093,17 @@ static void EnsureHDUnitSprite(const CUnitType &type)
 std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building, std::string &outPrefix)
 {
 	LoadHDUnitMap();
+	// A construction that has its own art in the original (shipyard, foundry, refinery, oil
+	// platform: families ship1 / found1 / ref1 / oplat1) is looked up by its own file, like any
+	// other sprite path. Only a construction without a map entry takes the land scaffold below.
+	if (building.Construction && !building.Construction->File.File.empty()) {
+		std::shared_ptr<CAtlasGraphic> own;
+		std::string ownPrefix;
+		if (ResolveHDForFile(building.Construction->File.File, own, ownPrefix)) {
+			outPrefix = ownPrefix;
+			return own;
+		}
+	}
 	std::string key = building.File;
 	for (char &c : key) { c = (char) std::tolower((unsigned char) c); }
 	auto it = g_hdUnitMap.find(key);
@@ -1000,6 +1119,57 @@ std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building,
 	const std::string biome = atlas.substr(b + 1);
 	outPrefix = (biome == "winter") ? "s_build1" : "build_1";
 	return GetSharedNativeAtlas("units_common_" + biome + "_sprites");
+}
+
+// NG82: a FLYING unit's ground shadow. Only the eight airborne types declare a shadow
+// (units.lua ShadowDefinition), and the art ships as shadow_0/1/2 in every per-tileset common
+// atlas. Ground units are untouched: their shadow is baked into their own sprite, so a second one
+// would double it.
+//
+// The construction-site trick above (take the building's own atlas and swap the race token for
+// "common") does NOT work here and was the first attempt's defect: buildings live in
+// units_<race>_<biome>, but MOBILE units live in units_<race>_common, where "common" is the
+// tileset-independent slot rather than a biome. Swapping tokens produced
+// "units_common_common_sprites", which does not exist -- the atlas silently failed to load, so
+// nothing drew and nothing was reported. The shadow is cast on the map, so it takes the MAP's
+// tileset, resolved by the one shared CurrentEffectTileset() (missile.h) rather than a second copy.
+//
+// AMEND B reverses AMEND A's per-unit derivation. The original client was captured with a Dragon,
+// a Gryphon Rider and a Gnomish Flying Machine in ONE frame: their shadows measure 59x62, 59x63 and
+// 60x62, FWHM 45/46/45 px -- identical to 1-2 px despite wildly different sprite sizes. The original
+// gives every flying unit the SAME shadow, so a footprint derived from each unit's own art scale
+// cannot reproduce it. The size is a single measured world constant instead; this function now
+// returns only the atlas.
+std::shared_ptr<CAtlasGraphic> GetHDShadowAtlas(const CUnitType &type)
+{
+	// Every exit reports ONCE per type. Two cycles were spent on this path reading silence as
+	// "drew correctly": a wrong atlas name simply failed to load and said nothing. A shadow that
+	// cannot resolve is a defect, so it is audible -- same rule as HD-MISS-INVISIBLE above.
+	static std::set<std::string> reportedShadowAtlas;
+	if (type.ShadowFile.empty()) {
+		return nullptr;                                   // no file-based shadow declared: not a defect
+	}
+	const std::string ts = CurrentEffectTileset();
+	if (ts.empty()) {
+		if (reportedShadowAtlas.insert("ts|" + type.Ident).second) {
+			ErrorPrint("HD shadow: '%s' -- tileset unknown (Map.Tileset.ImageFile '%s'), no shadow\n",
+			           type.Ident.c_str(), Map.Tileset.ImageFile.c_str());
+		}
+		return nullptr;
+	}
+	const std::string stem = "units_common_" + ts + "_sprites";
+	auto atlas = GetSharedNativeAtlas(stem);
+	if (!atlas || !atlas->IsLoaded()) {
+		if (reportedShadowAtlas.insert("load|" + type.Ident).second) {
+			ErrorPrint("HD shadow: '%s' -- atlas '%s' did not load, no shadow\n",
+			           type.Ident.c_str(), stem.c_str());
+		}
+		return nullptr;
+	}
+	if (reportedShadowAtlas.insert("ok|" + type.Ident).second) {
+		ErrorPrint("HD shadow: '%s' -> atlas '%s'\n", type.Ident.c_str(), stem.c_str());
+	}
+	return atlas;
 }
 
 void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorIndex, int frame, const PixelPos &screenPos)
@@ -1032,7 +1202,7 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 	if (sprite && !sprite->File.empty() && sprite->File != type.File) {
 		std::shared_ptr<CAtlasGraphic> carry;
 		std::string carryPrefix;
-		if (ResolveHDForFile(sprite->File, carry, carryPrefix)) {
+		if (ResolveHDForFile(sprite->File.string(), carry, carryPrefix)) {
 			hdSprite = carry;
 			hdPrefix = carryPrefix;
 		}
@@ -1047,29 +1217,83 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 		const std::string frameName = hdPrefix.empty()
 		                                  ? std::to_string(absFrame)
 		                                  : hdPrefix + "_" + std::to_string(absFrame);
-		const int f = hdSprite->FrameByName(frameName.c_str());
+		int f = hdSprite->FrameByName(frameName.c_str());
+		const bool bodyByName = f >= 0;
+		// NG29: a few native assets number their frames "<prefix>_f<N>" instead of "<prefix>_<N>"
+		// (the Circle of Power ships as vcircle_0_f0..f7), and a few ship a frame only as a cycle
+		// ("<prefix>_<N>_f0", optionally per biome). HDFrameByNumber tries them in order.
+		if (f < 0 && !hdPrefix.empty()) {
+			f = HDFrameByNumber(*hdSprite, hdPrefix, absFrame, "");
+		}
+		// ART-CYCLES: a family with a cycle shows step k of it, k taken from the game cycle. Where the
+		// frame also ships as a whole picture the step is drawn OVER it (glow); where it ships only
+		// as a cycle the step IS the picture.
+		int overlayFrame = -1;
+		if (!hdPrefix.empty()) {
+			const auto cyc = g_hdCycle.find(hdPrefix);
+			if (cyc != g_hdCycle.end()) {
+				const int k = (int) ((GameCycle * 10UL / (unsigned long) cyc->second.step10)
+				                    % (unsigned long) cyc->second.frames);
+				const int cf = HDCycleFrame(*hdSprite, hdPrefix, absFrame, k);
+				if (cf >= 0) {
+					if (bodyByName) {
+						overlayFrame = cf;
+					} else {
+						f = cf;
+					}
+				}
+			}
+		}
+		// One line per file and frame that resolved through a later spelling: it tells which name a
+		// unit is really drawn from (sunk-ship remains were invisible although a name resolved).
+		if (!bodyByName && f >= 0 && !hdPrefix.empty()) {
+			static std::set<std::string> told;
+			if (told.insert(type.File + "#" + std::to_string(absFrame)).second) {
+				ErrorPrint("HD frame by later spelling: %s prefix '%s' frame %d -> atlas frame %d\n",
+				           type.File.c_str(), hdPrefix.c_str(), absFrame, f);
+			}
+		}
+		// HD-MISS-INVISIBLE case B: the atlas loaded but neither spelling resolves, so the block
+		// below is skipped and the unit draws NOTHING. Report the two names actually tried -- that
+		// is the question MISSILE-ROCK and VCIRCLE-ADDR each cost a cycle to answer by other means.
+		// ONCE per key: this is the per-frame draw path.
+		if (f < 0) {
+			static std::set<std::string> reportedFrameMiss;
+			const std::string key = type.File + "|" + hdPrefix;
+			if (reportedFrameMiss.insert(key).second) {
+				ErrorPrint("HD frame MISS: %s prefix '%s' frame %d -- tried '%s' and '%s', drawing nothing\n",
+				           type.File.c_str(), hdPrefix.c_str(), absFrame, frameName.c_str(),
+				           (hdPrefix + "_f" + std::to_string(absFrame)).c_str());
+			}
+		}
 		if (f >= 0) {
 			const bool flip = (frame < 0) && type.Flip;
-			// Footprint mapping (the crux): the atlas canvas cw/ch is the RAW HD sourceSize (the
-			// full-resolution art, e.g. ~986px), NOT the classic tile footprint. Map that canvas
-			// onto the SAME on-screen rect the classic sprite occupies: top-left `pos` (already
-			// screenPos + the zoom-scaled centring offset), size type.Width x type.Height scaled by
-			// GpuWorldDrawZoom (the classic frame draws at Width x Height x zoom). DrawAtlasFrameClipScaled
-			// then fits the HD art into that rect, so the building keeps its classic tile footprint
-			// but renders at HD detail. (Contrast DrawAtlasFrameClip, which blits at native HD
-			// sw x sh and would draw the building several times too large.)
+			// SPRITE-SCALE-TRUE (SPEC_SPRITE_SCALE_TRUE.md sections 1 and 4): the original draws
+			// every sheet frame at one density -- HdNativeTilePx native pixels per map tile -- with
+			// the frame's own canvas centred on the unit's tile footprint. The Lua `Image size`
+			// (type.Width / type.Height) no longer sizes HD art; it stays the logical sprite box
+			// (culling, classic branch below). `screenPos` is the footprint's top-left on screen,
+			// as every caller passes it; `pos` above is used by the classic branch only.
 			const float z = GpuWorldDrawZoom;
-			const int dw = (z == 1.0f) ? type.Width  : (int) std::lround(type.Width  * z);
-			const int dh = (z == 1.0f) ? type.Height : (int) std::lround(type.Height * z);
-			hdSprite->DrawAtlasFrameClipScaled(f, pos.x, pos.y, dw, dh, flip);
+			const float s = PixelTileSize.x * z / HdNativeTilePx;
+			const float cx = screenPos.x + (type.TileWidth * PixelTileSize.x / 2.0f + type.Offset.x) * z;
+			const float cy = screenPos.y + (type.TileHeight * PixelTileSize.y / 2.0f + type.Offset.y) * z;
+			hdSprite->DrawAtlasFrameCentred(f, cx, cy, s, flip);
+			if (overlayFrame >= 0) {
+				hdSprite->DrawAtlasFrameCentred(overlayFrame, cx, cy, s, flip);
+			}
 			// Team-colour overlay: tint the `_team` mask to the player's canonical ramp colour
 			// (ramp[0], matching CPlayerColorGraphic::DrawPlayerColorFrameClipTex) and draw it over
-			// the base into the same footprint rect. Sparse: a building without team colour has no mask.
+			// the base with the same centre and scale, from the mask's own frame record (a mask's
+			// canvas is not always its body's). Sparse: a building without team colour has no mask.
 			if (type.HDSpriteTeam && type.HDSpriteTeam->IsLoaded()) {
 				const std::string teamName = hdPrefix.empty()
 				                                 ? std::to_string(absFrame)
 				                                 : hdPrefix + "_" + std::to_string(absFrame) + "_team";
-				const int tf = type.HDSpriteTeam->FrameByName(teamName.c_str());
+				int tf = type.HDSpriteTeam->FrameByName(teamName.c_str());
+				if (tf < 0 && !hdPrefix.empty()) { // NG29: "<prefix>_f<N>_team" spelling
+					tf = HDFrameByNumber(*type.HDSpriteTeam, hdPrefix, absFrame, "_team");
+				}
 				if (tf >= 0) {
 					Uint8 r = 255, g = 255, b = 255;
 					if (colorIndex >= 0 && colorIndex < (int) PlayerColorsRGB.size()
@@ -1079,10 +1303,19 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 						g = c.G;
 						b = c.B;
 					}
-					type.HDSpriteTeam->DrawAtlasFrameClipScaled(tf, pos.x, pos.y, dw, dh, flip, r, g, b);
+					type.HDSpriteTeam->DrawAtlasFrameCentred(tf, cx, cy, s, flip, r, g, b);
 				}
 			}
 			return; // HD drawn; skip the classic blit for this unit
+		}
+	} else {
+		// HD-MISS-INVISIBLE case A: no HD sprite resolved at all -- either hd_units_map.json has no
+		// entry for this File, or its atlas failed to load. The classic blit below is not a fallback
+		// here: 0 of the mapped paths ships a classic PNG, so this unit draws NOTHING. ONCE per file.
+		static std::set<std::string> reportedSpriteMiss;
+		if (reportedSpriteMiss.insert(type.File).second) {
+			ErrorPrint("HD sprite MISS: '%s' resolved no HD atlas -- drawing nothing\n",
+			           type.File.c_str());
 		}
 	}
 
@@ -1257,6 +1490,51 @@ void LoadUnitTypes()
 #endif
 		// FIXME: should i copy the animations of same graphics?
 	}
+}
+
+/**
+**  STUTTER-FIRST-DRAW-LOAD: load the native HD atlases this map will draw from while the loading
+**  screen is up. Without it each atlas (a whole race's units, a race's buildings of one biome,
+**  the biome's common art) was decoded and uploaded in the middle of a frame at the first draw of
+**  a unit of that family: measured on a tablet as a stop of about 2 s, once 5-7 s (the first enemy
+**  unit of the other race). Loaded: for every race that has units on the map its unit atlas and
+**  its building atlas of the map's biome, each with the player-colour masks, and the biome's
+**  common atlas. The cache is the shared one, so nothing is loaded twice.
+*/
+void PreloadHDArtForMap()
+{
+	const std::string biome = CurrentEffectTileset();
+	if (biome.empty()) {
+		return;
+	}
+	std::set<std::string> races;
+	for (int p = 0; p < PlayerMax; ++p) {
+		const CPlayer &player = Players[p];
+		if (player.Type == PlayerTypes::PlayerNobody || player.GetUnitCount() == 0) {
+			continue;
+		}
+		const std::string &race = PlayerRaces.Name[player.Race];
+		if (race == "human" || race == "orc") {
+			races.insert(race);
+		}
+	}
+	const unsigned long start = GetTicks();
+	int count = 0;
+	GetSharedNativeAtlas("units_common_" + biome + "_sprites");
+	++count;
+	for (const std::string &race : races) {
+		for (const std::string &group : {std::string("common"), biome}) {
+			const std::string stem = "units_" + race + "_" + group;
+			ShowLoadProgress("%s", stem.c_str());
+			GetSharedNativeAtlas(stem + "_sprites");
+			NetworkLoadingPing(); // LAN: alive between two atlases
+			GetSharedNativeAtlas(stem + "_masks", /*teamMask=*/true);
+			NetworkLoadingPing();
+			count += 2;
+		}
+	}
+	ErrorPrint("HD preload: %d atlases for biome '%s', %d race(s), %lu ms\n",
+	           count, biome.c_str(), (int) races.size(), GetTicks() - start);
 }
 
 void CUnitTypeVar::Init()

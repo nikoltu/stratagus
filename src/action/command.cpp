@@ -142,9 +142,18 @@ static void ClearSavedAction(CUnit &unit)
 	unit.SavedOrder = nullptr;
 }
 
+/**
+**  What a player who is out of the network game left behind takes no order, from nobody and on
+**  no way (network, replay, script, computer player, the local screen).
+*/
+static bool IsUnitOfGonePlayer(const CUnit &unit)
+{
+	return unit.Player->Gone;
+}
+
 static bool IsUnitValidForNetwork(const CUnit &unit)
 {
-	return !unit.Removed && unit.CurrentAction() != UnitAction::Die;
+	return !unit.Removed && unit.CurrentAction() != UnitAction::Die && !IsUnitOfGonePlayer(unit);
 }
 
 
@@ -159,6 +168,9 @@ static bool IsUnitValidForNetwork(const CUnit &unit)
 */
 void CommandStopUnit(CUnit &unit)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	// Ignore that the unit could be removed.
 	auto *order = GetNextOrder(unit, EFlushMode::On); // Flush them.
 	Assert(order);
@@ -176,6 +188,9 @@ void CommandStopUnit(CUnit &unit)
 */
 void CommandStandGround(CUnit &unit, EFlushMode flush)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	std::unique_ptr<COrder> *order = nullptr;
 
 	if (unit.Type->Building) {
@@ -542,6 +557,9 @@ void CommandExplore(CUnit &unit, EFlushMode flush)
 */
 void CommandDismiss(CUnit &unit)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	// Check if building is still under construction? (NETWORK!)
 	if (unit.CurrentAction() == UnitAction::Built) {
 		unit.CurrentOrder()->Cancel(unit);
@@ -691,6 +709,9 @@ void CommandTrainUnit(CUnit &unit, CUnitType &type, EFlushMode)
 */
 void CommandCancelTraining(CUnit &unit, int slot, const CUnitType *type)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	DebugPrint("Cancel %d type: %s\n", slot, type ? type->Ident.c_str() : "-any-");
 
 	ClearSavedAction(unit);
@@ -763,6 +784,9 @@ void CommandUpgradeTo(CUnit &unit, CUnitType &type, EFlushMode flush, bool insta
 */
 void CommandTransformIntoType(CUnit &unit, CUnitType &type)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	if (unit.CriticalOrder && unit.CriticalOrder->Action == UnitAction::TransformInto) {
 		return;
 	}
@@ -778,6 +802,9 @@ void CommandTransformIntoType(CUnit &unit, CUnitType &type)
 */
 void CommandCancelUpgradeTo(CUnit &unit)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	// Check if unit is still upgrading? (NETWORK!)
 	if (unit.CurrentAction() == UnitAction::UpgradeTo) {
 		unit.CurrentOrder()->Cancel(unit);
@@ -820,6 +847,9 @@ void CommandResearch(CUnit &unit, CUpgrade &what, EFlushMode flush)
 */
 void CommandCancelResearch(CUnit &unit)
 {
+	if (IsUnitOfGonePlayer(unit)) {
+		return;
+	}
 	// Check if unit is still researching? (NETWORK!)
 	if (unit.CurrentAction() == UnitAction::Research) {
 		unit.CurrentOrder()->Cancel(unit);
@@ -906,6 +936,11 @@ void CommandAutoSpellCast(CUnit &unit, int spellid, int on)
 */
 void CommandDiplomacy(int player, EDiplomacy state, int opponent)
 {
+	if (Players[player].Gone || Players[opponent].Gone) {
+		// A gone player stays as CommandQuit left him: nobody's enemy, so that what he left
+		// behind is no target on sight and no opponent for the victory condition.
+		return;
+	}
 	switch (state) {
 		case EDiplomacy::Neutral:
 			Players[player].SetDiplomacyNeutralWith(Players[opponent]);
@@ -937,6 +972,10 @@ void CommandSharedVision(int playerIndex, bool state, int opponentIndex)
 	if (state == player->HasSharedVisionWith(*opponent)
 	    || opponent->Type == PlayerTypes::PlayerNobody
 	    || player->Type == PlayerTypes::PlayerNobody) {
+		return;
+	}
+	if (state && (player->Gone || opponent->Gone)) {
+		// No new shared vision with a gone player.
 		return;
 	}
 
@@ -977,11 +1016,95 @@ void CommandSharedVision(int playerIndex, bool state, int opponentIndex)
 }
 
 /**
+**  Does a unit of a gone player die with him?
+**
+**  Every unit which is no building, and every building which can attack (the type's CanAttack:
+**  the towers with a weapon). A building under construction is judged by the type it is built as.
+**
+**  @param unit  Unit of the gone player.
+*/
+static bool QuitUnitDies(const CUnit &unit)
+{
+	return !unit.Type->Building || unit.Type->CanAttack;
+}
+
+/**
+**  The units of a gone player in the order of their slots: the same order on every device.
+**
+**  @param player  The gone player.
+**  @param dying   true: the living units which die with him, false: those which stay.
+*/
+static std::vector<CUnit *> QuitUnitsInSlotOrder(const CPlayer &player, bool dying)
+{
+	std::vector<CUnit *> units;
+
+	for (CUnit *unit : player.GetUnits()) {
+		if (!unit->Destroyed && unit->IsAlive() && QuitUnitDies(*unit) == dying) {
+			units.push_back(unit);
+		}
+	}
+	ranges::sort(units, [](const CUnit *lhs, const CUnit *rhs) { return UnitNumber(*lhs) < UnitNumber(*rhs); });
+	return units;
+}
+
+/**
+**  What happens to the units of a player who is finally out of a network game.
+**
+**  Runs inside the quit command, so in the same cycle on every device:
+**  - his buildings without a weapon stay and do nothing more: training, research and upgrades
+**    are cancelled (the costs go back to him, where they stay), a building under construction
+**    stays as it is (COrder_Built does nothing for a gone player);
+**  - every other unit of his dies the normal death, with no attacker: nobody gets a kill, a
+**    razing or points for it. What is inside a unit that dies follows the unit as in any death.
+**  From now on his units take no order (IsUnitOfGonePlayer) and whoever destroys one of the
+**  buildings gets the razing without the points (HitUnit).
+**
+**  @param player  The gone player.
+*/
+void CommandQuitUnits(CPlayer &player)
+{
+	player.Gone = true;
+
+	for (CUnit *unit : QuitUnitsInSlotOrder(player, false)) {
+		if (unit->CurrentAction() == UnitAction::Built) {
+			unit->Orders.resize(1);
+		} else {
+			ReleaseOrders(*unit);
+			UnitClearOrders(*unit);
+		}
+		ClearSavedAction(*unit);
+		ClearNewAction(*unit);
+		unit->CriticalOrder = nullptr;
+	}
+
+	// A death can put units out of the dying one (saved cargo): they are his too and die in the
+	// next round. Every round ends with fewer living units, so this ends.
+	for (;;) {
+		const std::vector<CUnit *> dying = QuitUnitsInSlotOrder(player, true);
+
+		if (dying.empty()) {
+			break;
+		}
+		for (CUnit *unit : dying) {
+			// An earlier death of this round may have taken it along (inside a transporter).
+			if (!unit->Destroyed && unit->IsAlive() && unit->Player == &player) {
+				LetUnitDie(*unit);
+			}
+		}
+	}
+	// A computer player gives no more orders either (only the debug quit reaches this).
+	player.AiEnabled = false;
+}
+
+/**
 **  Player quit.
 **
 **  @param player  Player number that quit.
+**  @param reason  Why he is out (ENetQuitReason, net_message.h): left by choice, connection
+**                 lost, or removed before his first cycle. The same on every device.
+**                 His units are treated alike for every reason (CommandQuitUnits).
 */
-void CommandQuit(int player)
+void CommandQuit(int player, int reason)
 {
 	// Set player to neutral, remove allied/enemy/shared vision status
 	// If the player doesn't have any units then this is pointless?
@@ -1000,7 +1123,11 @@ void CommandQuit(int player)
 		}
 	}
 
-	if (Players[player].GetUnits().empty()) {
+	const bool hadNoUnits = Players[player].GetUnits().empty();
+
+	CommandQuitUnits(Players[player]);
+
+	if (hadNoUnits) {
 		SetMessage(_("Player \"%s\" has been killed"), Players[player].Name.c_str());
 	} else {
 		SetMessage(_("Player \"%s\" has left the game"), Players[player].Name.c_str());

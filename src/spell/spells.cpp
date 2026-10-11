@@ -270,6 +270,21 @@ static std::optional<std::pair<CUnit*, Vec2i>> SelectTargetUnitsOfAutoCast(CUnit
 	if (minRange == 0)
 		table.push_back(&caster); // Allow self as target (we check conditions later)
 
+	// AUTOCAST-CORPSE-CRASH: a unit without any order reached the filters below, which read
+	// CurrentAction() (crash at cycle 5201 of BDP Human I, register cycle 700). Such a unit is
+	// named in the log and left out, so that the game goes on and the log tells which unit it is.
+	ranges::erase_if(table, [&](const CUnit *unit) {
+		if (!unit->Orders.empty() && unit->Orders[0] != nullptr) {
+			return false;
+		}
+		ErrorPrint("autocast: unit %d (%s, player %d, removed %d, destroyed %d) has no order; "
+		           "caster %d (%s), spell %s\n",
+		           UnitNumber(*unit), unit->Type ? unit->Type->Ident.c_str() : "?",
+		           unit->Player ? unit->Player->Index : -1, (int)unit->Removed, (int)unit->Destroyed,
+		           UnitNumber(caster), caster.Type->Ident.c_str(), spell.Ident.c_str());
+		return true;
+	});
+
 	// Check generic conditions. FIXME: a better way to do this?
 	if (autocast->Combat != ECondition::Ignore) {
 		// Check each unit if it is hostile.

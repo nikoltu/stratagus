@@ -241,7 +241,25 @@ public:
 	CFont *DefaultFont = nullptr;              /// Default font for content.
 	IntColor BackgroundColor = ColorBlue;      /// Color used for popup's background.
 	IntColor BorderColor = ColorWhite;         /// Color used for popup's borders.
+	/// IG-T1: the Remastered draws its tooltip as a nine-sliced sprite (`hud_tooltip` ->
+	/// `tooltip_frame`, 9slice 70, scale 5), not as a flat rectangle, and it puts it at a FIXED
+	/// place -- the bottom-left of the map area -- instead of next to the button. When
+	/// BackgroundImage is set it replaces the flat fill; when FixedX >= 0 the popup is drawn there.
+	std::shared_ptr<CGraphic> BackgroundImage;
+	int BackgroundBorder = 0;                  /// nine-slice border of BackgroundImage, in its own pixels
+	int FixedX = -1;                           /// LOGICAL x (3840x2160 space), -1 = follow the button
+	int FixedY = -1;
+	int FixedHeight = 0;                       /// forced LOGICAL height, 0 = size to the contents
+	/// HUD-020: true = the original's fixed tooltip layout (DrawRemasteredTooltip); Contents,
+	/// Margin, MinWidth, MinHeight and the Fixed* fields are then not used.
+	bool RemasteredLayout = false;
 };
+
+/// HUD-020: draw the command tooltip the way the original lays it out (Oracle
+/// `tooltip_layout_contract`). `costs` is indexed like CUnitStats::Costs plus ManaResCost;
+/// `allowed` is false when the button is drawn greyed.
+extern void DrawRemasteredTooltip(const CPopup &popup, const ButtonAction &button,
+								  const int *costs, bool allowed);
 
 
 //@}

@@ -385,7 +385,7 @@ CInitMessage_Hello::CInitMessage_Hello(const char *name) :
 	header(MessageInit_FromClient, ICMHello)
 {
 	strncpy_s(this->PlyName, sizeof(this->PlyName), name, _TRUNCATE);
-	this->Stratagus = StratagusVersion;
+	this->Stratagus = NetworkProtocolVersion;
 	this->Version = FileChecksums;
 }
 
@@ -428,6 +428,7 @@ std::vector<unsigned char> CInitMessage_Config::Serialize() const
 	for (const auto &host : this->hosts) {
 		p += host.Serialize(p);
 	}
+	p += serialize8(p, mesh);
 	return buf;
 }
 
@@ -438,6 +439,38 @@ void CInitMessage_Config::Deserialize(const unsigned char *p)
 	for (auto &host : this->hosts) {
 		p += host.Deserialize(p);
 	}
+	p += deserialize8(p, &mesh);
+}
+
+//
+// CInitMessage_ConfigAck
+//
+
+CInitMessage_ConfigAck::CInitMessage_ConfigAck() :
+	header(MessageInit_FromClient, ICMConfig)
+{
+}
+
+CInitMessage_ConfigAck::CInitMessage_ConfigAck(uint16_t peers) :
+	header(MessageInit_FromClient, ICMConfig),
+	peers(peers)
+{
+}
+
+std::vector<unsigned char> CInitMessage_ConfigAck::Serialize() const
+{
+	std::vector<unsigned char> buf(Size());
+	unsigned char *p = buf.data();
+
+	p += header.Serialize(p);
+	p += serialize16(p, peers);
+	return buf;
+}
+
+void CInitMessage_ConfigAck::Deserialize(const unsigned char *p)
+{
+	p += header.Deserialize(p);
+	p += deserialize16(p, &peers);
 }
 
 //
@@ -447,7 +480,7 @@ void CInitMessage_Config::Deserialize(const unsigned char *p)
 CInitMessage_EngineMismatch::CInitMessage_EngineMismatch() :
 	header(MessageInit_FromServer, ICMEngineMismatch)
 {
-	this->Stratagus = StratagusVersion;
+	this->Stratagus = NetworkProtocolVersion;
 }
 
 std::vector<unsigned char> CInitMessage_EngineMismatch::Serialize() const
@@ -622,6 +655,7 @@ std::vector<unsigned char> CInitMessage_State::Serialize() const
 
 	p += header.Serialize(p);
 	p += this->State.Serialize(p);
+	p += serialize8(p, mesh);
 	return buf;
 }
 
@@ -629,6 +663,7 @@ void CInitMessage_State::Deserialize(const unsigned char *p)
 {
 	p += header.Deserialize(p);
 	p += this->State.Deserialize(p);
+	p += deserialize8(p, &mesh);
 }
 
 //
@@ -772,6 +807,7 @@ size_t CNetworkCommandQuit::Serialize(unsigned char *buf) const
 {
 	unsigned char *p = buf;
 	p += serialize16(p, this->player);
+	p += serialize8(p, this->reason);
 	return p - buf;
 }
 
@@ -780,6 +816,7 @@ size_t CNetworkCommandQuit::Deserialize(const unsigned char *buf)
 	const unsigned char *p = buf;
 	if (p) {
 		p += deserialize16(p, &this->player);
+		p += deserialize8(p, &this->reason);
 		return p - buf;
 	} else {
 		// can happen when the other end crashed hard

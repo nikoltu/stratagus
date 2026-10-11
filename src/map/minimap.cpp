@@ -107,8 +107,9 @@ void CMinimap::Create()
 	// Scale to biggest value.
 	const int n = std::max({Map.Info.MapWidth, Map.Info.MapHeight, 32});
 
-	MinimapScaleX = (W * MINIMAP_FAC + n - 1) / n;
-	MinimapScaleY = (H * MINIMAP_FAC + n - 1) / n;
+	// One scale for both axes: the picture keeps the map's shape and is centred in the box.
+	MinimapScaleX = (std::min(W, H) * MINIMAP_FAC + n - 1) / n;
+	MinimapScaleY = MinimapScaleX;
 
 	XOffset = (W - (Map.Info.MapWidth * MinimapScaleX) / MINIMAP_FAC + 1) / 2;
 	YOffset = (H - (Map.Info.MapHeight * MinimapScaleY) / MINIMAP_FAC + 1) / 2;
@@ -745,13 +746,36 @@ void CMinimap::Destroy()
 */
 void CMinimap::DrawViewportArea(const CViewport &viewport, int alpha) const
 {
-	// Determine and save region below minimap cursor
-	const PixelPos screenPos = TilePosToScreenPos(viewport.MapPos);
-	int w = (viewport.MapWidth * MinimapScaleX) / MINIMAP_FAC;
-	int h = (viewport.MapHeight * MinimapScaleY) / MINIMAP_FAC;
+	// M666-7. Size, measured on the original as outer px (work/agent-fix-hudrest/tools/
+	// m7_viewrect.py), k = HUD step, view in tiles = view px / tile px:
+	//   k 3, view 25.33 x 19.25, 96-tile map  (4 px a tile): 102 x 78  (c_k, c25, b02, b03, b04)
+	//   k 3, view 25.33 x 19.25, 128-tile map (3 px a tile):  75 x 57  (e01, e02)
+	//   k 2, view 20.81 x 16.11, 32-tile map  (8 px a tile): 160 x 128 (o20, o41, o45)
+	// One rule gives all six numbers: whole tiles of the view (rounded down), times the minimap's
+	// base units per tile, rounded up to a whole unit, times k: ceil(25 * 4/3) = 34 -> 102,
+	// ceil(19 * 4/3) = 26 -> 78, 25 -> 75, 19 -> 57, 20 * 4 = 80 -> 160, 16 * 4 = 64 -> 128.
+	// It is a fit to three scenes, not a decoded rule. The size was the count of tiles the view
+	// TOUCHES (26 x 19 -> 312 x 228 px on a 32-tile map at k = 3; the rule gives 300 x 216).
+	// Line: k px (3 at k = 3, 2 at k = 2, same captures), drawn inwards.
+	// Place: the view's own top-left, pixel-true. The original's place rule is NOT in evidence
+	// (its captures are neither at a map edge nor tile-aligned); a tile-aligned origin would
+	// leave a 12-px gap under a view that shows the map's last row.
+	const int k = std::max(1, Video.HudCanvas.Step);
+	const int n = std::max(Map.Info.MapWidth, Map.Info.MapHeight);
+	const double unitsPerTile = (n > 0) ? (double) std::min(W, H) / k / n : 0.0;
+	const PixelSize viewPx = viewport.GetRenderPixelSize();
+	const int tilesX = viewPx.x / PixelTileSize.x;
+	const int tilesY = viewPx.y / PixelTileSize.y;
+	const int w = k * (int) std::ceil(tilesX * unitsPerTile - 1e-6);
+	const int h = k * (int) std::ceil(tilesY * unitsPerTile - 1e-6);
+	const PixelPos tilePos = TilePosToScreenPos(viewport.MapPos);
+	const int x = tilePos.x + (viewport.Offset.x * MinimapScaleX) / (MINIMAP_FAC * PixelTileSize.x);
+	const int y = tilePos.y + (viewport.Offset.y * MinimapScaleY) / (MINIMAP_FAC * PixelTileSize.y);
 
 	// Draw cursor as rectangle (Note: unclipped, as it is always visible)
-	Video.DrawTransRectangle(UI.ViewportCursorColor, screenPos.x, screenPos.y, w, h, alpha);
+	for (int i = 0; i < k && w - 2 * i > 0 && h - 2 * i > 0; ++i) {
+		Video.DrawTransRectangle(UI.ViewportCursorColor, x + i, y + i, w - 2 * i, h - 2 * i, alpha);
+	}
 }
 
 /**

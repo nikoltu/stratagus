@@ -28,8 +28,8 @@ android {
         applicationId 'net.wargushd.game'
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode 340000
+        versionName '3.4.0'
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -69,8 +69,83 @@ android {
     }
 }
 
+// CS4: the HD content the game needs at runtime is NOT part of this repo. It is staged into
+// assets/ from the content trees, using the manifest that records where each file belongs under
+// files/data on the device (recovered in cycle 419; the mapping was previously implicit in the
+// harness's push invocations and written down nowhere).
+//
+// The trees' location is a local path, so it is supplied as a property -- set wargushdDocsRoot in
+// local.properties (gitignored) or pass -PwargushdDocsRoot=... -- never hardcoded here. Same idiom
+// as stratagusNativeDir above. Without it the task is skipped and the APK builds without content,
+// which is exactly what it did before this task existed.
+// Gradle does NOT load local.properties into project properties -- the Android plugin reads it only
+// for sdk.dir -- so read it explicitly. Without this the property is silently null and the staging
+// task never runs, which is exactly how the first attempt produced an APK with no content.
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) { localPropsFile.withInputStream { localProps.load(it) } }
+def docsRoot = project.hasProperty('wargushdDocsRoot') ?
+        project.property('wargushdDocsRoot') : localProps.getProperty('wargushdDocsRoot')
+def contentGen = layout.buildDirectory.dir("generated/wargushd_assets").get().asFile
+
+tasks.register('stageWargushdContent') {
+    outputs.dir contentGen
+    // The sources live outside this project and are not declared as inputs, so the task
+    // cannot tell when they changed: stage on every build rather than package stale content.
+    outputs.upToDateWhen { false }
+    doLast {
+        if (docsRoot == null) {
+            logger.lifecycle("wargushdDocsRoot not set - APK will contain no game content")
+            return
+        }
+        def manifest = new File("${docsRoot}/.wargushd/CS4_CONTENT_MANIFEST.tsv")
+        if (!manifest.exists()) {
+            throw new GradleException("content manifest not found: ${manifest}")
+        }
+        // The manifest's first path component selects which tree the file comes from.
+        def roots = ['changes': "${docsRoot}/.wargushd/fulltree-changes",
+                     'backup' : "${docsRoot}/.wargushd/fulltree-backup",
+                     'root'   : "${docsRoot}/fulltree-changes",
+                     'tools'  : "${docsRoot}/.wargushd/tools"]
+        def out = new File(contentGen, 'wargushd')
+        out.deleteDir(); out.mkdirs()
+        int copied = 0
+        def missing = []
+        manifest.eachLine('UTF-8') { line ->
+            if (!line.trim()) return
+            def (src, rel) = line.split('\t', 2)
+            def (treeKey, treeRel) = src.split('/', 2)
+            def root = roots[treeKey]
+            if (root == null) { missing << line; return }
+            def from = new File("${root}/${treeRel}")
+            if (!from.isFile()) { missing << line; return }
+            def to = new File(out, rel)
+            to.parentFile.mkdirs()
+            to.bytes = from.bytes
+            copied++
+        }
+        // A partial payload is worse than none: it would install and then fail at runtime with no
+        // indication which files were absent.
+        if (!missing.isEmpty()) {
+            throw new GradleException("content manifest lists ${missing.size()} file(s) not on disk, "
+                + "first: ${missing[0]}")
+        }
+        logger.lifecycle("staged ${copied} content files into assets/wargushd")
+    }
+}
+
+android.sourceSets.main.assets.srcDirs += contentGen
+
 tasks.configureEach { task ->
     if (task.name == 'preBuild') {
         task.dependsOn 'copySdlJava'
+    }
+}
+
+// The asset merge, not preBuild, is what has to see the staged files: wiring this through preBuild
+// left the task out of the graph entirely on the first attempt.
+tasks.configureEach { task ->
+    if (task.name.startsWith('merge') && task.name.endsWith('Assets')) {
+        task.dependsOn 'stageWargushdContent'
     }
 }

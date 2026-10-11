@@ -33,7 +33,10 @@
 
 #include "stratagus.h"
 
+#include "debug_bridge.h"
+#include "launcher_bridge.h"
 #include "loadingscreen.h"
+#include "network.h"
 
 #include "iolib.h"
 #include "video.h"
@@ -116,9 +119,22 @@ static void PaintLoadingScreen()
 	RealizeVideoMemory();
 }
 
+/// The hosting activity draws the loading screen; this module only reports begin and end.
+static bool HostDrawsLoading = false;
+/// Loading has ended and the next frame put on screen is to be reported to the host.
+static bool ReportNextFrame = false;
+
 void ShowLoadingScreen()
 {
 	if (LoadingActive) {
+		return;
+	}
+
+	if (LauncherHosted()) {
+		HostDrawsLoading = true;
+		ReportNextFrame = false;
+		LoadingActive = true;
+		LauncherPost(LauncherMsgLoadingBegin, 0);
 		return;
 	}
 
@@ -183,7 +199,12 @@ void ShowLoadingScreen()
 
 void UpdateLoadingScreen()
 {
-	if (!LoadingActive) {
+	// NG68: beat the heartbeat BEFORE the inactive-early-return. CreateGame calls this between its
+	// load phases whether or not the loading art is up, so this is what keeps the watchdog quiet
+	// (and correctly placed) across a mission load.
+	DBG_CHECKPOINT("loading");
+	NetworkLoadingPing(); // LAN-MESH S8: a device which loads is not a dead one
+	if (!LoadingActive || HostDrawsLoading) {
 		return;
 	}
 	PaintLoadingScreen();
@@ -196,10 +217,27 @@ bool IsLoadingScreenActive()
 
 void HideLoadingScreen()
 {
+	if (HostDrawsLoading) {
+		// The host keeps its screen up until a frame of what comes next is on screen.
+		HostDrawsLoading = false;
+		LoadingActive = false;
+		ReportNextFrame = true;
+		return;
+	}
 	if (!LoadingActive && !LoadingBackground && !LoadingAnimation) {
 		return;
 	}
 	LoadingActive = false;
 	LoadingBackground.reset();
 	LoadingAnimation.reset();
+}
+
+void LoadingFramePresented()
+{
+	// A network game which is held has not begun: the host keeps its loading screen until
+	// every device has loaded (or the wait the debug bridge made up is over).
+	if (ReportNextFrame && !NetworkIsHeld() && !NetworkGetWaitView().Held) {
+		ReportNextFrame = false;
+		LauncherPost(LauncherMsgLoadingEnd, 0);
+	}
 }

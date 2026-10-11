@@ -287,7 +287,12 @@ void PudData::BuildSetup(std::string &out) const
 		AppendLine(out, "SetPlayerData(%d, \"Resources\", \"oil\", %d)\n", i, pdata.StartOil[i]);
 		AppendLine(out, "SetPlayerData(%d, \"RaceName\", \"%s\")\n", i, RaceNames[pdata.Races[i]]);
 		if (pdata.Players[i] != PlayerNeutral) {
-			AppendLine(out, "SetAiType(%d, \"%s\")\n", i, AiTypeNames[pdata.AiType[i]]);
+			// The slot's AI byte as the map gives it: the original game selects its script by this
+			// number. A map may carry any byte; one outside the name table keeps the first name.
+			const unsigned aiId = static_cast<unsigned char>(pdata.AiType[i]);
+			const size_t aiNames = sizeof(AiTypeNames) / sizeof(AiTypeNames[0]);
+			AppendLine(out, "SetAiType(%d, \"%s\")\n", i, AiTypeNames[aiId < aiNames ? aiId : 0]);
+			AppendLine(out, "if SetWc2AiId then SetWc2AiId(%d, %u) end\n", i, aiId);
 		}
 	}
 	AppendLine(out, "SetPlayerData(%d, \"RaceName\", \"neutral\")\n", PLAYERMAX - 1);

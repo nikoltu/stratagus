@@ -8,10 +8,11 @@ bool IsNetworkGame();
 int NetworkSetupServerAddress(const std::string serveraddr, int port = 0);
 void NetworkInitClientConnect(void);
 void NetworkInitServerConnect(int openslots);
-void NetworkServerStartGame(void);
+bool NetworkServerStartGame(void);
 void NetworkProcessClientRequest(void);
 int GetNetworkState();
 void NetworkServerResyncClients(void);
+bool NetworkServerClientsSynced(void);
 void NetworkDetachFromServer(void);
 
 class ServerSetupStateRacesArray {

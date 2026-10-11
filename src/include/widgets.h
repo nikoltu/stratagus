@@ -45,6 +45,12 @@ void initGuichan();
 void freeGuichan();
 void handleInput(const SDL_Event *event);
 
+/// NG99: true while the guichan widget layer owns input, i.e. a menu is on screen. The touch
+/// layer needs it to tell a menu tap from an in-game tap: in a menu the synthetic pointer is not
+/// drawn and may be parked off-widget when the finger lifts, in game it is the real cursor and
+/// drives build placement.
+bool GuichanOwnsInput();
+
 #if USING_TOLUAPP
 void addActionListener(gcn::Widget *, gcn::ActionListener *);
 void setBackgroundColor(gcn::Widget *, const gcn::Color &);
@@ -120,10 +126,16 @@ public:
 	void setNormalImage(std::shared_ptr<gcn::Image> image) { normalImage = image; adjustSize(); }
 	void setPressedImage(std::shared_ptr<gcn::Image> image) { pressedImage = image; }
 	void setDisabledImage(std::shared_ptr<gcn::Image> image) { disabledImage = image; }
+	// Remastered widgets are three-state: Data/skins/skins.json gives every button family a
+	// *_hover entry next to its normal and active ones (e.g. fe_campaign button/button_hover/
+	// button_active). The hover image was the missing third state -- draw() carried a disabled
+	// "FIXME: add mouse-over image" branch -- so hover always fell back to the normal art.
+	void setHoverImage(std::shared_ptr<gcn::Image> image) { hoverImage = image; }
 
 	std::shared_ptr<gcn::Image> normalImage;
 	std::shared_ptr<gcn::Image> pressedImage;
 	std::shared_ptr<gcn::Image> disabledImage;
+	std::shared_ptr<gcn::Image> hoverImage;
 };
 
 class ImageRadioButton : public gcn::RadioButton
@@ -197,10 +209,24 @@ public:
 	void setMarkerImage(std::shared_ptr<gcn::Image> image);
 	void setBackgroundImage(std::shared_ptr<gcn::Image> image);
 	void setDisabledBackgroundImage(std::shared_ptr<gcn::Image> image);
+	// Remastered slider track. skins.json describes it with COLOURS, not a sprite:
+	// widget_slider_black = { color [202,130,28] (the part left of the marker),
+	// secondary_color [44,39,33] (the remainder) }; widget_slider_orc/human carry the
+	// faction variants. Track thickness is not in the skin data and is measured from the
+	// original client's own output (options-sound capture: 9 px at 1440p = 13.5 logical).
+	void setTrackColors(int fr, int fg, int fb, int ur, int ug, int ub, int thickness)
+	{
+		trackFilled = gcn::Color(fr, fg, fb);
+		trackUnfilled = gcn::Color(ur, ug, ub);
+		trackThickness = thickness;
+	}
 
 	std::shared_ptr<gcn::Image> markerImage;
 	std::shared_ptr<gcn::Image> backgroundImage;
 	std::shared_ptr<gcn::Image> disabledBackgroundImage;
+	gcn::Color trackFilled;
+	gcn::Color trackUnfilled;
+	int trackThickness = 0;
 };
 
 class MultiLineLabel : public gcn::Widget
@@ -211,6 +237,7 @@ public:
 
 	void draw(gcn::Graphics *graphics) override;
 	void drawFrame(gcn::Graphics *graphics) override;
+	int lineHeight() const;   // NG101: the font's declared line advance, or the cell height
 
 	void setCaption(const std::string &caption);
 	const std::string &getCaption() const;
@@ -249,6 +276,10 @@ public:
 	void restart();
 	void setSpeed(float speed) { this->speedY = speed; }
 	float getSpeed() const { return this->speedY; }
+	/// Scroll by the clock instead of by the frame: pixels a second (0 = by the frame, as before).
+	void setSpeedPerSecond(float speed) { this->speedPerSecond = speed; }
+	/// Stop with the content at this y (<= 0) instead of scrolling it out of sight.
+	void setRestY(int y) { this->restY = y; this->hasRest = true; }
 
 private:
 	void logic() override;
@@ -256,6 +287,10 @@ private:
 private:
 	gcn::Container container; /// Data container
 	float speedY; /// vertical speed of the container (positive number: go up).
+	float speedPerSecond = 0.f; /// when > 0: vertical speed in pixels a second, by the clock
+	unsigned int lastTicks = 0; /// clock at the last step (0 = not started)
+	int restY = 0;              /// where the content comes to rest
+	bool hasRest = false;       /// true: stop at restY
 	float containerY = 0; /// Y position of the container
 	bool finished = false; /// True while scrolling ends.
 };
@@ -366,36 +401,131 @@ public:
 	void draw(gcn::Graphics *graphics) override;
 	void drawFrame(gcn::Graphics *graphics) override;
 	void mousePressed(gcn::MouseEvent &) override;
-	void mouseDragged(gcn::MouseEvent &) override;  // finger drag-to-scroll on list content
+	void mouseMoved(gcn::MouseEvent &) override;    // CF5(b): which row the pointer is over
+	void mouseExited(gcn::MouseEvent &) override;
+	void mouseDragged(gcn::MouseEvent &) override;  // tracks travel; the container does the scrolling
 	void mouseReleased(gcn::MouseEvent &) override; // tap selects / drag suppresses select
-	void logic() override;                          // adjustSize() + momentum fling
+	void logic() override;                          // adjustSize()
 
-	void setItemImage(std::shared_ptr<CGraphic> image) { itemImage = image; }
+	// The ROW HEIGHT comes from this image. adjustSize() runs on setList(), i.e. before the art is
+	// known, and then sizes the content from the FONT height instead -- so the content stays ~5x too
+	// short until the first logic() tick corrects it, and the first frames are drawn clipped to the
+	// short content. Re-size here, as soon as the real row art is known.
+	void setItemImage(std::shared_ptr<CGraphic> image) { itemImage = image; adjustSize(); }
+	// CF5(b): the Remastered skin carries the open-list row plate as THREE frames --
+	// dropdown_open_default / _hover / _active -- so the row under the pointer and the row being
+	// pressed are real art, not a tint. Unset leaves the single-plate behaviour untouched.
+	void setHoverItemImage(std::shared_ptr<CGraphic> image) { hoverItemImage = image; }
+	void setActiveItemImage(std::shared_ptr<CGraphic> image) { activeItemImage = image; }
 	// Campaign locking: rows with index >= unlockedCount get the grayed row image + padlock icon.
 	void setLockedIcon(std::shared_ptr<CGraphic> image) { lockedIcon = image; }
 	void setLockedItemImage(std::shared_ptr<CGraphic> image) { lockedItemImage = image; }
+	// Selection: the original marks the picked row by drawing every OTHER row dimmed (measured on
+	// mission-select-tod-human -- selected rgb(103,76,70) vs unselected rgb(52,39,36), same hue and
+	// saturation, brightness ratio 0.51). Our art already matches the selected level, so this is the
+	// dimmed variant of the SAME sprite; when it is not set, rows render exactly as before.
+	void setUnselectedItemImage(std::shared_ptr<CGraphic> image) { unselectedItemImage = image; }
+	// NG91: the enclosing ImageListBoxWidget tiles the row sprite over its whole viewport, which
+	// paints an empty slot for every row the list does NOT have. It needs the real element count to
+	// stop at; gcn::ListBox keeps mListModel protected, so expose it here.
+	int getNumberOfElements() const
+	{
+		return mListModel ? mListModel->getNumberOfElements() : 0;
+	}
 	void setUnlockedCount(int n) { unlockedCount = n; }
+	// NG51: row text is CENTRED by default, which is what the mission/save/load lists do. The
+	// original's dropdown list is LEFT-aligned with the same inset its closed field uses, so a
+	// dropdown sets a pad >= 0 here and gets left-aligned rows.
+	void setTextLeftPad(int pad) { textLeftPad = pad; }
 	void adjustSize();
 	void setSelected(int selected);
+	// Public so the owning ImageListBoxWidget can size its scroll-arrow step from the real row art.
+	int rowHeight() const;
+	// NG94: the row height used to come only from the item sprite's ORIGINAL pixel size, so it did
+	// NOT scale with the display while the list rect around it did -- the rows-per-frame ratio drifted
+	// with the resolution. Setting it explicitly makes row height a LAYOUT quantity (logical px through
+	// the caller's own scale) and the sprite stretches to it, exactly as the row width already does.
+	// 0 keeps the old sprite-derived behaviour.
+	void setRowHeight(int h) { forcedRowHeight = h; adjustSize(); }
 
 private:
-	int rowHeight() const;
 
 	std::shared_ptr<CGraphic> itemImage = nullptr;
 	std::shared_ptr<CGraphic> lockedIcon = nullptr;      /// padlock drawn on rows >= unlockedCount
 	std::shared_ptr<CGraphic> lockedItemImage = nullptr; /// grayed row image for rows >= unlockedCount
-	int unlockedCount = -1;                               /// -1 = no locking (all rows unlocked)
-	// Finger drag-to-scroll state. Inert for mouse users (a click still selects); a press
-	// that moves more than a few pixels scrolls the parent ScrollArea instead of selecting.
+	std::shared_ptr<CGraphic> unselectedItemImage = nullptr; /// dimmed row image for rows != mSelected
+	std::shared_ptr<CGraphic> hoverItemImage = nullptr;      /// CF5(b) row under the pointer
+	std::shared_ptr<CGraphic> activeItemImage = nullptr;     /// CF5(b) row being pressed
+	int mHoverIndex = -1;                                    /// -1 = the pointer is not on a row
+	int unlockedCount = -1;
+	int forcedRowHeight = 0;   // NG94: 0 = derive from the item sprite                               /// -1 = no locking (all rows unlocked)
+	int textLeftPad = -1;   // >= 0 -> left-align row text at this inset (NG51)
+	// Selection half of the drag/tap split. The scrolling itself belongs to the enclosing
+	// TouchScrollArea, which owns the gesture for every scroll container; this only decides
+	// whether the gesture ends as a row selection.
 	bool mDragScrolling = false; /// a left press is in progress on the list content
 	bool mDidDrag = false;       /// the press moved past the threshold -> suppress the tap select
 	int mDragStartY = 0;         /// press Y in scroll-invariant viewport space
-	int mDragLastY = 0;          /// last drag Y in scroll-invariant viewport space
-	float mDragVelY = 0.f;       /// last drag delta; seeds the momentum fling
-	bool mFling = false;         /// momentum fling active (decays each logic() tick)
+	int mDragLastY = 0;          /// previous drag Y, for the plain-ScrollArea parent case
+
+	void setHoverFromY(int y);   /// CF5(b): map a pointer Y to a row index, or -1
 };
 
-class ListBoxWidget : public gcn::ScrollArea
+// Scroll container with finger drag-to-scroll (NG104). gcn::ScrollArea reacts only to its
+// arrows, its bar and its marker, so on a touch device everything below the fold of a
+// too-tall panel is unreachable. Guisan bubbles every mouse event up the whole parent chain,
+// so a container sees the drags that begin on its descendants and can move the content
+// without any child widget being involved.
+class TouchScrollArea : public gcn::ScrollArea
+{
+public:
+	using gcn::ScrollArea::ScrollArea;
+
+	void mousePressed(gcn::MouseEvent &) override;
+	void mouseDragged(gcn::MouseEvent &) override;
+	void mouseReleased(gcn::MouseEvent &) override;
+	void logic() override;
+
+	/// True once the gesture in progress has travelled far enough to count as a scroll.
+	/// Content that acts on release (a list row) uses this to suppress its own activation.
+	bool isContentDragged() const { return mDidDrag; }
+
+	// NG130: the Remastered scrollbar art. gcn::ScrollArea draws a plain grey bar, which is what the
+	// Preferences column showed while every list next to it used the red skin -- ImageListBoxWidget
+	// had these images and a bare ScrollArea had no way to get them. Unset falls back to the base
+	// drawing, so a ScrollArea that binds nothing looks exactly as it did.
+	void setUpButtonImage(std::shared_ptr<CGraphic> image) { upButtonImage = image; }
+	void setDownButtonImage(std::shared_ptr<CGraphic> image) { downButtonImage = image; }
+	void setVBarImage(std::shared_ptr<CGraphic> image) { vBarImage = image; }
+	void setMarkerImage(std::shared_ptr<CGraphic> image) { markerImage = image; }
+
+	void drawUpButton(gcn::Graphics *) override;
+	void drawDownButton(gcn::Graphics *) override;
+	void drawVBar(gcn::Graphics *) override;
+	void drawVMarker(gcn::Graphics *) override;
+
+	static constexpr int DragThreshold = 6; /// px of travel before a press becomes a scroll
+	static constexpr float FlingDecay = 0.88f; /// per-tick momentum decay
+
+private:
+	void cancelPendingClick();
+
+private:
+	bool mDragging = false;   /// a press is being tracked as a possible content drag
+	bool mDidDrag = false;    /// that press has passed DragThreshold
+	bool mClickCancelled = false; /// the pending child click was already withdrawn
+	int mStartX = 0, mStartY = 0; /// press position, container-relative
+	int mLastX = 0, mLastY = 0;   /// previous drag position, container-relative
+	float mVelX = 0.f, mVelY = 0.f; /// last per-event delta; seeds the fling
+	bool mFling = false;      /// momentum fling active (decays each logic() tick)
+
+	std::shared_ptr<CGraphic> upButtonImage = nullptr;   /// NG130 Remastered scrollbar art
+	std::shared_ptr<CGraphic> downButtonImage = nullptr;
+	std::shared_ptr<CGraphic> vBarImage = nullptr;
+	std::shared_ptr<CGraphic> markerImage = nullptr;
+};
+
+class ListBoxWidget : public TouchScrollArea
 {
 public:
 	ListBoxWidget(unsigned int width, unsigned int height);
@@ -425,15 +555,30 @@ public:
 	void setSelected(int i);
 	int getSelected() const;
 	void setBackgroundColor(const gcn::Color &color);
-	void addActionListener(gcn::ActionListener *actionListener);
-	void setItemImage(std::shared_ptr<CGraphic> image)
+	// NG108: the row text colour belongs to the inner list box, not to the scroll area around it.
+	// Setting it on the wrapper looked like it worked and changed nothing on screen.
+	// gcn::Widget::setForegroundColor is NOT virtual, so this cannot be an override and Lua only
+	// reaches it because ui.pkg binds it on THIS class -- tolua then dispatches on the concrete
+	// type instead of on Widget.
+	void setForegroundColor(const gcn::Color &color)
 	{
-		itemImage = image;
-		listbox.setItemImage(image);
+		gcn::Widget::setForegroundColor(color);
+		listbox.setForegroundColor(color);
 	}
+	void addActionListener(gcn::ActionListener *actionListener);
+	// Defined out of line (widgets.cpp): setting the row art also fixes the content height, the
+	// scrollbar policy and the scroll-arrow step, none of which can be known before the art is.
+	void setItemImage(std::shared_ptr<CGraphic> image);
 	void setLockedIcon(std::shared_ptr<CGraphic> image) { listbox.setLockedIcon(image); }
 	void setLockedItemImage(std::shared_ptr<CGraphic> image) { listbox.setLockedItemImage(image); }
+	void setUnselectedItemImage(std::shared_ptr<CGraphic> image) { listbox.setUnselectedItemImage(image); }
+	// NG114: the row's hover plate. The list rows are baked from the same atlas family as the
+	// dropdown rows, so they take the same treatment CF5(b) gave the dropdown.
+	void setHoverItemImage(std::shared_ptr<CGraphic> image) { listbox.setHoverItemImage(image); }
+	void setActiveItemImage(std::shared_ptr<CGraphic> image) { listbox.setActiveItemImage(image); }
 	void setUnlockedCount(int n) { listbox.setUnlockedCount(n); }
+	int getNumberOfElements() const { return listbox.getNumberOfElements(); }   // NG91
+	void setRowHeight(int h);                                                   // NG94
 	void setUpButtonImage(std::shared_ptr<CGraphic> image) { upButtonImage = image; }
 	void setUpPressedButtonImage(std::shared_ptr<CGraphic> image) { upPressedButtonImage = image; }
 	void setDownButtonImage(std::shared_ptr<CGraphic> image) { downButtonImage = image; }
@@ -537,6 +682,10 @@ public:
 		this->itemImage = image;
 		this->mImageListBox->setItemImage(image);
 	}
+	// CF5(b): the open list's hover and pressed plates. Only the list needs them -- the closed field
+	// draws itemImage and has its own closed_hover / closed_active art.
+	void setHoverItemImage(std::shared_ptr<CGraphic> image) { mImageListBox->setHoverItemImage(image); }
+	void setActiveItemImage(std::shared_ptr<CGraphic> image) { mImageListBox->setActiveItemImage(image); }
 	void setDownNormalImage(std::shared_ptr<CGraphic> image) { DownNormalImage = image; }
 	void setDownPressedImage(std::shared_ptr<CGraphic> image) { DownPressedImage = image; }
 

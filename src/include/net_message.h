@@ -246,12 +246,32 @@ public:
 	const CInitMessage_Header &GetHeader() const { return header; }
 	std::vector<unsigned char> Serialize() const;
 	void Deserialize(const unsigned char *p);
-	static size_t Size() { return CInitMessage_Header::Size() + 1 + PlayerMax * CNetworkHost::Size(); }
+	static size_t Size() { return CInitMessage_Header::Size() + 1 + PlayerMax * CNetworkHost::Size() + 1; }
 private:
 	CInitMessage_Header header;
 public:
 	uint8_t clientIndex = 0; /// index of the receiving client in the compacted host array
 	CNetworkHost hosts[PlayerMax]; /// Participant information
+	uint8_t mesh = 0;        /// 1: the server wants the mesh, probe the other clients and report in the ack
+};
+
+/**
+**  The answer of a client to a Config which asks for the mesh (ICMConfig from the client).
+**  A Config without the mesh byte set is answered by the plain header, as ever.
+*/
+class CInitMessage_ConfigAck
+{
+public:
+	CInitMessage_ConfigAck();
+	explicit CInitMessage_ConfigAck(uint16_t peers);
+	const CInitMessage_Header &GetHeader() const { return header; }
+	std::vector<unsigned char> Serialize() const;
+	void Deserialize(const unsigned char *p);
+	static constexpr size_t Size() { return CInitMessage_Header::Size() + 2; }
+private:
+	CInitMessage_Header header;
+public:
+	uint16_t peers = 0; /// bit n: the client in host slot n has answered the probe of the sender
 };
 
 class CInitMessage_EngineMismatch
@@ -342,11 +362,12 @@ public:
 	const CInitMessage_Header &GetHeader() const { return header; }
 	std::vector<unsigned char> Serialize() const;
 	void Deserialize(const unsigned char *p);
-	static constexpr size_t Size() { return CInitMessage_Header::Size() + CServerSetup::Size(); }
+	static constexpr size_t Size() { return CInitMessage_Header::Size() + CServerSetup::Size() + 1; }
 private:
 	CInitMessage_Header header;
 public:
 	CServerSetup State;  /// Server Setup State information
+	uint8_t mesh = 0;    /// final state of the server only: 1 = the game runs as a mesh, 0 = over the server
 };
 
 class CInitMessage_Resync
@@ -408,8 +429,23 @@ enum _message_type_ {
 	MessageExtendedCommand,        /// Command is the next byte
 
 	// ATTN: __MUST__ be last due to spell id encoding!!!
-	MessageCommandSpellCast        /// Unit command spell cast
+	MessageCommandSpellCast,       /// Unit command spell cast
+
+	// Not a command and not in the row above: the first byte of a net_mesh datagram
+	// (net_mesh_wire.h), never a type inside a command packet. The value is fixed at the top
+	// of the 7-bit type space, so that no value above moved; it takes the place of spell id
+	// MessageMesh - MessageCommandSpellCast (94), which a command packet must not use.
+	MessageMesh = 0x7F             /// Mesh lockstep message
 };
+
+/// Highest spell id a command packet can carry: the type is 7 bit and the top value is MessageMesh.
+constexpr int MaxNetworkSpellId = MessageMesh - MessageCommandSpellCast - 1;
+
+/// Spell id fits into the type byte of a command packet
+constexpr bool IsNetworkSpellId(int spellid)
+{
+	return 0 <= spellid && spellid <= MaxNetworkSpellId;
+}
 
 /**
 **  Network extended message types.
@@ -421,7 +457,8 @@ enum _extended_message_type_ {
 	ExtendedMessageFieldOfViewDB,		/// Change field of view type (shadow casting or radial). Used for debug purposes
 	ExtendedMessageMapFieldsOpacityDB,	/// Change opaque flag for forest, rocks or walls. Used for debug purposes
 	ExtendedMessageRevealMapDB,			/// Change map reveal mode. Used for debug purposes
-	ExtendedMessageFogOfWarDB			/// Enable/Disable fog of war. Used for debug purposes
+	ExtendedMessageFogOfWarDB,			/// Enable/Disable fog of war. Used for debug purposes
+	ExtendedMessagePause				/// Pause the game for everybody (mesh game)
 };
 
 /**
@@ -496,16 +533,28 @@ public:
 /**
 **  Network quit message.
 */
+/**
+**  Why a player is out of a network game (CNetworkCommandQuit::reason). The value is part of
+**  the quit and so the same on every device at the cycle of the quit.
+*/
+enum ENetQuitReason {
+	NetQuitLeft,         /// He left by choice (also: every quit of a game without the mesh model)
+	NetQuitLost,         /// The connection to him was lost, the devices removed him
+	NetQuitNeverStarted, /// Removed before his first cycle: he never finished loading, or was lost before his first packet
+	NetQuitReasonCount
+};
+
 class CNetworkCommandQuit
 {
 public:
 	CNetworkCommandQuit() = default;
 	size_t Serialize(unsigned char *buf) const;
 	size_t Deserialize(const unsigned char *buf);
-	static size_t Size() { return 2; };
+	static size_t Size() { return 3; };
 
 public:
 	uint16_t player = 0;
+	uint8_t reason = NetQuitLeft; /// ENetQuitReason
 };
 
 /**

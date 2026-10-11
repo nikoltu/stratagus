@@ -631,6 +631,30 @@ static int CclDefinePopup(lua_State *l)
 			popup->Ident = LuaToString(l, -1);
 		} else if (key == "DefaultFont") {
 			popup->DefaultFont = CFont::Get(LuaToString(l, -1));
+		} else if (key == "BackgroundImage") {
+			// IG-T1: the Remastered draws its tooltip as a nine-sliced sprite, not a flat rect.
+			// TOOLTIP-FRAME-FAINT: named here, loaded by CUserInterface::Load like every other HUD
+			// picture. The scripts run before the renderer exists (stratagus.cpp: LoadCcl, then
+			// InitVideo); a picture loaded here got no GPU texture, was blitted into the CPU overlay
+			// and its translucent line lost its colour to a second alpha multiply (device capture
+			// c665_c: line adds 18,18,17 instead of the sprite's 67,66,60).
+			popup->BackgroundImage = CGraphic::New(std::string{LuaToString(l, -1)});
+		} else if (key == "BackgroundBorder") {
+			popup->BackgroundBorder = LuaToNumber(l, -1);
+		} else if (key == "FixedX") {
+			popup->FixedX = LuaToNumber(l, -1);
+		} else if (key == "FixedY") {
+			popup->FixedY = LuaToNumber(l, -1);
+		} else if (key == "FixedHeight") {
+			popup->FixedHeight = LuaToNumber(l, -1);
+		} else if (key == "Layout") {
+			// HUD-020: "remastered" = the original's fixed tooltip layout, "flow" = the content list.
+			const std::string_view value = LuaToString(l, -1);
+			if (value == "remastered") {
+				popup->RemasteredLayout = true;
+			} else if (value != "flow") {
+				LuaError(l, "Unsupported popup Layout: %s", value.data());
+			}
 		} else if (key == "BackgroundColor") {
 			popup->BackgroundColor = LuaToUnsignedNumber(l, -1);
 		} else if (key == "BorderColor") {
@@ -860,6 +884,37 @@ static void ParseButtonStyleProperties(lua_State *l, ButtonStyleProperties *p)
 **
 **  @param l  Lua state.
 */
+/**
+**  Set the caption of one of the HUD's user buttons: SetUserButtonText(index, text), index from 0.
+**
+**  `UI.UserButtons[i]` hands Lua a COPY of the element, so writing `.Button.Text` on it changes
+**  nothing on screen (seen: the write "succeeds" and the old caption stays). The header's second
+**  button has to read "Pause" or "Resume" by the game's state.
+*/
+static int CclSetUserButtonText(lua_State *l)
+{
+	LuaCheckArgs(l, 2);
+	const int index = LuaToNumber(l, 1);
+	if (index >= 0 && static_cast<size_t>(index) < UI.UserButtons.size()) {
+		UI.UserButtons[index].Button.Text = LuaToString(l, 2);
+	}
+	return 0;
+}
+
+/**
+**  Draw the caption of one of the HUD's user buttons dim or plain: SetUserButtonDim(index, dim),
+**  index from 0. The original greys the second header button's caption while a window is up.
+*/
+static int CclSetUserButtonDim(lua_State *l)
+{
+	LuaCheckArgs(l, 2);
+	const int index = LuaToNumber(l, 1);
+	if (index >= 0 && static_cast<size_t>(index) < UI.UserButtons.size()) {
+		UI.UserButtons[index].Dim = LuaToBoolean(l, 2);
+	}
+	return 0;
+}
+
 static int CclDefineButtonStyle(lua_State *l)
 {
 	LuaCheckArgs(l, 2);
@@ -870,9 +925,14 @@ static int CclDefineButtonStyle(lua_State *l)
 	auto &b = ButtonStyleHash[style];
 	if (!b) {
 		b = std::make_unique<ButtonStyle>();
-		// Set to bogus value to see if it was set later
-		b->Default.TextPos.x = b->Hover.TextPos.x = b->Clicked.TextPos.x = 0xFFFFFF;
 	}
+	// Set to bogus value to see if it was set later. On EVERY definition, not only the first: a
+	// style defined again (the race's UI script is loaded more than once, and its sizes follow the
+	// screen) kept the text position and alignment of its FIRST definition for every state that
+	// does not name its own -- the HUD's "Menu" / "Pause" captions stood at the buttons' left
+	// edge, where an earlier, differently scaled definition had put them.
+	b->Default.TextPos.x = b->Hover.TextPos.x = b->Clicked.TextPos.x = 0xFFFFFF;
+	b->Default.TextAlign = b->Hover.TextAlign = b->Clicked.TextAlign = ETextAlignment::Undefined;
 
 	lua_pushnil(l);
 	while (lua_next(l, 2)) {
@@ -1296,6 +1356,8 @@ static int CclSetFontCodePage(lua_State *l)
 
 extern CFont *ResourcesFont; /// mainscr.cpp: optional larger font for the resource line
 extern CFont *ObjectivesFont; /// mainscr.cpp: optional HD font for the in-game objectives text
+extern bool HideObjectivesHud; /// mainscr.cpp: PREF-4 objectives HUD block suppressed
+extern bool PortraitIconScaled; /// icons.cpp: IG-T8 portrait icon drawn at the Scaled size
 
 /**
 **  Set the font used for the resource line (gold/lumber/oil/supply/score).
@@ -1320,6 +1382,40 @@ static int CclSetObjectivesFont(lua_State *l)
 }
 
 /**
+**  PREF-4: hide (or show) the objectives block drawn over the map. The original's Preferences
+**  calls this "Hide Objectives HUD Display"; it does not touch the objectives menu.
+*/
+static int CclSetHideObjectivesHud(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	HideObjectivesHud = LuaToBoolean(l, 1);
+	return 0;
+}
+
+/**
+**  IG-T8: pick the portrait icon style. true = "Scaled" (the whole icon drawn smaller),
+**  false = "Cropped" (the original's default, and ours).
+*/
+static int CclSetPortraitIconScaled(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	PortraitIconScaled = LuaToBoolean(l, 1);
+	return 0;
+}
+
+/**
+**  NG64: the portrait scale factor in force, so the Lua panel definition can size the health bar
+**  under the portrait from the SAME constant the icon is drawn with instead of restating it.
+*/
+extern double GetPortraitIconScaleFactor();
+static int CclGetPortraitIconScale(lua_State *l)
+{
+	LuaCheckArgs(l, 0);
+	lua_pushnumber(l, GetPortraitIconScaleFactor());
+	return 1;
+}
+
+/**
 **  Register CCL features for UI.
 */
 void UserInterfaceCclRegister()
@@ -1328,6 +1424,9 @@ void UserInterfaceCclRegister()
 	lua_register(Lua, "AddMessage", CclAddMessage);
 	lua_register(Lua, "SetResourcesFont", CclSetResourcesFont);
 	lua_register(Lua, "SetObjectivesFont", CclSetObjectivesFont);
+	lua_register(Lua, "SetHideObjectivesHud", CclSetHideObjectivesHud);
+	lua_register(Lua, "SetPortraitIconScaled", CclSetPortraitIconScaled);
+	lua_register(Lua, "GetPortraitIconScale", CclGetPortraitIconScale);
 
 	lua_register(Lua, "SetKeyScrollSpeed", CclSetKeyScrollSpeed);
 	lua_register(Lua, "GetKeyScrollSpeed", CclGetKeyScrollSpeed);
@@ -1369,6 +1468,8 @@ void UserInterfaceCclRegister()
 	lua_register(Lua, "CopyButtonsForUnitType", CclCopyButtonsForUnitType);
 
 	lua_register(Lua, "DefineButtonStyle", CclDefineButtonStyle);
+	lua_register(Lua, "SetUserButtonText", CclSetUserButtonText);
+	lua_register(Lua, "SetUserButtonDim", CclSetUserButtonDim);
 
 	//
 	// Look and feel of units

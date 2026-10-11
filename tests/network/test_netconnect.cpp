@@ -31,6 +31,10 @@
 
 #include "stratagus.h"
 #include "netconnect.h"
+#include "net_mesh.h"
+#include "network.h"
+
+#include <string>
 
 namespace {
 
@@ -116,6 +120,7 @@ void FillCustomValue(CInitMessage_Config *obj)
 	for (int i = 0; i != PlayerMax; ++i) {
 		FillCustomValue(&obj->hosts[i]);
 	}
+	obj->mesh = 1;
 }
 
 void FillCustomValue(CInitMessage_EngineMismatch *obj)
@@ -424,6 +429,32 @@ TEST_CASE("CInitMessage_Config")
 	CHECK(CheckSerialization_return<CInitMessage_Config>());
 }
 
+TEST_CASE("CInitMessage_Config carries the mesh byte after the hosts")
+{
+	const size_t sizeWithoutMesh = CInitMessage_Header::Size() + 1 + PlayerMax * CNetworkHost::Size();
+	CHECK(CInitMessage_Config::Size() == sizeWithoutMesh + 1);
+
+	CInitMessage_Config message;
+	CHECK(message.mesh == 0);
+	FillCustomValue(&message);
+	std::vector<unsigned char> buffer = message.Serialize();
+	CHECK(buffer.size() == CInitMessage_Config::Size());
+	CHECK(buffer[sizeWithoutMesh] == 1);
+
+	CInitMessage_Config read;
+	read.Deserialize(buffer.data());
+	CHECK(read.mesh == 1);
+	CHECK(read.clientIndex == 3);
+	CHECK(read.hosts[PlayerMax - 1].Port == message.hosts[PlayerMax - 1].Port);
+
+	// off is the default and stays off on the wire
+	message.mesh = 0;
+	buffer = message.Serialize();
+	CHECK(buffer[sizeWithoutMesh] == 0);
+	read.Deserialize(buffer.data());
+	CHECK(read.mesh == 0);
+}
+
 TEST_CASE("CInitMessage_EngineMismatch")
 {
 	CHECK(CheckSerialization_return<CInitMessage_EngineMismatch>());
@@ -465,4 +496,138 @@ TEST_CASE("CInitMessage_State")
 TEST_CASE("CInitMessage_Resync")
 {
 	CHECK(CheckSerialization_return<CInitMessage_Resync>());
+}
+
+// The wait as the scripts are told it (Lua NetWaitState).
+
+namespace {
+
+std::string WaitTestName(int player)
+{
+	return "P" + std::to_string(player);
+}
+
+} // namespace
+
+TEST_CASE("Wait view: nobody is awaited")
+{
+	const CNetWaitView view = NetworkBuildWaitView(CNetworkWaitState(), WaitTestName);
+
+	CHECK(view.Phase == "none");
+	CHECK(view.Held == false);
+	CHECK(view.SelfOut == false);
+	CHECK(view.Player == -1);
+	CHECK(view.Players.empty());
+	CHECK(view.RemovedAtStart.empty());
+	CHECK(view.Fake == false);
+}
+
+TEST_CASE("Wait view: held, loaders by state")
+{
+	CNetworkWaitState state;
+	state.Held = true;
+	state.Loaded = true;
+	state.NotLoaded = (1u << 1) | (1u << 4);
+	state.NoSignal = 1u << 4;
+	state.RemovedAtStart = 1u << 2;
+	state.MsLeftOf[1] = 52000;
+	state.MsLeftOf[4] = 6500;
+
+	const CNetWaitView view = NetworkBuildWaitView(state, WaitTestName);
+
+	CHECK(view.Phase == "start");
+	CHECK(view.Held == true);
+	CHECK(view.SelfLoaded == true);
+	REQUIRE(view.Players.size() == 2);
+	CHECK(view.Players[0].Player == 1);
+	CHECK(view.Players[0].Name == "P1");
+	CHECK(view.Players[0].State == "loading");
+	CHECK(view.Players[0].MsLeft == 52000);
+	CHECK(view.Players[1].Player == 4);
+	CHECK(view.Players[1].State == "silent");
+	CHECK(view.Players[1].MsLeft == 6500);
+	REQUIRE(view.RemovedAtStart.size() == 1);
+	CHECK(view.RemovedAtStart[0] == 2);
+	// Nobody is "the awaited player" before the game has begun.
+	CHECK(view.Player == -1);
+}
+
+TEST_CASE("Wait view: a player is awaited in the game")
+{
+	CNetworkWaitState state;
+	state.Player = 3;
+	state.MsLeft = 45000;
+	state.AllowanceMsLeft = 100000;
+
+	CNetWaitView view = NetworkBuildWaitView(state, WaitTestName);
+
+	CHECK(view.Phase == "game");
+	CHECK(view.Player == 3);
+	CHECK(view.Name == "P3");
+	CHECK(view.MsLeft == 45000);
+	CHECK(view.AllowanceMsLeft == 100000);
+	CHECK(view.Removing == false);
+	REQUIRE(view.Players.size() == 1);
+	CHECK(view.Players[0].State == "silent");
+
+	state.Removing = true;
+	view = NetworkBuildWaitView(state, WaitTestName);
+	CHECK(view.Removing == true);
+	CHECK(view.Players[0].State == "removing");
+}
+
+TEST_CASE("Wait view: this device is out")
+{
+	CNetworkWaitState state;
+	state.SelfOut = true;
+	state.SelfOutReason = static_cast<int>(mesh::Reason::Isolated);
+
+	CNetWaitView view = NetworkBuildWaitView(state, WaitTestName);
+	CHECK(view.Phase == "game");
+	CHECK(view.SelfOut == true);
+	CHECK(view.SelfOutReason == "isolated");
+	CHECK(view.Player == -1);
+
+	state.SelfOutReason = static_cast<int>(mesh::Reason::Desync);
+	CHECK(NetworkBuildWaitView(state, WaitTestName).SelfOutReason == "desync");
+	state.SelfOutReason = static_cast<int>(mesh::Reason::ConnectionLost);
+	CHECK(NetworkBuildWaitView(state, WaitTestName).SelfOutReason == "connection_lost");
+
+	// Out while the game was still held: no cycle has run on this device.
+	state.Held = true;
+	view = NetworkBuildWaitView(state, WaitTestName);
+	CHECK(view.Phase == "start");
+	CHECK(view.SelfOut == true);
+}
+
+TEST_CASE("Wait view: the made-up state replaces the network's and is taken away again")
+{
+	CHECK(NetworkWaitViewFaked() == false);
+	CHECK(NetworkGetWaitView().Phase == "none");
+
+	CNetWaitView fake;
+	fake.Phase = "game";
+	fake.Name = "Thrall";
+	fake.MsLeft = 45000;
+	fake.AllowanceMsLeft = 100000;
+	NetworkSetFakeWaitView(&fake);
+
+	CHECK(NetworkWaitViewFaked() == true);
+	const CNetWaitView view = NetworkGetWaitView();
+	CHECK(view.Fake == true);
+	CHECK(view.Name == "Thrall");
+	CHECK(view.MsLeft <= 45000);
+	CHECK(view.MsLeft > 40000);
+	CHECK(view.AllowanceMsLeft == 100000);
+
+	NetworkSetFakeWaitView(nullptr);
+	CHECK(NetworkWaitViewFaked() == false);
+	CHECK(NetworkGetWaitView().Phase == "none");
+	CHECK(NetworkGetWaitView().Fake == false);
+}
+
+TEST_CASE("Quit reason: none for a player who has not quit, none outside the player range")
+{
+	CHECK(NetworkGetQuitReason(-1) == -1);
+	CHECK(NetworkGetQuitReason(PlayerMax) == -1);
 }

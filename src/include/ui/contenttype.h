@@ -184,6 +184,10 @@ private:
 	int Width = 0;         /// Width of the bar.
 	int Height = 0;        /// Height of the bar.
 	std::optional<IntColor> borderColor = 1; /// additional border color.
+	bool hasSeat = false;  /// M666-9: black seat given as four margins instead of the border guess
+	int seat[4] = {0, 0, 0, 0}; /// seat margins around the bar: left, top, right, bottom (px)
+	bool hasTrack = false; /// M666-9: colour of the bar's unfilled part
+	CColor track;          /// that colour
 	std::vector<unsigned int> colors; /// array of color to show (depend of value)
 	std::vector<unsigned int> values; /// list of percentage to change color.
 };
@@ -205,6 +209,12 @@ private:
 	int height = 0;      /// Height of the bar.
 	bool hasBorder = false; /// True for additional border.
 	int colorIndex = -1;  /// Index of Color to show.
+	// CASTER-PANEL: the original's "Magic:" bar - a light frame, a grey track, a flat fill
+	// (work/agent-orig-6/ORIG6.md). frame > 0 switches this look on: Pos / Width / Height are then
+	// the frame's outer box.
+	int frame = 0;                        /// frame thickness in pixels, 0 = the old looks
+	int fillRGB[3] = {52, 112, 164};      /// fill colour
+	int trackRGB[3] = {52, 52, 52};       /// colour of the empty part
 };
 
 //@}

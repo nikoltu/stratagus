@@ -204,6 +204,12 @@ extern CCursor *CursorByIdent(std::string_view ident);
 extern void DrawCursor();
 /// Draw the building-placement preview for a viewport into the current TheScreen
 extern void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos);
+/// Tile the building-placement preview stands on in a viewport; false: no preview there
+extern bool GetBuildingPreviewTile(const CViewport &vp, Vec2i &tilePos);
+/// TOUCH-R7: put the preview on a tile of a viewport (touch placement)
+extern void SetBuildingPreviewTile(const CViewport &vp, const Vec2i &tilePos);
+/// TOUCH-R7: the preview has no tile (a building type was just chosen, or placement ended)
+extern void ResetBuildingPreview();
 /// Hide the cursor
 extern void HideCursor();
 /// Animate the cursor

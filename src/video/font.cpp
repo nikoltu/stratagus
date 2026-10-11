@@ -38,9 +38,12 @@
 #include "font.h"
 
 #include "intern_video.h"
+#include "iolib.h"
 #include "video.h"
 
 #include <guisan/sdl/sdlinput.hpp>
+#include <algorithm>
+#include <cmath>
 #include <map>
 #include <vector>
 
@@ -56,6 +59,36 @@ static FontColorMap FontColors;  /// Map of ident to font color.
 
 // GPU-pipeline (fonts). See video.h. Default off => every glyph stays on the CPU blit path.
 bool GpuFontToBackbuffer = false;
+
+static Uint8 GlyphShade = 255;  /// see SetGlyphShade (video.h)
+
+void SetGlyphShade(unsigned char shade)
+{
+	GlyphShade = shade;
+}
+
+/// HUD-TEXT-SHADOW: true while CLabel draws the shadow pass of a text (CFont::SetHudShadow).
+static bool GlyphShadowPass = false;
+
+/// HUD-FOOD-RED: the colour of the glyphs drawn from now on; white = as baked (SetGlyphTint).
+static SDL_Color GlyphTint = {255, 255, 255, 255};
+
+void SetGlyphTint(unsigned char r, unsigned char g, unsigned char b)
+{
+	GlyphTint = {r, g, b, 255};
+}
+
+/// The colour the glyphs of the baked HD faces are multiplied by: black in the shadow pass,
+/// else the tint times the shade (the shade on the GPU path only, as before).
+static SDL_Color GlyphColorMod(bool gpu)
+{
+	if (GlyphShadowPass) {
+		return {0, 0, 0, 255};
+	}
+	const int shade = gpu ? GlyphShade : 255;
+	return {Uint8(GlyphTint.r * shade / 255), Uint8(GlyphTint.g * shade / 255),
+	        Uint8(GlyphTint.b * shade / 255), 255};
+}
 
 static const CFontColor *LastTextColor;      /// Last text color
 static CFontColor *DefaultTextColor;         /// Default text color
@@ -216,11 +249,98 @@ void CFont::drawString(
 **  @param x   X screen position
 **  @param y   Y screen position
 */
+// NG85: a sheet baked with a coverage ramp carries per-index alpha (its tRNS), which the classic
+// colorkey blit would COPY over whatever the menu already composited into TheScreen -- punching
+// semi-transparent holes at every glyph edge instead of blending. SDL's only 8-bit blend blit
+// (Blit1toNAlpha) ignores palette alpha entirely, so the fix is to blend from an RGBA copy:
+// SDL_ConvertSurfaceFormat carries the palette alpha (Map1toN, SDL_pixels.c), and an RGBA->RGBA
+// blend honours it per pixel. Cached once per sheet; classic binary sheets never take this path.
+static std::map<std::pair<const CGraphic *, const CFontColor *>, SDL_Surface *> GlyphAlphaSurfaces;
+
+/// True only for a PALETTED sheet whose palette carries partial alpha, i.e. one baked with a coverage
+/// ramp. A sheet that is already RGBA is left alone on purpose: CFont::drawString converts a font to
+/// RGBA the first time a deliberately-coloured label is drawn and then colour-mods it, and that path
+/// already blends per-pixel alpha correctly. Intercepting it was what turned the dark parchment labels
+/// white in cycle 184.
+static bool PalettedSheetHasPartialAlpha(SDL_Surface *surf)
+{
+	if (!surf || !surf->format->palette) {
+		return false;
+	}
+	const SDL_Palette &pal = *surf->format->palette;
+	for (int i = 0; i < pal.ncolors; ++i) {
+		const Uint8 a = pal.colors[i].a;
+		if (a != 0 && a != 255) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// One ARGB copy per (sheet, font colour) -- the CPU mirror of GetGlyphColorTexture. The font colour's
+/// nine entries are applied BEFORE the conversion, exactly as the classic blit does, so the glyph keeps
+/// its colour; SDL_ConvertSurfaceFormat then carries the coverage ramp's per-index alpha (Map1toN),
+/// and an RGBA->RGBA blend puts anti-aliased edges over the menu art instead of punching through it.
+static SDL_Surface *GetGlyphAlphaSurface(const CGraphic &g, const CFontColor &fc)
+{
+	SDL_Surface *surf = g.getSurface();
+	if (!PalettedSheetHasPartialAlpha(surf)) {
+		return nullptr;
+	}
+	const auto key = std::make_pair((const CGraphic *) &g, &fc);
+	auto it = GlyphAlphaSurfaces.find(key);
+	if (it != GlyphAlphaSurfaces.end()) {
+		return it->second;
+	}
+	SDL_SetPaletteColors(surf->format->palette, fc.Colors.data(), 0, (int) fc.Colors.size());
+	SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ARGB8888, 0);
+	if (rgba) {
+		SDL_SetSurfaceBlendMode(rgba, SDL_BLENDMODE_BLEND);
+	}
+	GlyphAlphaSurfaces[key] = rgba;   // cache null too, so a non-convertible sheet is not retried
+	return rgba;
+}
+
 static void VideoDrawChar(const CGraphic &g,
 						  int gx, int gy, int w, int h, int x, int y, const CFontColor &fc)
 {
 	SDL_Rect srect = {Sint16(gx), Sint16(gy), Uint16(w), Uint16(h)};
 	SDL_Rect drect = {Sint16(x), Sint16(y), 0, 0};
+	if (SDL_Surface *rgba = GetGlyphAlphaSurface(g, fc)) {
+		MarkOverlayDirty(TheScreen);
+		// The copy is shared by every draw in this colour: set the colour for this glyph only.
+		const SDL_Color mod = GlyphColorMod(false);
+		const bool modded = mod.r != 255 || mod.g != 255 || mod.b != 255;
+		if (modded) {
+			SDL_SetSurfaceColorMod(rgba, mod.r, mod.g, mod.b);
+		}
+		SDL_BlitSurface(rgba, &srect, TheScreen, &drect);
+		if (modded) {
+			SDL_SetSurfaceColorMod(rgba, 255, 255, 255);
+		}
+		return;
+	}
+	if (SDL_Surface *surf = g.getSurface(); surf && !surf->format->palette) {
+		// HUD-FACE-RGBA: a sheet that came out of the PNG reader as RGBA (see GetGlyphColorTexture)
+		// is drawn as it is; the glyph colour multiplies whatever colour the caller has put on the
+		// surface (CFont::drawString sets a widget's colour there), and that colour is put back.
+		MarkOverlayDirty(TheScreen);
+		const SDL_Color mod = GlyphColorMod(false);
+		if (mod.r != 255 || mod.g != 255 || mod.b != 255) {
+			Uint8 r = 255, gr = 255, b = 255;
+			SDL_GetSurfaceColorMod(surf, &r, &gr, &b);
+			SDL_SetSurfaceColorMod(surf, Uint8(r * mod.r / 255), Uint8(gr * mod.g / 255),
+			                       Uint8(b * mod.b / 255));
+			SDL_BlitSurface(surf, &srect, TheScreen, &drect);
+			SDL_SetSurfaceColorMod(surf, r, gr, b);
+		} else {
+			SDL_BlitSurface(surf, &srect, TheScreen, &drect);
+		}
+		return;
+	}
+	if (GlyphShadowPass) {
+		return;   // a classic sheet has no coverage to draw a shadow from
+	}
 	SDL_SetPaletteColors(g.getSurface()->format->palette, fc.Colors.data(), 0, fc.Colors.size());
 	MarkOverlayDirty(TheScreen);
 	SDL_BlitSurface(g.getSurface(), &srect, TheScreen, &drect);
@@ -239,8 +359,34 @@ static SDL_Texture *GetGlyphColorTexture(CGraphic &g, const CFontColor &fc)
 		return nullptr;
 	}
 	SDL_Surface *surf = g.getSurface();
-	if (!surf || !surf->format->palette) {
+	if (!surf) {
 		return nullptr;
+	}
+	if (!surf->format->palette) {
+		// HUD-FACE-RGBA: the faces made on the device (FontBaker: an indexed PNG whose tRNS holds a
+		// coverage ramp) do not arrive here indexed. The PNG reader turns a palette with partly
+		// transparent entries into RGBA (third-party/SDL_image/IMG_png.c, "more than one
+		// transparent index, or translucency" -> png_set_expand; measured with the tree's own
+		// SDL_image on a sheet of the baker's form: BytesPerPixel 4, no palette --
+		// work/agent-fix-three/logs/d2_sheet_load.txt). Such a sheet had no texture, so in the HUD
+		// pass its glyphs fell to the CPU blit, which knows no glyph colour: no red food figure,
+		// no yellow message line, no dim caption, no text shadow (work/c671_e.png, c671_g.png: the
+		// "3" of "3/1" is (255, 255, 255) and no pixel 3 px down-right of the ink is black).
+		// The sheet is one picture for every font colour: one texture, under a null colour.
+		const auto rgbaKey = std::make_pair((const CGraphic *) &g, (const CFontColor *) nullptr);
+		auto found = GlyphTextures.find(rgbaKey);
+		if (found != GlyphTextures.end()) {
+			return found->second;
+		}
+		SDL_Texture *sheet = SDL_CreateTextureFromSurface(TheRenderer, surf);
+		if (sheet) {
+			SDL_SetTextureScaleMode(sheet, SDL_ScaleModeNearest);
+			SDL_SetTextureBlendMode(sheet, SDL_BLENDMODE_BLEND);
+		}
+		LogPrint("FONTS rgba sheet %s %dx%d: glyph texture %s\n", g.File.string().c_str(),
+		         surf->w, surf->h, sheet ? "made" : "FAILED");
+		GlyphTextures[rgbaKey] = sheet; // null is kept too: no second try for every glyph
+		return sheet;
 	}
 	const auto key = std::make_pair((const CGraphic *) &g, &fc);
 	auto it = GlyphTextures.find(key);
@@ -490,6 +636,37 @@ static int CodepageIndexFromUTF8(std::string_view text, size_t &pos, size_t &sub
 	return CodepageIndexFromUTF8(text.data(), text.size(), pos, subpos);
 }
 
+/// HUD-GUTTER: the width of the text code "~_": one unit of the classic 640x480 HUD, which is
+/// k px at the HUD step k (CVideo::ComputeHudCanvas). For a gap the face's own space cannot
+/// give -- see the info-panel rows in scripts/ui.lua.
+static int HudUnitPx()
+{
+	return std::max(1, Video.HudCanvas.Step);
+}
+
+int CFont::LineHeight() const
+{
+	// NG101: the declared line advance, scaled exactly like the sheet. Falls back to the cell height
+	// when no advance is declared, so fonts that never call SetLineHeight behave as before.
+	if (LineHeightAuthored > 0) {
+		const int h = (int) (LineHeightAuthored * AuthoredScale() + 0.5);
+		if (h > 0) {
+			return h;
+		}
+	}
+	return Height();
+}
+
+int CFont::ShadowOffset() const
+{
+	// HUD-TEXT-SHADOW: units of the classic HUD times the HUD step (CVideo::ComputeHudCanvas):
+	// (1, 1) -> 3 px at a 2960x1848 client. One pixel per unit where there is no step yet.
+	if (ShadowUnits <= 0) {
+		return 0;
+	}
+	return ShadowUnits * std::max(1, Video.HudCanvas.Step);
+}
+
 int CFont::Height() const
 {
 	DynamicLoad();
@@ -519,7 +696,7 @@ int CFont::Width(const int number) const
 		if (c - 32 <= this->CharWidth.size()) {
 			c = 32;
 		}
-		width += this->CharWidth[c - 32] + 1;
+		width += this->CharWidth[c - 32] + this->LetterSpacing;
 	}
 	return width;
 }
@@ -558,6 +735,11 @@ int CFont::Width(std::string_view text) const
 				++pos;
 				continue;
 			}
+			if (text[pos] == '_') { // HUD-GUTTER: one HUD unit of empty space
+				++pos;
+				width += HudUnitPx();
+				continue;
+			}
 			if (text[pos] != '~') { // ~~ -> ~
 				isformat = !isformat;
 				continue;
@@ -568,7 +750,7 @@ int CFont::Width(std::string_view text) const
 			if (this->CharWidth.size() <= utf8 - 32) {
 				utf8 = 32;
 			}
-			width += this->CharWidth[utf8 - 32] + 1;
+			width += this->CharWidth[utf8 - 32] + this->LetterSpacing;
 		}
 	}
 	return width;
@@ -642,6 +824,9 @@ unsigned int CFont::DrawChar(CGraphic &g, int utf8, int x, int y, const CFontCol
 	if (GpuFontToBackbuffer && TheRenderer) {
 		SDL_Texture *tex = GetGlyphColorTexture(*this->G, fc);
 		if (tex) {
+			// The texture is shared by every draw in this colour: set the shade for each glyph.
+			const SDL_Color mod = GlyphColorMod(true);
+			SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
 			SDL_Rect src = {gx, gy, w, this->G->Height};
 			SDL_Rect dst = {x, y, w, this->G->Height};
 			if (CLIP) {
@@ -653,7 +838,7 @@ unsigned int CFont::DrawChar(CGraphic &g, int utf8, int x, int y, const CFontCol
 			} else {
 				SDL_RenderCopy(TheRenderer, tex, &src, &dst);
 			}
-			return w + 1;
+			return w + this->LetterSpacing;
 		}
 		// No GPU texture (non-paletted font): fall through to the CPU blit.
 	}
@@ -663,7 +848,7 @@ unsigned int CFont::DrawChar(CGraphic &g, int utf8, int x, int y, const CFontCol
 	} else {
 		VideoDrawChar(g, gx, gy, w, this->G->Height, x, y, fc);
 	}
-	return w + 1;
+	return w + this->LetterSpacing;
 }
 
 std::shared_ptr<CGraphic> CFont::GetGraphic() const
@@ -677,6 +862,7 @@ std::shared_ptr<CGraphic> CFont::GetGraphic() const
 **  ~    is special prefix.
 **  ~~   is the ~ character self.
 **  ~!   print next character reverse.
+**  ~_   one unit of the classic HUD (k px) of empty space.
 **  ~<   start reverse.
 **  ~>   switch back to last used color.
 **
@@ -700,6 +886,17 @@ int CLabel::DoDrawText(int x, int y, std::string_view text, const CFontColor *fc
 	font->DynamicLoad();
 	auto g = font->GetGraphic();
 
+	// HUD-TEXT-SHADOW: the whole text once in black at the face's shadow offset, then the text
+	// itself over it (two passes, so no glyph's shadow covers its neighbour). The colour codes of
+	// the text are walked twice: the remembered colour is put back between the passes.
+	if (const int shadow = font->ShadowOffset(); shadow > 0 && !GlyphShadowPass) {
+		const CFontColor *const remembered = LastTextColor;
+		GlyphShadowPass = true;
+		DoDrawText<CLIP>(x + shadow, y + shadow, text, fc);
+		GlyphShadowPass = false;
+		LastTextColor = remembered;
+	}
+
 	while (int utf8 = CodepageIndexFromUTF8(text.data(), text.size(), pos, subpos)) {
 		bool tab = false;
 		if (utf8 == '\t') {
@@ -714,6 +911,10 @@ int CLabel::DoDrawText(int x, int y, std::string_view text, const CFontColor *fc
 					break;
 				case '|':
 					++pos;
+					continue;
+				case '_':  // HUD-GUTTER: one HUD unit of empty space
+					++pos;
+					widths += HudUnitPx();
 					continue;
 				case '!':
 					fc = reverse;
@@ -967,6 +1168,60 @@ void CFont::MeasureWidths()
 	SDL_UnlockSurface(G->getSurface());
 }
 
+/// NG84: the factor an HD sheet is scaled by. It must be the SAME factor the layout around the text
+/// uses, which is ComputeUniformScale's aspect-preserving min(W/aw, H/ah); scaling by height alone
+/// leaves the text oversized for its box whenever the fit is width-limited.
+double CFont::AuthoredScale() const
+{
+	if (this->AuthoredHeight <= 0 || Video.Height <= 0) {
+		return 1.0;
+	}
+	// WORLD-ZOOM-RULE: a HUD face follows the HUD's step scale (see SetAuthoredHud). The canvas is
+	// read, never recomputed; without one (W == 0: no in-game canvas on this platform) the face
+	// falls back to the height rule below.
+	if (this->AuthoredHud && Video.HudCanvas.W > 0) {
+		return Video.HudCanvas.Scale * 2160.0 / (double) this->AuthoredHeight;
+	}
+	const double byH = (double) Video.Height / (double) this->AuthoredHeight;
+	if (this->AuthoredWidth <= 0 || Video.Width <= 0) {
+		return byH;
+	}
+	const double byW = (double) Video.Width / (double) this->AuthoredWidth;
+	return std::min(byW, byH);
+}
+
+void CFont::LoadAdvanceTable()
+{
+	if (!this->G || this->CharWidth.empty()) {
+		return;
+	}
+	fs::path rel = this->G->File;
+	rel.replace_extension(".adv");
+	const fs::path resolved = LibraryFileName(rel.string());
+	FILE *f = fopen(resolved.string().c_str(), "r");
+	if (!f) {
+		return;   // no table -> keep the ink-extent widths, unchanged behaviour
+	}
+	std::vector<int> adv;
+	int v;
+	while (fscanf(f, "%d", &v) == 1) {
+		adv.push_back(v);
+	}
+	fclose(f);
+	if (adv.size() < this->CharWidth.size()) {
+		ErrorPrint("Font advance table '%s' has %zu entries, need %zu; ignoring it\n",
+		           resolved.string().c_str(), adv.size(), this->CharWidth.size());
+		return;
+	}
+	const double s = this->AuthoredScale();
+	for (size_t i = 0; i < this->CharWidth.size(); ++i) {
+		this->CharWidth[i] = (char) std::max(1L, std::lround(adv[i] * s));
+	}
+	// A true advance already includes the right side bearing, so the classic extra pixel would
+	// double-count the gap.
+	this->LetterSpacing = 0;
+}
+
 void CFont::Load()
 {
 	if (this->IsLoaded()) {
@@ -975,7 +1230,40 @@ void CFont::Load()
 
 	if (this->G) {
 		this->G->Load();
+		// NG84: an HD font sheet is baked at one pixel size while every layout around it scales with
+		// Video.Height, so its size relative to the HUD is wrong at every resolution but one. Scale
+		// the sheet here -- fonts load lazily, after InitVideo, so Video.Height is known even though
+		// fonts.lua itself runs before video is up. This MUST precede MeasureWidths(): the glyph
+		// width table is measured off the surface pixels, so measuring first would describe a sheet
+		// that is no longer the one being drawn.
+		if (this->AuthoredHeight > 0 && Video.Height > 0 && this->AuthoredScale() != 1.0) {
+			const int cellW = this->G->Width;
+			const int cellH = this->G->Height;
+			const int ipr = cellW > 0 ? this->G->GetGraphicWidth() / cellW : 0;   // glyphs per row
+			const int rows = cellH > 0 ? this->G->GetGraphicHeight() / cellH : 0;
+			if (ipr > 0 && rows > 0) {
+				const double s = this->AuthoredScale();
+				// Round the CELL, then rebuild the sheet size from it, so the glyph grid stays exact
+				// (CGraphic::Resize derives the new cell by integer division of the sheet size).
+				const int newCellW = std::max(1, (int) std::lround(cellW * s));
+				const int newCellH = std::max(1, (int) std::lround(cellH * s));
+				this->G->Resize(newCellW * ipr, newCellH * rows);
+			}
+		}
 		this->MeasureWidths();
+		// NG84: MeasureWidths gives SPACE half a cell, because a classic fixed-pitch sheet has no
+		// other sensible answer. For an HD proportional face that is about twice the original's word
+		// gap -- measured off `ingame-human01-clean-3440x1440.png`, whose three word breaks span 9,
+		// 11 and 9 capture px (13.5-16.5 logical) against our 32. Override with the declared value,
+		// scaled the same way the sheet was.
+		if (this->SpaceAdvance > 0 && !this->CharWidth.empty()) {
+			const double s = this->AuthoredScale();
+			this->CharWidth[0] = (char) std::max(1L, std::lround(this->SpaceAdvance * s));
+		}
+		// NG84: if the bake shipped a real advance table, use the font's own metrics instead of the
+		// ink-extent heuristic. Measured: continuous BLQ55 reproduces the original's line to 1.4%,
+		// while ink extents + a fixed 1px gap run ~3% wide even after the space is corrected.
+		this->LoadAdvanceTable();
 	}
 }
 

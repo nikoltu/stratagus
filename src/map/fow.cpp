@@ -1004,6 +1004,22 @@ void CFogOfWar::DrawHDTiled(CViewport &viewport)
     const int screenRight  = viewport.BottomRightPos.x;
     const int screenBottom = viewport.BottomRightPos.y;
 
+    // Frame sets, read once per pass. Classic view: the classic masks of the terrain atlas for the
+    // never-seen edge and their checkerboard copies for explored ground, picked by the same
+    // GetFogTile values; opaque (the classic fog does not blend). Off, or no classic masks for
+    // this map -> the Remastered sets, exactly as before.
+    const CAtlasGraphic *fogAtlas = HDFogAtlas.get();
+    const int *blackFrames = HDFogFrames;
+    const int *greyFrames = HDFogGreyFrames;
+    uint8_t unseenOpacity = GetUnseenOpacity();
+    if (IsClassicView() && Map.ClassicTileAtlas && Map.ClassicFogFrames.size() == 16
+        && Map.ClassicFogDitherFrames.size() == 16) {
+        fogAtlas = Map.ClassicTileAtlas.get();
+        blackFrames = Map.ClassicFogFrames.data();
+        greyFrames = Map.ClassicFogDitherFrames.data();
+        unseenOpacity = 255;
+    }
+
     for (int tileY = viewport.MapPos.y; tileY < mapRows; tileY++) {
         int logX = viewport.TopLeftPos.x - viewport.Offset.x;
         size_t mapIndex = viewport.MapPos.x + mapIndexBase;
@@ -1040,8 +1056,8 @@ void CFogOfWar::DrawHDTiled(CViewport &viewport)
             if (!VisTable[visIndex]) {
                 // Completely unexplored: draw fully opaque fog (mask_0 = all-opaque)
                 const uint8_t alpha = GameSettings.RevealMap != MapRevealModes::cHidden
-                                      ? GetRevealedOpacity() : GetUnseenOpacity();
-                HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogFrames[0], dst, alpha);
+                                      ? GetRevealedOpacity() : unseenOpacity;
+                fogAtlas->DrawAtlasFrameFullAlpha(blackFrames[0], dst, alpha);
             } else {
                 int fogTile = 0;
                 int blackFogTile = 0;
@@ -1055,18 +1071,18 @@ void CFogOfWar::DrawHDTiled(CViewport &viewport)
                 // (mask_N_grey) so the dim level is continuous and the edge keeps its authored feather.
                 if (IsMapFieldVisible(visIndex) || ReplayRevealMap) {
                     if (fogTile && fogTile != blackFogTile) {
-                        HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogGreyFrames[fogTile], dst, 255);
+                        fogAtlas->DrawAtlasFrameFullAlpha(greyFrames[fogTile], dst, 255);
                     }
                 } else {
                     // Fully explored but not currently visible: full explored overlay
-                    HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogGreyFrames[0], dst, 255);
+                    fogAtlas->DrawAtlasFrameFullAlpha(greyFrames[0], dst, 255);
                 }
 
                 // Unexplored edges (black mask at unseen/revealed opacity)
                 if (blackFogTile) {
                     const uint8_t alpha = GameSettings.RevealMap != MapRevealModes::cHidden
-                                          ? GetRevealedOpacity() : GetUnseenOpacity();
-                    HDFogAtlas->DrawAtlasFrameFullAlpha(HDFogFrames[blackFogTile], dst, alpha);
+                                          ? GetRevealedOpacity() : unseenOpacity;
+                    fogAtlas->DrawAtlasFrameFullAlpha(blackFrames[blackFogTile], dst, alpha);
                 }
             }
 

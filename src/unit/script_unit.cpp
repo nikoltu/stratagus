@@ -1300,6 +1300,12 @@ static int CclGetUnitVariable(lua_State *l)
 	if (unit == nullptr) {
 		return 1;
 	}
+	if (unit->Destroyed || unit->Type == nullptr) {
+		// a released unit slot: nothing to read
+		lua_pop(l, 1);
+		lua_pushnil(l);
+		return 1;
+	}
 	UpdateUnitVariables(*unit);
 	lua_pop(l, 1);
 

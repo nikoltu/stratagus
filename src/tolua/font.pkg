@@ -2,6 +2,12 @@ class CFont
 {
 	static CFont *New(const std::string ident, CGraphicPtr g);
 	static CFont *Get(const std::string ident);
+	void SetAuthoredHeight(int height);
+	void SetAuthoredSize(int width, int height);
+	void SetAuthoredHud(int height);
+	void SetSpaceAdvance(int authoredPx);
+	void SetLineHeight(int authoredPx);
+	void SetHudShadow(int units);
 
 	int Height();
 	int Width(const std::string text);

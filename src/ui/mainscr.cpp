@@ -128,12 +128,20 @@ void DrawUserDefinedButtons()
 		const CUIUserButton &button = UI.UserButtons[i];
 
 		if (button.Button.X != -1) {
+			// 127 of 255: the brightest pixel of the dim caption in the original with a window up
+			// (captures o34_h1_menu_open, o50_o1_menu_open; the caption beside it reads 255).
+			if (button.Dim) {
+				SetGlyphShade(127);
+			}
 			DrawUIButton(button.Button.Style,
 						 (ButtonAreaUnderCursor == ButtonArea::User
 						  && size_t(ButtonUnderCursor) == i ? MI_FLAGS_ACTIVE : 0) |
 						 (button.Clicked ? MI_FLAGS_CLICKED : 0),
 						 button.Button.X, button.Button.Y,
 						 button.Button.Text);
+			if (button.Dim) {
+				SetGlyphShade(255);
+			}
 		}
 	}
 }
@@ -190,6 +198,104 @@ static void UiDrawLifeBar(const CUnit &unit, int x, int y, int cellW = 0, int ce
 		Video.FillRectangleClip(color, x - 2 + UI.LifeBarPadding, y + 4 + UI.LifeBarPadding,
 			std::max(f - 2 - UI.LifeBarPadding * 2, 0), hBar - UI.LifeBarPadding);
 	}
+}
+
+/**
+**  PANEL-A: the hit-point bar under a cell of the selection grid. It is the bar of the single
+**  unit's panel (skin `hud_hp_bar`, scripts/ui.lua M666-9) under every cell: at k = 3 the fill is
+**  150 x 15 px (108 x 15 in the 4-column grid), 3 px inside the cell's edges and 3 px under it,
+**  on a black seat 6 px larger on every side, the unfilled part grey (work/agent-orig-scenes
+**  captures u03 u07 u11 k02 k19). The sizes come from Lua (UI.SelectedBar*). Colours: green
+**  from 75 %, yellow from 50 %, red under it -- the single panel's rule (scripts/ui.lua
+**  HP_COLORS); in the grid green at 100 % and yellow at 61 % and 50 % are seen (k02, k19), a
+**  red cell is not captured.
+**  Drawn BEFORE the cell's picture: the frame covers the seat's top rows, as in the original.
+**
+**  @param unit   unit of the cell
+**  @param x      screen x of the cell
+**  @param y      screen y of the cell
+**  @param cellW  width of the cell
+**  @param cellH  height of the cell
+*/
+static void UiDrawCellLifeBar(const CUnit &unit, int x, int y, int cellW, int cellH)
+{
+	const int fx = x + UI.SelectedBarInset;
+	const int fy = y + cellH + UI.SelectedBarGap;
+	const int fw = cellW - 2 * UI.SelectedBarInset;
+	const int fh = UI.SelectedBarHeight;
+	const int seat = UI.SelectedBarSeat;
+	if (fw <= 0 || fh <= 0) {
+		return;
+	}
+	Video.FillRectangleClip(ColorBlack, fx - seat, fy - seat, fw + 2 * seat, fh + 2 * seat);
+	Video.FillRectangleClip(Video.MapRGB(TheScreen->format, UI.SelectedBarTrack), fx, fy, fw, fh);
+	const int max = unit.Variable[HP_INDEX].Max;
+	const int value = unit.Variable[HP_INDEX].Value;
+	if (max <= 0 || value <= 0) {
+		return;
+	}
+	const int f = std::min(100, (100 * value) / max);
+	const Uint32 color = f >= 75 ? ColorDarkGreen : f >= 50 ? ColorYellow : ColorRed;
+	Video.FillRectangleClip(color, fx, fy, (f * fw) / 100, fh);
+}
+
+/*
+**  PANEL-A: the cells of the selection grid.
+**  In the original a selected unit that dies leaves its cell EMPTY and the others stay where
+**  they are (work/agent-orig-scenes captures u09: nine dragged, a hole in row 2 column 1;
+**  k19: two left in cells 2 and 3). `Selected` cannot carry that: UnSelectUnit moves the last
+**  unit into the freed place. So the panel keeps its own list of cells. It stands as long as
+**  the units in it are exactly the selected ones; LetUnitDie empties the cell of a unit that
+**  dies; any other change of the selection (a unit added, taken out, gone into a building, a
+**  new selection, a new game) makes the list anew from `Selected`. Only pointers are compared,
+**  a unit in the list is never touched unless it is selected.
+**  NOT established in the original: what the panel shows when one unit is left of a group
+**  (here: the single unit's panel, as before), and whether a cell also stays for a unit that
+**  leaves the selection alive (here: it does not).
+*/
+static std::vector<CUnit *> SelectionCells;
+
+void SelectionCellUnitDied(const CUnit &unit)
+{
+	for (CUnit *&cell : SelectionCells) {
+		if (cell == &unit) {
+			cell = nullptr;
+		}
+	}
+}
+
+const std::vector<CUnit *> &GetSelectionCells()
+{
+	if (Selected.size() < 2) {
+		SelectionCells.clear();
+		return SelectionCells;
+	}
+	size_t live = 0;
+	bool same = true;
+	for (const CUnit *cell : SelectionCells) {
+		if (cell == nullptr) {
+			continue;
+		}
+		++live;
+		if (ranges::find(Selected, cell) == Selected.end()) {
+			same = false;
+			break;
+		}
+	}
+	if (!same || live != Selected.size()) {
+		SelectionCells.assign(Selected.begin(), Selected.end());
+	}
+	return SelectionCells;
+}
+
+const std::vector<CUIButton> &GetSelectionCellButtons(size_t cells)
+{
+	// 3 columns while the cells fit them, the narrow grid above that: 9 cells are 3 columns
+	// (u09), 11 are 4 (u11); 10 can only be the narrow grid, 3 x 3 has nine places.
+	if (cells > UI.SelectedButtons.size() && !UI.SelectedButtonsWide.empty()) {
+		return UI.SelectedButtonsWide;
+	}
+	return UI.SelectedButtons;
 }
 
 /**
@@ -589,6 +695,10 @@ static void DrawUnitInfo(CUnit &unit)
 */
 CFont *ResourcesFont = nullptr;   /// optional larger font for the resource line (set from Lua)
 CFont *ObjectivesFont = nullptr;  /// optional HD font for the in-game objectives text (set from Lua)
+/// PREF-4 "Hide Objectives HUD Display" (option_preference_hide_objectives). The original
+/// keeps this in Preferences and it suppresses the objectives block over the map -- the
+/// objectives themselves stay reachable from the in-game menu. Set from Lua.
+bool HideObjectivesHud = false;
 
 void DrawResources()
 {
@@ -598,8 +708,17 @@ void DrawResources()
 	// Draw all icons of resource.
 	for (int i = 0; i < FreeWorkersCount; ++i) {
 		if (UI.Resources[i].G) {
-			UI.Resources[i].G->DrawFrameClip(UI.Resources[i].IconFrame,
-											 UI.Resources[i].IconX, UI.Resources[i].IconY);
+			// M666-3: the picture is made once at a fixed size (44 px, ArtBaker RESOURCE_ICON) and
+			// the row is 13.5 base units high in the original (40 px at k = 3, 27 px at k = 2), so
+			// it is drawn at the width the UI names (CResourceInfo::IconWidth) when that differs.
+			const CGraphic &g = *UI.Resources[i].G;
+			const int w = UI.Resources[i].IconWidth;
+			if (w > 0 && g.Width > 0 && w != g.Width) {
+				g.DrawFrameClipScaled(UI.Resources[i].IconFrame, UI.Resources[i].IconX,
+				                      UI.Resources[i].IconY, w, w * g.Height / g.Width);
+			} else {
+				g.DrawFrameClip(UI.Resources[i].IconFrame, UI.Resources[i].IconX, UI.Resources[i].IconY);
+			}
 		}
 	}
 	for (int i = 0; i < MaxCosts; ++i) {
@@ -616,7 +735,11 @@ void DrawResources()
 			} else {
 				label.SetFont(resourceAmount > 99999 ? GetSmallFont() : resFont);
 
-				label.Draw(UI.Resources[i].TextX, UI.Resources[i].TextY + (resourceAmount > 99999) * 3, resourceAmount);
+				// Plain digits: the original prints the stock with no thousands separator (captures
+				// o20_h1_start, o24_h1_farm: four digits in a row for gold and lumber). CLabel::Draw
+				// with a number groups the digits by three, so the amount goes in as text.
+				label.Draw(UI.Resources[i].TextX, UI.Resources[i].TextY + (resourceAmount > 99999) * 3,
+				           std::to_string(resourceAmount));
 			}
 		}
 	}
@@ -624,7 +747,20 @@ void DrawResources()
 		char tmp[256];
 		snprintf(tmp, sizeof(tmp), "%d/%d", ThisPlayer->Demand, ThisPlayer->Supply);
 		label.SetFont(resFont);
-		if (ThisPlayer->Supply < ThisPlayer->Demand) {
+		if (ThisPlayer->Supply < ThisPlayer->Demand && ResourcesFont) {
+			// HUD-FOOD-RED: with more food used than there is, the original prints the USED figure
+			// red and leaves the stroke and the supply white: "1/0" at a 2960x1848 client, ink of
+			// the "1" (204, 0, 0) at x 2001..2007, "/0" (255, 255, 255) from x 2015
+			// (work/agent-zoom-rule/captures/c_k_2960x1848.png). The baked HD face takes no font
+			// colour (it is white in indices no CFontColor reaches), so the reverse colour below
+			// never showed on it: the figure is tinted instead.
+			const int x = UI.Resources[FoodCost].TextX;
+			const int y = UI.Resources[FoodCost].TextY;
+			SetGlyphTint(204, 0, 0);
+			const int w = label.Draw(x, y, std::to_string(ThisPlayer->Demand));
+			SetGlyphTint(255, 255, 255);
+			label.Draw(x + w, y, "/" + std::to_string(ThisPlayer->Supply));
+		} else if (ThisPlayer->Supply < ThisPlayer->Demand) {
 			label.DrawReverse(UI.Resources[FoodCost].TextX, UI.Resources[FoodCost].TextY, tmp);
 		} else {
 			label.Draw(UI.Resources[FoodCost].TextX, UI.Resources[FoodCost].TextY, tmp);
@@ -684,6 +820,18 @@ public:
 	void DrawMessages();
 	void CleanMessages();
 	bool AnyShown() const { return show && Preference.ShowMessages && MessagesCount > 0; }
+	/// NG50: how tall the visible message stack currently is, in screen pixels. The Remastered puts
+	/// its message band and its objectives overlay in almost the same slot (message rect y=22,
+	/// objectives y=24 in the HUD builder's own space), so something has to give when both have
+	/// content. What the ORIGINAL does there is not yet decoded -- see F-8 -- so WargusHD takes the
+	/// one reading that cannot be wrong either way: two texts are never drawn on top of each other.
+	int VisibleHeight() const
+	{
+		if (!AnyShown() || UI.MessageFont == nullptr) {
+			return 0;
+		}
+		return std::max(0, MessagesCount * (UI.MessageFont->Height() + 1) - MessagesScrollY);
+	}
 	void ToggleShowMessages() { show = !show; }
 #ifdef DEBUG
 	void ToggleShowBuilListMessages() { showBuilList = !showBuilList; }
@@ -731,13 +879,13 @@ void MessagesDisplay::UpdateMessages()
 
 	// Scroll/remove old message line
 	const unsigned long ticks = GetTicks();
+	// MESSAGE-LINE-LIFE: the line is gone at once when its time is over. The scroll-out that
+	// stood here took one step per drawn frame, so the life depended on the frame rate
+	// (measured 7.8 s and more than 8 s on one device).
 	if (MessagesFrameTimeout < ticks) {
-		++MessagesScrollY;
-		if (MessagesScrollY == UI.MessageFont->Height() + 1) {
-			MessagesFrameTimeout = ticks + UI.MessageScrollSpeed * 1000;
-			MessagesScrollY = 0;
-			ShiftMessages();
-		}
+		MessagesFrameTimeout = ticks + WC2_MESSAGE_LIFE_MS;
+		MessagesScrollY = 0;
+		ShiftMessages();
 	}
 }
 
@@ -795,25 +943,40 @@ void MessagesDisplay::DrawMessages()
 			}
 			*/
 
-			// Draw message line(s)
-			for (int z = 0; z < MessagesCount; ++z) {
-				if (z == 0) {
-					PushClipping();
-					SetClipping(UI.MapArea.X + 8, UI.MapArea.Y + 8, Video.Width - 1,
-								Video.Height - 1);
-				}
+			// M666-6: the original prints a message near the BOTTOM of the map view, not at its
+			// top. Measured (work/agent-fix-hudrest/tools, HUDREST_READY section M666-6):
+			//   k = 3, picture 2960x1848 (agent-orig-scenes e01, e02, e10): first ink x 546 =
+			//          182 base units; capital rows 1697..1720 -> top 151 px above the bottom
+			//   k = 2, client 1684x1031 (agent-hud o53, o54): first ink x 365 = 182.5 units;
+			//          capital rows 930..945 -> top 101 px above the bottom
+			// i.e. x = 182 units, capital top 50.4 units above the picture's bottom (151.2 / 100.8).
+			// 182 is also the x of the message rect in the original's HUD builder (note at
+			// RM_ApplyMessageBand, scripts/ui.lua).
+			// One line: a new message takes the row of the one before it (e01 then e02 on the same
+			// row; work/agent-orig-scenes/SCENES.md section 2 -- two captures, no capture shows two
+			// lines). So the newest line is drawn, alone, and nothing scrolls.
+			// faceCapTop: the HUD face's distance from a text position to the top of a capital,
+			// 25.5 px of its sheet (ui/fonts/blq55_small.png) = 17 px at k = 3 (capture c668_c:
+			// text drawn at y 84 has its capitals from row 101). Measure again if the face changes.
+			const int hudStep = Video.HudCanvas.Step;
+			const int faceCapTop = (int) std::lround(25.5 * Video.HudCanvas.Scale);
+			const int msgX = Video.HudCanvas.X + 182 * hudStep + UI.MessageOffsetX;
+			const int msgY = Video.HudCanvas.Y + Video.HudCanvas.H - (int) std::lround(50.4 * hudStep)
+			                 - faceCapTop + UI.MessageOffsetY;
+			if (MessagesCount > 0) {
+				PushClipping();
+				SetClipping(msgX, msgY, Video.Width - 1, Video.Height - 1);
 				/*
 				 * Due parallel drawing we have to force message copy due temp
 				 * std::string(Messages[z]) creation because
 				 * char * pointer may change during text drawing.
 				 */
-				label.DrawClip(UI.MapArea.X + 8,
-							   UI.MapArea.Y + 8 +
-							   z * (UI.MessageFont->Height() + 1) - MessagesScrollY,
-							   std::string(Messages[z]));
-				if (z == 0) {
-					PopClipping();
-				}
+				// Yellow: the brightest ink of the original's line is (255, 204, 0) (e01, e02, e10,
+				// o53). The baked face takes no font colour, so the glyphs are tinted (SetGlyphTint).
+				SetGlyphTint(255, 204, 0);
+				label.DrawClip(msgX, msgY, std::string(Messages[MessagesCount - 1]));
+				SetGlyphTint(255, 255, 255);
+				PopClipping();
 			}
 #ifdef DEBUG
 		}
@@ -832,13 +995,13 @@ void MessagesDisplay::AddMessage(const char *msg)
 	unsigned long ticks = GetTicks();
 
 	if (!MessagesCount) {
-		MessagesFrameTimeout = ticks + UI.MessageScrollSpeed * 1000;
+		MessagesFrameTimeout = ticks + WC2_MESSAGE_LIFE_MS;
 	}
 
 	if (MessagesCount == MaxMessagesCount) {
 		// Out of space to store messages, can't scroll smoothly
 		ShiftMessages();
-		MessagesFrameTimeout = ticks + UI.MessageScrollSpeed * 1000;
+		MessagesFrameTimeout = ticks + WC2_MESSAGE_LIFE_MS;
 		MessagesScrollY = 0;
 	}
 	char *ptr;
@@ -1204,23 +1367,38 @@ static void InfoPanel_draw_multiple_selection()
 	}
 #endif
 
-	for (size_t i = 0; i != std::min(Selected.size(), UI.SelectedButtons.size()); ++i) {
-		const CIcon &icon = *Selected[i]->Type->Icon.Icon;
-		const PixelPos pos(UI.SelectedButtons[i].X, UI.SelectedButtons[i].Y);
-		icon.DrawGroupSelectionIcon(*UI.SelectedButtons[i].Style,
+	// PANEL-A: one cell per unit, the cell of a dead unit left empty; 3 or 4 columns.
+	const std::vector<CUnit *> &cells = GetSelectionCells();
+	const std::vector<CUIButton> &buttons = GetSelectionCellButtons(cells.size());
+	for (size_t i = 0; i != std::min(cells.size(), buttons.size()); ++i) {
+		if (cells[i] == nullptr) {
+			continue;
+		}
+		const CUnit &unit = *cells[i];
+		const CIcon &icon = *unit.Type->Icon.Icon;
+		const PixelPos pos(buttons[i].X, buttons[i].Y);
+		if (UI.SelectedBarHeight > 0) {
+			UiDrawCellLifeBar(unit, buttons[i].X, buttons[i].Y,
+			                  buttons[i].Style->Width, buttons[i].Style->Height);
+		}
+		icon.DrawGroupSelectionIcon(*buttons[i].Style,
 						  (ButtonAreaUnderCursor == ButtonArea::Selected && ButtonUnderCursor == (int)i) ?
 						  (IconActive | (MouseButtons & LeftButton)) : 0,
-						  pos, "", *Selected[i]);
-		UiDrawLifeBar(*Selected[i], UI.SelectedButtons[i].X, UI.SelectedButtons[i].Y,
-					  UI.SelectedButtons[i].Style->Width, UI.SelectedButtons[i].Style->Height);
+						  pos, "", unit);
+		if (UI.SelectedBarHeight <= 0) {
+			UiDrawLifeBar(unit, buttons[i].X, buttons[i].Y,
+						  buttons[i].Style->Width, buttons[i].Style->Height);
+		}
 
 		if (ButtonAreaUnderCursor == ButtonArea::Selected && ButtonUnderCursor == (int) i) {
-			UI.StatusLine.Set(Selected[i]->Type->Name);
+			UI.StatusLine.Set(unit.Type->Name);
 		}
 	}
-	if (Selected.size() > UI.SelectedButtons.size()) {
+	// More units than cells: only where no grid holds them all. The original prints nothing in
+	// the panel (no name, no number, no count: captures u02..u11).
+	if (cells.size() > buttons.size() && UI.MaxSelectedFont) {
 
-		const std::string number_str = "+" + std::to_string(Selected.size() - UI.SelectedButtons.size());
+		const std::string number_str = "+" + std::to_string(cells.size() - buttons.size());
 		CLabel(*UI.MaxSelectedFont).Draw(UI.MaxSelectedTextX, UI.MaxSelectedTextY, number_str.c_str());
 	}
 }
@@ -1268,6 +1446,152 @@ void DrawTimer()
 }
 
 /**
+**  The notice plate over the map view which the scripts fill while a network game waits
+**  (Lua SetNetWaitPlate). The engine only draws what it was given.
+*/
+struct CNetWaitPlateLine {
+	std::string Text;
+	CFont *Font = nullptr;
+	std::string Color;
+	int X = 0;
+	int Y = 0;
+	int Align = 0; /// 0 left, 1 centre, 2 right
+};
+
+struct CNetWaitPlate {
+	bool Shown = false;
+	std::string File;              /// Frame picture, empty = the flat fill
+	std::shared_ptr<CGraphic> G;
+	int SrcBorder = 0;             /// Border of the picture in its own pixels
+	int DstBorder = 0;             /// The same border on screen
+	int X = 0;
+	int Y = 0;
+	int W = 0;
+	int H = 0;
+	std::vector<CNetWaitPlateLine> Lines;
+};
+
+static CNetWaitPlate NetWaitPlate;
+
+void ClearNetWaitPlate()
+{
+	NetWaitPlate.Shown = false;
+	NetWaitPlate.Lines.clear();
+}
+
+/// Two numbers of a table field {a, b}
+static void NetWaitPlatePair(lua_State *l, int table, const char *name, int &a, int &b)
+{
+	lua_getfield(l, table, name);
+	if (lua_istable(l, -1)) {
+		a = LuaToNumber(l, -1, 1);
+		b = LuaToNumber(l, -1, 2);
+	}
+	lua_pop(l, 1);
+}
+
+/// A string of a table field, empty when absent
+static std::string NetWaitPlateString(lua_State *l, int table, const char *name)
+{
+	std::string value;
+
+	lua_getfield(l, table, name);
+	if (lua_isstring(l, -1)) {
+		value = lua_tostring(l, -1);
+	}
+	lua_pop(l, 1);
+	return value;
+}
+
+/**
+**  Show or hide the plate.
+**
+**  SetNetWaitPlate(nil) hides it. Otherwise one table, all positions in screen pixels:
+**    Pos = {x, y}, Size = {w, h},
+**    Image = "<frame picture>", Border = {<in the picture>, <on screen>},
+**    Lines = { {Text = "...", Font = "<ident>", Color = "<font colour>", Pos = {x, y},
+**               Align = "left" | "center" | "right"}, ... }
+*/
+int CclSetNetWaitPlate(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	if (!lua_istable(l, 1)) {
+		ClearNetWaitPlate();
+		return 0;
+	}
+	CNetWaitPlate &plate = NetWaitPlate;
+
+	NetWaitPlatePair(l, 1, "Pos", plate.X, plate.Y);
+	NetWaitPlatePair(l, 1, "Size", plate.W, plate.H);
+	NetWaitPlatePair(l, 1, "Border", plate.SrcBorder, plate.DstBorder);
+	const std::string file = NetWaitPlateString(l, 1, "Image");
+	if (file != plate.File || (!file.empty() && !plate.G)) {
+		plate.File = file;
+		plate.G.reset();
+		if (!file.empty()) {
+			plate.G = CGraphic::New(file);
+			plate.G->Load();
+		}
+	}
+	plate.Lines.clear();
+	lua_getfield(l, 1, "Lines");
+	if (lua_istable(l, -1)) {
+		const int count = lua_rawlen(l, -1);
+		for (int i = 1; i <= count; ++i) {
+			lua_rawgeti(l, -1, i);
+			if (lua_istable(l, -1)) {
+				const int line = lua_gettop(l);
+				CNetWaitPlateLine entry;
+				entry.Text = NetWaitPlateString(l, line, "Text");
+				entry.Font = CFont::Get(NetWaitPlateString(l, line, "Font"));
+				entry.Color = NetWaitPlateString(l, line, "Color");
+				NetWaitPlatePair(l, line, "Pos", entry.X, entry.Y);
+				const std::string align = NetWaitPlateString(l, line, "Align");
+				entry.Align = (align == "center") ? 1 : (align == "right") ? 2 : 0;
+				if (entry.Font && !entry.Text.empty()) {
+					plate.Lines.push_back(entry);
+				}
+			}
+			lua_pop(l, 1);
+		}
+	}
+	lua_pop(l, 1);
+	plate.Shown = plate.W > 0 && plate.H > 0;
+	return 0;
+}
+
+/**
+**  Draw the plate of a waiting network game, if the scripts show one.
+*/
+void DrawNetWaitPlate()
+{
+	const CNetWaitPlate &plate = NetWaitPlate;
+
+	if (!plate.Shown || !GameRunning || Editor.Running == EditorEditing) {
+		return;
+	}
+	if (plate.G) {
+		const SDL_Rect dst = {plate.X, plate.Y, plate.W, plate.H};
+		plate.G->DrawNineSliceScaled(dst, plate.SrcBorder, plate.DstBorder);
+	} else {
+		// No frame picture: the flat panel the command tooltip falls back to (ui/popup.cpp).
+		Video.FillTransRectangle(ColorBlack, plate.X, plate.Y, plate.W, plate.H, 84);
+		Video.DrawRectangle(ColorWhite, plate.X, plate.Y, plate.W, plate.H);
+	}
+	for (const CNetWaitPlateLine &line : plate.Lines) {
+		const std::string &color = line.Color.empty() ? std::string("white") : line.Color;
+		const CLabel label(*line.Font, color, color);
+		if (line.Align == 1) {
+			label.DrawCentered(line.X, line.Y, line.Text);
+		} else if (line.Align == 2) {
+			label.Draw(line.X - line.Font->Width(line.Text), line.Y, line.Text);
+		} else {
+			label.Draw(line.X, line.Y, line.Text);
+		}
+	}
+}
+
+/**
 **  Draw the current mission objectives as a persistent text block overlaid on
 **  the top-left of the world area.
 **
@@ -1279,7 +1603,7 @@ void DrawTimer()
 */
 void DrawObjectives()
 {
-	if (!GameRunning || Editor.Running == EditorEditing) {
+	if (!GameRunning || Editor.Running == EditorEditing || HideObjectivesHud) {
 		return;
 	}
 
@@ -1306,27 +1630,66 @@ void DrawObjectives()
 		return;
 	}
 
-	// Objectives rectangle authored at 3840x2160 (Remastered HUD layout),
-	// mapped to the screen with the HUD's uniform aspect-preserving fit.
-	const SDL_Rect logical = {849, 126, 540, 111};
-	const SDL_Rect screen = {0, 0, Video.Width, Video.Height};
-	const UniformScale scale = ComputeUniformScale(3840, 2160, screen);
-	const SDL_Rect r = AnchorScaleRect(logical, 3840, 2160, screen,
-	                                   AnchorX::Left, AnchorY::Top,
-	                                   scale.num, scale.den);
+	// M666-6: the objectives rect in base units of the 640x480 layout: (184, 24, 230, 16 per line),
+	// the literals of the original's HUD builder (note at RM_ApplyMessageBand, scripts/ui.lua).
+	// Checked on work/agent-hud/captures o20, o41, o53 (k = 2): first ink x 369 = 184.5 units,
+	// capitals from row 55 = 27.5 units = the rect's top + 3.5, lines 32 px = 16 units apart.
+	// In the art space used below that is (828, 108, 1035, ...); it was (849, 126, 540, 111), read
+	// off a 3440x1440 capture: 15.5 px right and 18.5 px low at k = 3, and 360 px wide against 690.
+	// No capture of the original shows objectives at k = 3; the numbers above are k = 2 ones.
+	const SDL_Rect logical = {828, 108, 1035, 72};
+	// WORLD-ZOOM-RULE: the block belongs to the HUD, so it takes the HUD's own scale and the
+	// picture's top-left (CVideo::HudCanvas; SPEC_WORLD_ZOOM_RULE.md R4: the HUD is anchored at the
+	// picture's top-left and scaled by the step). The 16:9 fit this site used before
+	// (ComputeUniformScale over the canvas rect) is the same number only on a 16:9 picture whose
+	// height is a multiple of 480; on 2960x1848 it gave 0.7708 against the HUD's 0.6667.
+	// CVideo::ComputeHudCanvas owns the rule; it is read here, never recomputed (NG81).
+	const double hudScale = Video.HudCanvas.Scale;
+	const SDL_Rect r = {Video.HudCanvas.X + (int) std::lround(logical.x * hudScale),
+	                    Video.HudCanvas.Y + (int) std::lround(logical.y * hudScale),
+	                    (int) std::lround(logical.w * hudScale),
+	                    (int) std::lround(logical.h * hudScale)};
 
 	// WargusHD: the classic small bitmap font never scales with resolution, so on an HD screen the
 	// objectives text is tiny. Use the Lua-set HD font (SetObjectivesFont "remaster_small") when
 	// present, matching how the resource line uses ResourcesFont; fall back to the classic font.
 	CFont &font = ObjectivesFont ? *ObjectivesFont : GetSmallFont();
 	CLabel label(font);
-	const int lineHeight = font.Height() + 2;
-	int y = r.y;
+	// NG36: line pitch and the clip test both come from the original-client capture, not from the
+	// font metrics. In ingame-human01 the two objective lines sit 47 capture px apart inside a 74 px
+	// box (rows 0-23 and 47-71), i.e. a pitch of 47/74 of the authored box height, with the second
+	// line's glyphs ending well inside the box. Using font.Height() for both the step and the clip
+	// overstates a line's visible extent -- it counts ascender and descender the string never uses --
+	// so the second line was being dropped even though the original clearly shows it.
+	// M666-6: 16 base units a line (see the rect above): 48 px at k = 3, 32 px at k = 2.
+	const int capturePitch = 16 * Video.HudCanvas.Step;
+	// NG84: the authored pitch IS the ground truth -- 48 capture px in both `ingame-orc-hud-a` and
+	// `ingame-human01-clean`, i.e. 72 logical, which is what 47/74 of the box reproduces. The old
+	// `max(font.Height() + 2, capturePitch)` existed because the HD font sheet was baked ~27% too
+	// small, so its cell was the smaller of the two and the max simply chose the authored pitch.
+	// With the sheet scaled to the original's size the cell (leading included) is now TALLER than
+	// the authored pitch, and the max started spacing the lines 84 logical apart instead of 72.
+	// Take the authored pitch; the ink is 37 logical, so lines cannot collide at 72.
+	const int lineHeight = capturePitch;
+	// NG50: while a message is on screen the objectives start below it (see VisibleHeight above).
+	// WargusHD-side rule, disclosed: the original's own rects put the two within two units of each
+	// other, and which one yields is still undecoded (F-8).
+	// M666-6: messages are at the bottom of the view now (MessagesDisplay::DrawMessages), so the
+	// block no longer moves when one comes up (it jumped 11..34 px, captures c666_b, c668_m).
+	// The capitals start 3.5 units under the rect's top (o20, o41); the face puts them faceCapTop
+	// under the text position (25.5 px of its sheet, 17 px at k = 3 -- capture c668_c).
+	const int faceCapTop = (int) std::lround(25.5 * hudScale);
+	int y = r.y + (int) std::lround(3.5 * Video.HudCanvas.Step) - faceCapTop;
 	std::string_view line;
+	// NG36: there is no height to clip against. The 111 in `logical` above is what TWO lines
+	// happened to occupy in the one capture it was measured from (the Oracle records that rect as
+	// MEASURED_MIRRORED, E2, from ingame-human01-clean -- Hillsbrad, a two-objective mission), and
+	// clipping to it silently dropped the third and fourth objectives of the five missions that
+	// have them. The original computes this box's height at RUNTIME from the objectives list
+	// itself (exe_ui_layout_formulas, ingame_hud/objectives#2, VA 5344283: x/y/w are literals,
+	// h_expr is the objectives extent), so it has no constant capacity to reproduce. The WIDTH
+	// stays authored -- the original's is literal too, which is why wrapping at r.w is right.
 	for (unsigned int i = 1; (line = GetLineFont(i, text, r.w, &font)).length(); ++i) {
-		if (y + font.Height() > r.y + r.h) {
-			break; // clip to the authored objectives height
-		}
 		label.DrawClip(r.x, y, line);
 		y += lineHeight;
 	}

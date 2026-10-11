@@ -262,7 +262,7 @@ std::vector<unsigned long> NetSocketAddr()
 
 	return ips;
 }
-#elif defined(USE_LINUX) || defined(USE_MAC)
+#elif defined(USE_LINUX) || defined(USE_MAC) || defined(__ANDROID__)
 std::vector<unsigned long> NetSocketAddr()
 {
 	std::vector<unsigned long> ips;

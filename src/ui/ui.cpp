@@ -41,9 +41,11 @@
 #include "font.h"
 #include "interface.h"
 #include "iolib.h"
+#include "debug_bridge.h"
 #include "loadingscreen.h"
 #include "map.h"
 #include "menus.h"
+#include "network.h"
 #include "title.h"
 #include "ui/contenttype.h"
 #include "ui/popup.h"
@@ -80,6 +82,16 @@ void ShowLoadProgress(const char *fmt, ...)
 {
 	va_list va;
 	char temp[4096];
+
+	// NG68: beat the debug watchdog's heartbeat here, BEFORE the loading-screen early-return below.
+	// A mission load blocks the main loop for many seconds without crossing a main-loop checkpoint,
+	// so the watchdog used to report "main loop STALLED 3..10s at 'UpdateDisplay:begin'" on every
+	// single mission load -- a false alarm that trains the reader to ignore real ones. This call
+	// keeps the heartbeat moving for as long as loading is making progress, and a genuine hang
+	// INSIDE the load still trips the watchdog, now labelled 'loading' instead of pointing at the
+	// main loop.
+	DBG_CHECKPOINT("loading");
+	NetworkLoadingPing(); // LAN-MESH S8: a device which loads is not a dead one
 
 	// The Remastered map-load screen owns the framebuffer during a blocking load; suppress the
 	// legacy progress text so it does not overpaint the loading art.
@@ -164,15 +176,24 @@ CPopup &PopupByIdent(std::string_view ident)
 	ExitFatal(1);
 }
 
-// Magnification applied to the in-game map viewports on touch devices, where the native framebuffer
-// is very high resolution and the default tile count is far too wide to be playable. Only the play
-// area is scaled; the HUD, menus, fonts and cursors stay at native resolution. Used both when the map
-// area is centred (InitUserInterface) and when the viewport zoom is set (FinishViewportModeConfiguration).
+// Magnification applied to the in-game map viewports. Only the play area is scaled. Used both when
+// the map area is sized (InitUserInterface, ClipViewport) and when the viewport zoom is set
+// (FinishViewportModeConfiguration).
+// WORLD-ZOOM-RULE (work/agent-zoom-rule/SPEC_WORLD_ZOOM_RULE.md R3): the original draws a map tile
+// at 32 * k px, k = CVideo::HudCanvas.Step (tile period 96.0 px at a 2960x1848 client, capture
+// g_2960x1848.png). The zoom is that size over the logical tile: 1.5 for the 64-px tile at k = 3,
+// 1.0 at k = 2, 2.0 at k = 4; with a 32-px tile it is k itself.
+// It is a function, not a constant: the step exists only after CVideo::ComputeHudCanvas and the tile
+// size only after the scripts have set it; both are final before InitUserInterface runs.
+static float MapViewportZoom()
+{
 #ifdef __ANDROID__
-static constexpr float MapViewportZoom = 2.0f;
-#else
-static constexpr float MapViewportZoom = 1.0f;
+	if (PixelTileSize.x > 0 && Video.HudCanvas.Step > 0) {
+		return 32.0f * Video.HudCanvas.Step / PixelTileSize.x;
+	}
 #endif
+	return 1.0f;
+}
 
 /**
 **  Initialize the user interface.
@@ -192,13 +213,13 @@ void InitUserInterface()
 	//
 	if (Map.Info.MapWidth) {
 		/// Align UI map area if at least one of the map dimensions fits completely into it.
-		// WargusHD: the viewport renders each tile at PixelTileSize * MapViewportZoom (2x on touch
-		// devices), so the ON-SCREEN map is twice as wide/tall as the raw tile maths. Using the
+		// WargusHD: the viewport renders each tile at PixelTileSize * MapViewportZoom(), so the
+		// ON-SCREEN map differs from the raw tile maths by that factor. Using the
 		// unscaled size made the engine think a small map was half its rendered width and shift
 		// UI.MapArea.X right -- overwriting the Lua-set flush X (= sidebar width) and leaving a black
 		// gap between the HUD and the map. Fold the zoom in so the centring matches what is drawn.
-		const uint16_t mapWidthInPixels = (uint16_t)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom);
-		const uint16_t mapHeightInPixels = (uint16_t)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom);
+		const uint16_t mapWidthInPixels = (uint16_t)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom());
+		const uint16_t mapHeightInPixels = (uint16_t)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom());
 		const uint16_t uiMapAreaWidth = UI.MapArea.EndX - UI.MapArea.X;
 		const uint16_t uiMapAreaHeight = UI.MapArea.EndY - UI.MapArea.Y;
 		uint16_t xAlign = 0;
@@ -213,8 +234,8 @@ void InitUserInterface()
 			UI.MapArea.Y += yAlign;
 		}
 
-		UI.MapArea.EndX = std::min<int>(UI.MapArea.EndX - xAlign, UI.MapArea.X + (int)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom) - 1);
-		UI.MapArea.EndY = std::min<int>(UI.MapArea.EndY - yAlign, UI.MapArea.Y + (int)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom) - 1);
+		UI.MapArea.EndX = std::min<int>(UI.MapArea.EndX - xAlign, UI.MapArea.X + (int)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom()) - 1);
+		UI.MapArea.EndY = std::min<int>(UI.MapArea.EndY - yAlign, UI.MapArea.Y + (int)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom()) - 1);
 	}
 
 	UI.SelectedViewport = UI.Viewports;
@@ -269,6 +290,14 @@ void CUserInterface::Load()
 	}
 	if (Preference.PressedIconFrameG) {
 		Preference.PressedIconFrameG->Load();
+	}
+	// TOOLTIP-FRAME-FAINT: the popup frames (CclDefinePopup only names them). Loaded here the
+	// renderer exists, so the frame gets its GPU texture and is drawn in the HUD pass, under the
+	// tooltip's own icons and text.
+	for (auto &popup : ButtonPopups) {
+		if (popup->BackgroundImage) {
+			popup->BackgroundImage->Load();
+		}
 	}
 
 	//  Resolve cursors
@@ -356,6 +385,7 @@ void CleanUserInterface()
 
 	delete UI.SingleSelectedButton;
 	UI.SelectedButtons.clear();
+	UI.SelectedButtonsWide.clear();
 	delete UI.SingleTrainingButton;
 	UI.SingleTrainingText.clear();
 	UI.TrainingButtons.clear();
@@ -430,6 +460,12 @@ static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int nu
 
 			new_vps[i].Offset = relDiff + Map.TilePosToMapPixelPos_TopLeft(vp->MapPos) + vp->Offset;
 		} else {
+			// No viewport has a screen area yet (nothing has been played in this process), so
+			// there is no old view to carry over by position. Keep the map position the viewport
+			// already holds: a saved game sets it before the user interface is initialised.
+			if (i < UI.NumViewports) {
+				new_vps[i].MapPos = UI.Viewports[i].MapPos;
+			}
 			new_vps[i].Offset.x = 0;
 			new_vps[i].Offset.y = 0;
 		}
@@ -443,7 +479,7 @@ static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int nu
 		vp.BottomRightPos = new_vps[i].BottomRightPos;
 		// Set the zoom before Set() so the tiles-in-view and scroll limits are
 		// derived from the zoomed-down render size.
-		vp.Zoom = MapViewportZoom;
+		vp.Zoom = MapViewportZoom();
 		vp.Set(new_vps[i].MapPos, new_vps[i].Offset);
 	}
 	UI.NumViewports = num_vps;
@@ -464,14 +500,17 @@ static void FinishViewportModeConfiguration(CViewport new_vps[], unsigned int nu
 **  nothing here alters Video.Width/Height or any HUD metric. Used by the
 **  two-finger pinch-zoom gesture on touch devices.
 **
-**  @param zoom  Desired magnification, clamped to the supported [1.0, 4.0] range.
+**  @param zoom  Desired magnification, clamped to [1.0, 4.0] widened to hold the rule's own
+**               default (0.5 on a screen under 960 rows, 2.5 at 2400 rows).
 */
 void SetMapViewportsZoom(float zoom)
 {
-	if (zoom < 1.0f) {
-		zoom = 1.0f;
-	} else if (zoom > 4.0f) {
-		zoom = 4.0f;
+	const float lo = std::min(1.0f, MapViewportZoom());
+	const float hi = std::max(4.0f, MapViewportZoom());
+	if (zoom < lo) {
+		zoom = lo;
+	} else if (zoom > hi) {
+		zoom = hi;
 	}
 	for (unsigned int i = 0; i < UI.NumViewports; ++i) {
 		CViewport &vp = UI.Viewports[i];
@@ -502,8 +541,9 @@ void SetMapViewportsZoom(float zoom)
 static void ClipViewport(CViewport &vp, int ClipX, int ClipY)
 {
 	// begin with maximum possible viewport size
-	vp.BottomRightPos.x = vp.TopLeftPos.x + Map.Info.MapWidth * PixelTileSize.x - 1;
-	vp.BottomRightPos.y = vp.TopLeftPos.y + Map.Info.MapHeight * PixelTileSize.y - 1;
+	// (the map is drawn at PixelTileSize * MapViewportZoom(), as UI.MapArea is sized above)
+	vp.BottomRightPos.x = vp.TopLeftPos.x + (int)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom()) - 1;
+	vp.BottomRightPos.y = vp.TopLeftPos.y + (int)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom()) - 1;
 
 	// first clip it to MapArea size if necessary
 	vp.BottomRightPos.x = std::min<int>(vp.BottomRightPos.x, ClipX);

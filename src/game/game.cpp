@@ -35,6 +35,7 @@
 ----------------------------------------------------------------------------*/
 
 #include "stratagus.h"
+#include "launcher_bridge.h"
 
 #include "game.h"
 
@@ -69,6 +70,10 @@
 #include "trigger.h"
 #include "ui.h"
 #include "unit.h"
+#include "wc2mission.h"
+#include "wc2ai.h"
+
+#include <algorithm>
 #include "unit_manager.h"
 #include "unittype.h"
 #include "upgrade.h"
@@ -153,6 +158,8 @@ void StartMap(const std::string &filename, bool clean)
 
 	//  Play the game.
 	GameMainLoop(clean);
+
+	LauncherShowLastGameFrame();
 
 	//  Clear screen
 	Video.ClearScreen();
@@ -623,10 +630,24 @@ bool GetGamePaused()
 **
 **  @param speed  New game speed.
 */
+/// The knob position of the Game Speed slider, 0 .. 100.
+static int GameSpeedPercent = 75;
+/// Game cycles per second the simulation runs at (the fixed-timestep loop reads it).
+double GameCycleRate = 38.5;
+
 void SetGameSpeed(int speed)
 {
 	if (GameCycle == 0 || FastForwardCycle < GameCycle) {
-		CyclesPerSecond = (static_cast<double>(speed) / 100) * CYCLES_PER_SECOND + static_cast<double>(CYCLES_PER_SECOND) / 3;
+		// The original's scale, measured on the running client at five knob positions (cycle 652
+		// of the project journal): 0 % = 12.5, 25 % = 19.0, 50 % = 25.0, 75 % = 38.5 (its factory
+		// setting), 100 % = 76.8 game frames per second. Between the stops: a straight line (not
+		// measured).
+		static const double stops[5] = {12.5, 19.0, 25.0, 38.5, 76.8};
+		GameSpeedPercent = std::clamp(speed, 0, 100);
+		const int lower = std::min(GameSpeedPercent / 25, 3);
+		const double part = (GameSpeedPercent - lower * 25) / 25.0;
+		GameCycleRate = stops[lower] + (stops[lower + 1] - stops[lower]) * part;
+		CyclesPerSecond = static_cast<int>(GameCycleRate + 0.5);
 		SetVideoSync();
 	}
 }
@@ -638,7 +659,7 @@ void SetGameSpeed(int speed)
 */
 int GetGameSpeed()
 {
-	return ((static_cast<double>(CyclesPerSecond) - static_cast<double>(CYCLES_PER_SECOND) / 3) / CYCLES_PER_SECOND) * 100;
+	return GameSpeedPercent;
 }
 
 /*----------------------------------------------------------------------------
@@ -924,11 +945,18 @@ void CreateGame(const fs::path &filename, CMap *map)
 		// BEFORE InitUnitTypes(1) so UpdateStats() fans the per-map stats out to every player's Stats.
 		extern void ApplyMapUnitData(const fs::path &mapPath); // wc2data.cpp
 		ApplyMapUnitData(filename);
+		// NG23/NG28: the campaign PUDs carry no trigger and no ALOW section -- the per-mission tech gate
+		// and victory rule live in the original engine's own tables. Read them for this level (a no-op
+		// for custom/melee maps, which the original leaves fully unlocked).
+		LoadWC2MissionRules(filename);
 		InitUnitTypes(1);
 		UpdateLoadingScreen();
 		LoadMap(filename, *map);
 		UpdateLoadingScreen();
 		ApplyUpgrades();
+		UpdateLoadingScreen();
+		// After ApplyUpgrades so the mission gate is the last word on what this level may build.
+		ApplyMissionAllow();
 		UpdateLoadingScreen();
 	}
 	CclCommand("if (MapLoaded ~= nil) then MapLoaded() end");
@@ -1017,6 +1045,7 @@ void CreateGame(const fs::path &filename, CMap *map)
 	LoadConstructions();
 	LoadUnitTypes();
 	LoadDecorations();
+	PreloadHDArtForMap();   // STUTTER-FIRST-DRAW-LOAD: behind the loading screen, not in play
 
 	InitUserInterface();
 	UI.Load();
@@ -1143,6 +1172,8 @@ void CleanGame()
 	CursorBuilding = nullptr;
 	UnitUnderCursor = nullptr;
 	GameEstablishing = false;
+	ClearMissionRules();
+	Wc2AiClearIds();
 }
 
 /**
@@ -1570,6 +1601,11 @@ static int CclSavedGameInfo(lua_State *l)
 				LuaError(l, "SaveFile too long");
 			}
 			ranges::copy(filename, CurrentMapPath);
+			CurrentMapPath[filename.size()] = '\0'; // the copy brings no terminator of its own
+			// A loaded game does not pass through CreateGame, where a new game reads its mission's
+			// victory rule; without it the triggers built for the save fall back to the generic
+			// destroy-all rule. Read it here, before the map's own script runs.
+			LoadWC2MissionRules(CurrentMapPath);
 			if (LuaLoadFile(fs::path(StratagusLibPath) / filename) == -1) {
 				ErrorPrint("Load failed: '%s'\n", filename.data());
 			}
@@ -1641,6 +1677,8 @@ void LuaRegisterModules()
 	UnitTypeCclRegister();
 	extern void WC2DataCclRegister(); // D2: native Data/Rez/unitdata.dat stat override (wc2data.cpp)
 	WC2DataCclRegister();
+	WC2MissionCclRegister(); // NG23: native per-mission victory rule for the trigger layer
+	Wc2AiCclRegister();      // the original's computer-player definitions (game folder)
 	UpgradesCclRegister();
 	UserInterfaceCclRegister();
 	VideoCclRegister();

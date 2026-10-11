@@ -67,6 +67,12 @@ struct DebugGraphicInfo {
 };
 void DebugBridge_CollectGraphics(std::vector<DebugGraphicInfo> &out);
 
+/// Verb `touch`: start a finger gesture script in the touch layer. Implemented in
+/// src/video/sdl.cpp (the touch layer is file-scope there). False + error if not taken.
+bool DebugBridge_TouchScript(const std::string &script, std::string &error);
+/// Verb `touchinfo`: the touch layer's state as JSON members. Implemented in src/video/sdl.cpp.
+std::string DebugBridge_TouchState();
+
 /*----------------------------------------------------------------------------
 --  Main-loop watchdog
 ----------------------------------------------------------------------------*/

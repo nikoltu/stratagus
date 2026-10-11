@@ -38,6 +38,7 @@
 --  Declarations
 ----------------------------------------------------------------------------*/
 
+class CPlayer;
 class CUnit;
 class CFile;
 class SpellType;
@@ -64,7 +65,9 @@ enum class EFlushMode
 */
 
 /// Prepare command quit
-extern void CommandQuit(int player);
+extern void CommandQuit(int player, int reason = 0);
+/// The units of a player who is out of the network game: part of command quit
+extern void CommandQuitUnits(CPlayer &player);
 /// Prepare command stop
 extern void CommandStopUnit(CUnit &unit);
 /// Prepare command stand ground

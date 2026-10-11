@@ -80,7 +80,11 @@ class Mng;
 #define UnitSides 8
 #define MaxAttackPos 5
 
-CUnitType &UnitTypeByIdent(std::string_view ident); /// Get unit-type by ident
+CUnitType &UnitTypeByIdent(std::string_view ident); /// Get unit-type by ident; FATAL if unknown
+/// Same lookup, but nullptr on a miss and silent. For the Lua boundary only: a script typo must
+/// raise a Lua error, not call ExitFatal (CREATEUNIT-BADIDENT). Data-file parsing keeps the fatal
+/// form above on purpose -- a half-loaded ruleset is worse than stopping.
+CUnitType *UnitTypeByIdentOrNull(std::string_view ident);
 
 enum class EGroupSelectionMode {
 	SelectableByRectangleOnly = 0,
@@ -724,6 +728,7 @@ public:
 	mutable std::shared_ptr<CAtlasGraphic> HDSprite;     /// HD base atlas (numeric frame names)
 	mutable std::shared_ptr<CAtlasGraphic> HDSpriteTeam; /// HD team-colour mask atlas (optional)
 	mutable bool HDSpriteTried = false;                  /// true once the HD load has been attempted
+	mutable std::string HDSpriteFile;                    /// the File the attempt was made for (HD-ART-STALE-TILESET)
 	mutable std::string HDSpritePrefix;                  /// native Remastered atlas frame prefix (e.g.
 	                                                     /// "grunt"); empty => numeric frame names (legacy .hdatlas)
 };
@@ -857,6 +862,12 @@ NewUnitTypeSlot(std::string_view ident); /// Allocate an empty unit-type slot
 /// Draw the sprite frame of unit-type
 // NG21: HD construction scaffold atlas for a building (see the definition for why the biome comes
 // from the building's own roster entry). Returns null when the building has no HD entry.
+/// NG82: the per-tileset common atlas carrying a flying unit's ground shadow. Null whenever the
+/// shadow cannot be resolved; every such exit is reported once. The SIZE is not returned: the
+/// original gives every flying unit the same shadow (AMEND B), so it is a single constant at the
+/// draw site rather than something derived per unit.
+extern std::shared_ptr<CAtlasGraphic> GetHDShadowAtlas(const CUnitType &type);
+
 extern std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building,
 														  std::string &outPrefix);
 
@@ -866,6 +877,7 @@ extern void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite,
 extern void InitUnitTypes(int reset_player_stats);   /// Init unit-type table
 extern void LoadUnitTypeSprite(CUnitType &unittype); /// Load the sprite for a unittype
 extern void LoadUnitTypes();                     /// Load the unit-type data
+extern void PreloadHDArtForMap();                /// STUTTER-FIRST-DRAW-LOAD: the map's HD atlases, at load time
 extern void CleanUnitTypes();                    /// Cleanup unit-type module
 
 // in script_unittype.c

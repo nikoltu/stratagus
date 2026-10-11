@@ -35,12 +35,14 @@
 
 #include "online_service.h"
 #include "stratagus.h"
+#include "launcher_bridge.h"
 
 #include "actions.h"
 #include "debug_bridge.h"
 #include "editor.h"
 #include "fow.h"
 #include "game.h"
+#include "launchresult.h"
 #include "map.h"
 #include "missile.h"
 #include "network.h"
@@ -275,12 +277,16 @@ void UpdateDisplay()
 					}
 				}
 
-				// Map interior holds transient overlay content only when messages are shown or
-				// a drag-select box is active. Clear it this frame if either is true now or was
-				// last frame (so the frame after the content vanishes erases it once).
+				// IG5: a guichan menu (the in-game Game Menu, its dialogs, tooltips) paints into the
+				// CPU overlay INSIDE the map interior. The interior clear used to be gated on
+				// messages / drag-rectangle only, so the frame a menu stopped drawing nothing erased
+				// its last image: the panel stayed on screen for good while the game ran on
+				// underneath, invisible. This branch is only reached when the overlay WAS written
+				// last frame, so clearing the interior here is both necessary and self-limiting --
+				// a resting in-game frame still takes the skip path above and pays nothing.
 				const bool messagesVisible = AreMessagesShown();
 				const bool cursorRectangle = CursorState == CursorStates::Rectangle;
-				if (messagesVisible || cursorRectangle || mapDirtyLastFrame) {
+				{
 					SDL_Rect r{mapX, mapY, mapEndX - mapX, mapEndY - mapY};
 					SDL_FillRect(TheScreen, &r, 0);
 				}
@@ -305,6 +311,12 @@ void UpdateDisplay()
 		GpuHudDrawActive = true;
 		// TODO: for e.g. environmental effects, we want to push to the renderer here with appropriate shaders set,
 		// then do the rest.
+		// NG14/NG36: the objectives block and the transient message list share the map's top-left corner
+		// (messages at UI.MapArea.X+8, UI.MapArea.Y+8; objectives at the authored 849,126). The objectives
+		// used to be drawn later, in the HUD-panel pass, which painted over every message -- a refusal like
+		// "Not enough resources to build X" could never be read. Objectives are persistent and messages are
+		// transient, so the persistent block goes down first and the message list wins the overlap.
+		DrawObjectives();
 		DrawMessages();
 
 		if (CursorState == CursorStates::Rectangle) {
@@ -349,11 +361,14 @@ void UpdateDisplay()
 			UI.StatusLine.Draw();
 			UI.StatusLine.DrawCosts();
 			UI.ButtonPanel.Draw();
-			DrawObjectives();
 			FrameProfEnd(FP_HUD_PANELS);
 		}
 
 		DrawTimer();
+		DrawNetWaitPlate();
+		// TOUCH-R1: the group strip, over the map view. In the HUD pass, so that its plates and
+		// its text both go to the GPU backbuffer in draw order and the CPU overlay stays clean.
+		DrawTouchGroupStrip();
 	}
 
 	// End of the in-game HUD text: guichan widgets/menus/tooltips below draw into the CPU
@@ -481,7 +496,8 @@ static void RunOneGameCycle()
 
 	if (Preference.AutosaveMinutes != 0 && !IsNetworkGame() && !IsReplayGame() && GameCycle > 0 && (GameCycle % (CYCLES_PER_SECOND * 60 * Preference.AutosaveMinutes)) == 0) { // autosave every X minutes (default is 5), if the option is enabled
 	//Wyrmgus end
-		UI.StatusLine.Set(_("Autosave"));
+		// No text for an automatic save: the original has no status strip, and the line was
+		// drawn half below the surface under the message line.
 		SaveGame("autosave.sav");
 	}
 }
@@ -501,6 +517,7 @@ static void PerFrameHousekeeping()
 	if (!NetworkInSync) {
 		NetworkRecover(); // recover network
 	}
+	NetworkWaitFrame(); // the scripts follow the wait of a network game
 
 #ifdef HAVE_COZ_PROFILER
 	COZ_PROGRESS_NAMED("GameLogicLoop")
@@ -554,11 +571,37 @@ static void DisplayLoop()
 	FrameProfEndFrame();
 }
 
+void LauncherShowLastGameFrame()
+{
+	if (!LauncherHosted()) {
+		return;
+	}
+	// The display draws the game only while it runs; it has just stopped, with its units and
+	// map still in place.
+	const bool running = GameRunning;
+	GameRunning = true;
+	UpdateDisplay();
+	RealizeVideoMemory();
+	GameRunning = running;
+
+	LauncherPollCommand();
+	LauncherPost(LauncherMsgGameEnded, 0);
+	// The host answers when it has its copy (or wants none); it is not waited for long.
+	for (int i = 0; i < 100; ++i) {
+		if (LauncherPollCommand() == LauncherCmdFrameTaken) {
+			break;
+		}
+		SDL_Delay(10);
+	}
+}
+
 static void SingleGameLoop()
 {
-	const double period = 1000.0 / (double)CYCLES_PER_SECOND;
+	extern double GameCycleRate; // game.cpp: the Game Speed setting, in cycles per second
 	long lastTicks = (long)SDL_GetTicks();
 	while (GameRunning) {
+		// The cycle length follows the Game Speed setting (it may change while the game runs).
+		const double period = 1000.0 / (GameCycleRate > 1.0 ? GameCycleRate : (double)CYCLES_PER_SECOND);
 		// Replay fast-forward / seek: advance cycles at max speed with no time throttle.
 		// DisplayLoop and WaitEventsOneFrame are internally gated to every 256th cycle here.
 		if (FastForwardCycle > GameCycle && !GamePaused && NetworkInSync) {
@@ -587,6 +630,14 @@ static void SingleGameLoop()
 				LogicAccumulatorMs -= period;
 				++guard;
 				if (FastForwardCycle > GameCycle) { break; }
+				// LAN-MESH S2: a cycle may leave the network game waiting for another device
+				// (NetworkInSync false). The rest of the catch-up must not run then: it was tested
+				// once per frame, and up to nine further cycles ran without the others
+				// (work/agent-lan-mesh/LAN_MESH_SPEC.md, step S2). Always true in a single-player game.
+				if (!NetworkInSync) {
+					LogicAccumulatorMs = 0.0;
+					break;
+				}
 			}
 		} else {
 			LogicAccumulatorMs = 0.0;   // paused / out of sync: no interpolation drift
@@ -622,6 +673,7 @@ void GameMainLoop(bool clean)
 		GameCycle = 0;
 	}
 	GameRunning = true;
+	ClearNetWaitPlate();
 
 	CParticleManager::init();
 
@@ -630,6 +682,9 @@ void GameMainLoop(bool clean)
 	long ticks = SDL_GetTicks();
 
 	MultiPlayerReplayEachCycle();
+
+	// LAN-MESH S8: the load is done here. A mesh game is held until every device has said so.
+	NetworkGameLoaded();
 
 	SingleGameLoop();
 
@@ -640,12 +695,15 @@ void GameMainLoop(bool clean)
 		OnlineContextHandler->reportGameResult();
 	}
 
+	// LAN-MESH S9: the others are told before anything of the game is taken down. Exit() sets
+	// the cycle to 0 before its own call, which gave the quit a cycle long past.
+	NetworkQuitGame();
+
 	if (GameResult == GameExit) {
 		Exit(0);
 		return;
 	}
 
-	NetworkQuitGame();
 	EndReplayLog();
 
 	if (Parameters::Instance.benchmark) {
@@ -659,6 +717,7 @@ void GameMainLoop(bool clean)
 		           GameCycle);
 	}
 
+	LastGameCycle = GameCycle;
 	GameCycle = 0;
 	CParticleManager::exit();
 	FlagRevealMap = MapRevealModes::cHidden;

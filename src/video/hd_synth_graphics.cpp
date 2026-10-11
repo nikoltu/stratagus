@@ -28,7 +28,9 @@
 //   ICON  = Data/Art/hd/HUD/Portrait-face.{png,json}, frame "forest_<N>" (N == classic slot 0..195).
 //   FRAME = Data/skins/Modern_HUD_Widgets.{png,json}, sprite "portrait_button[_hovered|_active|
 //           _highlight|_highlight_hovered|_highlight_active]" (80x80). Oracle skin modern_portrait_button:
-//           9-slice [25,25,25,25], scale 5. Cell 150x124, icon inset 18 (-> 114x88), per 2026-07 bake.
+//           9-slice [25,25,25,25], scale 5, padding [4,4]. The sprites are kept whole; the nine-slice
+//           is done at draw time at the HUD's scale (ui/icons.cpp DrawHDCommandFrame).
+//   MASK  = Data/Art/hd/HUD/Portrait-mask.{png,json}, frame "forest_<N>_team": grey, 0 = not team.
 
 #include "stratagus.h"
 
@@ -82,15 +84,6 @@ void CopyScaled(SDL_Surface *src, SDL_Rect srcR, SDL_Surface *dst, SDL_Rect dstR
 	}
 	SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);
 	SDL_BlitScaled(src, &srcR, dst, &dstR);
-}
-
-/// Read the alpha of one pixel of an RGBA32 surface (surface must be locked by the caller).
-Uint8 PixelAlpha(SDL_Surface *s, int x, int y)
-{
-	const Uint32 *row = reinterpret_cast<const Uint32 *>(static_cast<Uint8 *>(s->pixels) + y * s->pitch);
-	Uint8 r, g, b, a;
-	SDL_GetRGBA(row[x], s->format, &r, &g, &b, &a);
-	return a;
 }
 
 /// Load a Remastered TexturePacker atlas (mirrors CAtlasGraphic::LoadTexturePacker, but keeps the
@@ -197,77 +190,20 @@ SDL_Surface *CropFrame(const Atlas &atlas, const std::string &name)
 	return dst;
 }
 
-/// Opaque bounding box of a surface (alpha > 12); returns the full rect if fully transparent.
-SDL_Rect OpaqueBBox(SDL_Surface *s)
-{
-	SDL_LockSurface(s);
-	int minx = s->w, miny = s->h, maxx = -1, maxy = -1;
-	for (int y = 0; y < s->h; ++y) {
-		for (int x = 0; x < s->w; ++x) {
-			if (PixelAlpha(s, x, y) > 12) {
-				if (x < minx) minx = x;
-				if (y < miny) miny = y;
-				if (x > maxx) maxx = x;
-				if (y > maxy) maxy = y;
-			}
-		}
-	}
-	SDL_UnlockSurface(s);
-	if (maxx < 0) {
-		return SDL_Rect{0, 0, s->w, s->h};
-	}
-	return SDL_Rect{minx, miny, maxx - minx + 1, maxy - miny + 1};
-}
-
-/// Source corner size of a raised ring: walk in from the left along the vertical centre until the
-/// ring turns transparent (its hollow middle). Mirrors build_hd_icons.py load_frame().
-int MeasureRim(SDL_Surface *ring)
-{
-	SDL_LockSurface(ring);
-	const int cy = ring->h / 2;
-	int rim = 0;
-	while (rim < ring->w && PixelAlpha(ring, rim, cy) > 40) {
-		++rim;
-	}
-	SDL_UnlockSurface(ring);
-	if (rim < 4) {
-		rim = 4;
-	}
-	if (rim > ring->w / 2) {
-		rim = ring->w / 2;
-	}
-	if (rim > ring->h / 2) {
-		rim = ring->h / 2;
-	}
-	return rim;
-}
-
-/// 9-slice `ring` (corner = `rim`) into a `outW x outH` cell of `dst` at (ox,oy), output corner `bo`.
-void NineSlice(SDL_Surface *ring, int rim, SDL_Surface *dst, int ox, int oy, int outW, int outH, int bo)
-{
-	const int sw = ring->w, sh = ring->h;
-	auto blit = [&](int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int dx1, int dy1) {
-		CopyScaled(ring, SDL_Rect{sx0, sy0, sx1 - sx0, sy1 - sy0}, dst,
-		           SDL_Rect{ox + dx0, oy + dy0, dx1 - dx0, dy1 - dy0});
-	};
-	// corners (1:1-ish; scaled rim->bo)
-	blit(0, 0, rim, rim, 0, 0, bo, bo);
-	blit(sw - rim, 0, sw, rim, outW - bo, 0, outW, bo);
-	blit(0, sh - rim, rim, sh, 0, outH - bo, bo, outH);
-	blit(sw - rim, sh - rim, sw, sh, outW - bo, outH - bo, outW, outH);
-	// edges
-	blit(rim, 0, sw - rim, rim, bo, 0, outW - bo, bo);                   // top
-	blit(rim, sh - rim, sw - rim, sh, bo, outH - bo, outW - bo, outH);   // bottom
-	blit(0, rim, rim, sh - rim, 0, bo, bo, outH - bo);                   // left
-	blit(sw - rim, rim, sw, sh - rim, outW - bo, bo, outW, outH - bo);   // right
-	// centre
-	blit(rim, rim, sw - rim, sh - rim, bo, bo, outW - bo, outH - bo);
-}
-
 } // namespace
 
-SDL_Surface *BuildHDIconStrip()
+static bool IconStripHasTeamKey = false;
+
+bool HDIconStripHasTeamKey()
 {
+	return IconStripHasTeamKey;
+}
+
+SDL_Surface *BuildHDIconStrip(const char *set)
+{
+	// `set` is the frame-name prefix of the tileset's portrait set: forest / ice / swamp / xswamp.
+	const std::string setName = (set && *set) ? set : "forest";
+	IconStripHasTeamKey = false;
 	Atlas atlas;
 	if (!LoadAtlas("Data/Art/hd/HUD/Portrait-face.json", atlas)) {
 		return nullptr;
@@ -276,23 +212,69 @@ SDL_Surface *BuildHDIconStrip()
 	if (!strip) {
 		return nullptr;
 	}
-	const int innerW = hdicon::CELL_W - 2 * hdicon::ICON_INSET;
-	const int innerH = hdicon::CELL_H - 2 * hdicon::ICON_INSET;
+	// M666-9: the game's own team mask. A frame of it is grey where the picture takes the player's
+	// colour (0 elsewhere); the original's portrait is colour * grey / 255 there (fit on captures
+	// hi10 and e01 of work/agent-orig-scenes, work/agent-fix-hudrest/tools/m9_teamcolour.py:
+	// residual 2..3 levels).
+	Atlas mask;
+	const bool haveMask = LoadAtlas("Data/Art/hd/HUD/Portrait-mask.json", mask);
+	SDL_Surface *cell = haveMask ? NewRGBA(hdicon::CELL_W, hdicon::CELL_H) : nullptr;
 	int placed = 0;
 	for (int n = 0; n < hdicon::SLOTS; ++n) {
-		const std::string key = "forest_" + std::to_string(n);
+		std::string key = setName + "_" + std::to_string(n);
 		auto it = atlas.frames.find(key);
+		if (it == atlas.frames.end()) {
+			key = "forest_" + std::to_string(n);       // a slot the set lacks: the forest picture
+			it = atlas.frames.find(key);
+		}
 		if (it == atlas.frames.end()) {
 			continue; // missing slot -> leave transparent (matches bake's missing handling)
 		}
-		CopyScaled(atlas.surface, it->second, strip,
-		           SDL_Rect{hdicon::ICON_INSET, n * hdicon::CELL_H + hdicon::ICON_INSET, innerW, innerH});
+		// M666-2: the picture fills its cell. It was seated 18 px in (114 x 88) and the whole cell,
+		// margin included, was then stretched over the button, which made the picture 0.83..0.88 of
+		// the original's size. The frame is a separate graphic and is drawn around the picture.
+		const SDL_Rect dst{0, n * hdicon::CELL_H, hdicon::CELL_W, hdicon::CELL_H};
+		CopyScaled(atlas.surface, it->second, strip, dst);
 		++placed;
+		if (!cell) {
+			continue;
+		}
+		// The key: (v, 0, v) with v = the mask's grey. A picture pixel that happens to have that
+		// form outside the team region gets g = 1, so the key is exact. Mask and picture frames
+		// have one size and are scaled by one routine to one size, so they sample the same pixels.
+		const auto mt = mask.frames.find(key + "_team");
+		const bool teamed = mt != mask.frames.end() && mt->second.w == it->second.w
+		                    && mt->second.h == it->second.h;
+		if (teamed) {
+			CopyScaled(mask.surface, mt->second, cell, SDL_Rect{0, 0, hdicon::CELL_W, hdicon::CELL_H});
+		}
+		SDL_LockSurface(strip);
+		SDL_LockSurface(cell);
+		for (int y = 0; y < hdicon::CELL_H; ++y) {
+			Uint8 *p = static_cast<Uint8 *>(strip->pixels) + (dst.y + y) * strip->pitch;
+			const Uint8 *m = static_cast<const Uint8 *>(cell->pixels) + y * cell->pitch;
+			for (int x = 0; x < hdicon::CELL_W; ++x, p += 4, m += 4) {
+				// RGBA32: the bytes are R, G, B, A
+				if (teamed && m[0] > 0) {
+					p[0] = m[0];
+					p[1] = 0;
+					p[2] = m[0];
+				} else if (p[1] == 0 && p[0] == p[2] && p[0] > 0) {
+					p[1] = 1;
+				}
+			}
+		}
+		SDL_UnlockSurface(cell);
+		SDL_UnlockSurface(strip);
+	}
+	if (cell) {
+		SDL_FreeSurface(cell);
 	}
 	if (!placed) {
 		SDL_FreeSurface(strip);
 		return nullptr;
 	}
+	IconStripHasTeamKey = haveMask;
 	return strip;
 }
 
@@ -311,34 +293,26 @@ SDL_Surface *BuildHDCommandFrameStrip()
 	    "portrait_button_highlight_hovered",
 	    "portrait_button_highlight_active",
 	};
-	SDL_Surface *strip = NewRGBA(hdicon::CELL_W, hdicon::CELL_H * hdicon::FRAME_STATES);
+	// M666-2: the sprites go in whole, at their own size. They were trimmed to their opaque box
+	// first, which is a different box per state -- 70 x 74 for the plain frame (its drop shadow
+	// counts), 80 x 80 for the hovered and pressed ones (their glow fills the rim) -- and then
+	// nine-sliced to an 18-px ring in a 150 x 124 cell: a ring twice the original's 9 px at k = 3.
+	SDL_Surface *strip = NewRGBA(hdicon::FRAME_PX, hdicon::FRAME_PX * hdicon::FRAME_STATES);
 	if (!strip) {
 		return nullptr;
 	}
 	int built = 0;
 	for (int i = 0; i < hdicon::FRAME_STATES; ++i) {
-		std::string name = kStates[i];
-		if (atlas.frames.find(name) == atlas.frames.end()) {
-			name = kStates[0]; // fall back to the default frame if a state is absent
+		auto it = atlas.frames.find(kStates[i]);
+		if (it == atlas.frames.end()) {
+			it = atlas.frames.find(kStates[0]); // fall back to the default frame if a state is absent
 		}
-		SDL_Surface *raw = CropFrame(atlas, name);
-		if (!raw) {
+		if (it == atlas.frames.end()) {
 			continue;
 		}
-		// Trim the transparent outer margin, then measure the raised rim, then 9-slice to the cell.
-		const SDL_Rect bb = OpaqueBBox(raw);
-		SDL_Surface *ring = NewRGBA(bb.w, bb.h);
-		if (ring) {
-			SDL_Rect src = bb, d = {0, 0, bb.w, bb.h};
-			SDL_SetSurfaceBlendMode(raw, SDL_BLENDMODE_NONE);
-			SDL_BlitSurface(raw, &src, ring, &d);
-			const int rim = MeasureRim(ring);
-			NineSlice(ring, rim, strip, 0, i * hdicon::CELL_H, hdicon::CELL_W, hdicon::CELL_H,
-			          hdicon::ICON_INSET);
-			SDL_FreeSurface(ring);
-			++built;
-		}
-		SDL_FreeSurface(raw);
+		CopyScaled(atlas.surface, it->second, strip,
+		           SDL_Rect{0, i * hdicon::FRAME_PX, hdicon::FRAME_PX, hdicon::FRAME_PX});
+		++built;
 	}
 	if (!built) {
 		SDL_FreeSurface(strip);
@@ -357,7 +331,13 @@ SDL_Surface *BuildHDSidebarPanel(const char *race, const char *frameName)
 	return CropFrame(atlas, frameName);
 }
 
-SDL_Surface *BuildHDHudF5Strip(int cellW, int cellH)
+/**
+**  The F5 menu button's three states. Each is the atlas' empty button frame (f5, f5_hovered,
+**  f5_active; 200x100) with the race's inset -- the "F5" mark and the race's figure
+**  (f5_inset_<race>; 180x80) -- laid over its middle. The frame alone is what was shown before:
+**  an empty framed slot at the head of the side bar.
+*/
+SDL_Surface *BuildHDHudF5Strip(const char *race, int cellW, int cellH)
 {
 	Atlas atlas;
 	if (!LoadAtlas("Data/skins/Modern_HUD_Widgets.json", atlas)) {
@@ -376,6 +356,17 @@ SDL_Surface *BuildHDHudF5Strip(int cellW, int cellH)
 		}
 		CopyScaled(atlas.surface, it->second, strip, SDL_Rect{0, i * cellH, cellW, cellH});
 		++built;
+		const auto inset = atlas.frames.find(std::string("f5_inset_") + race);
+		if (inset != atlas.frames.end() && it->second.w > 0 && it->second.h > 0) {
+			// centred in the frame, at the frame's own scale, blended over it
+			SDL_Rect src = inset->second;
+			const int w = src.w * cellW / it->second.w;
+			const int h = src.h * cellH / it->second.h;
+			SDL_Rect dst{(cellW - w) / 2, i * cellH + (cellH - h) / 2, w, h};
+			SDL_SetSurfaceBlendMode(atlas.surface, SDL_BLENDMODE_BLEND);
+			SDL_BlitScaled(atlas.surface, &src, strip, &dst);
+			SDL_SetSurfaceBlendMode(atlas.surface, SDL_BLENDMODE_NONE);
+		}
 	}
 	if (!built) {
 		SDL_FreeSurface(strip);
@@ -409,6 +400,24 @@ SDL_Surface *BuildHDHudSmallButton(const char *race, bool pressed, int cellW, in
 		return nullptr;
 	}
 	CopyScaled(atlas.surface, it->second, out, SDL_Rect{0, 0, cellW, cellH});
+	return out;
+}
+
+SDL_Surface *BuildHDHudCompleteBar(int w, int h)
+{
+	Atlas atlas;
+	if (!LoadAtlas("Data/skins/Modern_HUD_Widgets.json", atlas)) {
+		return nullptr;
+	}
+	auto it = atlas.frames.find("complete_bar");
+	if (it == atlas.frames.end() || w <= 0 || h <= 0) {
+		return nullptr;
+	}
+	SDL_Surface *out = NewRGBA(w, h);
+	if (!out) {
+		return nullptr;
+	}
+	CopyScaled(atlas.surface, it->second, out, SDL_Rect{0, 0, w, h});
 	return out;
 }
 

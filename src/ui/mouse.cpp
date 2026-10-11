@@ -57,12 +57,15 @@
 #include "ui.h"
 #include "unit.h"
 #include "unit_find.h"
+#include "unit_manager.h"
 #include "unitsound.h"
 #include "unittype.h"
 #include "video.h"
 #include "widgets.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <guisan/actionevent.hpp>
 #include <stdexcept>
 
@@ -100,6 +103,7 @@ CUnit *GetUnitUnderCursor()
 void CancelBuildingMode()
 {
 	CursorBuilding = nullptr;
+	ResetBuildingPreview();
 	UI.StatusLine.Clear();
 	UI.StatusLine.ClearCosts();
 	CurrentButtonLevel = 0;
@@ -873,11 +877,14 @@ static void HandleMouseOn(const PixelPos screenPos)
 				return;
 			}
 		} else {
-			const size_t size = UI.SelectedButtons.size();
+			// PANEL-A: the cells as they are drawn (3 or 4 columns); an empty cell is no button.
+			// ButtonUnderCursor is the CELL's number.
+			const std::vector<CUnit *> &cells = GetSelectionCells();
+			const std::vector<CUIButton> &cellButtons = GetSelectionCellButtons(cells.size());
 
-			for (size_t i = std::min(Selected.size(), size); i != 0;) {
+			for (size_t i = std::min(cells.size(), cellButtons.size()); i != 0;) {
 				--i;
-				if (UI.SelectedButtons[i].Contains(screenPos)) {
+				if (cells[i] != nullptr && cellButtons[i].Contains(screenPos)) {
 					ButtonAreaUnderCursor = ButtonArea::Selected;
 					ButtonUnderCursor = i;
 					CursorOn = ECursorOn::Button;
@@ -907,15 +914,26 @@ static void HandleMouseOn(const PixelPos screenPos)
 	if (!on_ui && UI.MapArea.Contains(screenPos)) {
 		CViewport *vp = GetViewport(screenPos);
 		Assert(vp);
-		// viewport changed
-		if (UI.MouseViewport != vp) {
-			UI.MouseViewport = vp;
-			DebugPrint("current viewport changed to %ld.\n",
-			           static_cast<long int>(vp - UI.Viewports));
-		}
+		// NG77: `CursorOn == Map` is an invariant meaning UI.MouseViewport is valid --
+		// UIHandleMouseMove dereferences it on exactly that basis (the IsInsideMapArea test).
+		// The Assert above says so, but a release build asserts nothing, and GetViewport returns
+		// null whenever no viewport covers the point: the viewports are not built yet (a pointer
+		// event reaching the game loop while StartMap is still bringing the map up), or the point
+		// falls in a gap between UI.MapArea and the viewport rects. That crashed the app with
+		// SIGSEGV at faultAddr 0. Keep the invariant instead: no viewport, no Map.
+		if (vp == nullptr) {
+			CursorOn = ECursorOn::Unknown;
+		} else {
+			// viewport changed
+			if (UI.MouseViewport != vp) {
+				UI.MouseViewport = vp;
+				DebugPrint("current viewport changed to %ld.\n",
+				           static_cast<long int>(vp - UI.Viewports));
+			}
 
-		// Note cursor on map can be in scroll area
-		CursorOn = ECursorOn::Map;
+			// Note cursor on map can be in scroll area
+			CursorOn = ECursorOn::Map;
+		}
 	} else {
 		CursorOn = ECursorOn::Unknown;
 	}
@@ -950,6 +968,23 @@ void HandleMouseExit()
 }
 
 /**
+**  A touch ended while the pointer stood on a HUD button: nothing is under a finger any more,
+**  so the button is no longer lit and its popup is no longer drawn (the button panel draws
+**  both from ButtonAreaUnderCursor / ButtonUnderCursor). The cursor itself stays where it is:
+**  in game it is drawn and it drives build placement. The next finger-down sends a motion and
+**  HandleMouseOn sets the state again.
+*/
+void UIClearButtonHover()
+{
+	if (CursorOn != ECursorOn::Button) {
+		return;
+	}
+	ButtonAreaUnderCursor.reset();
+	ButtonUnderCursor = -1;
+	CursorOn = ECursorOn::Unknown;
+}
+
+/**
 **  Restrict mouse cursor to viewport.
 */
 void RestrictCursorToViewport()
@@ -969,6 +1004,106 @@ void RestrictCursorToMinimap()
 
 	UI.MouseWarpPos = CursorStartScreenPos = CursorScreenPos;
 	CursorOn = ECursorOn::Minimap;
+}
+
+//.............................................................................
+//  Touch routes (owner decision 2026-10-08). The original has no touch input.
+
+/**
+**  TOUCH-R2: a hold on the map has given (or is about to give) an order. May the same finger
+**  go on to queue waypoints? Only when that hold is a plain right-click order of own units:
+**  not while a target or a building place is being chosen (there the hold cancels), not on
+**  the HUD, the minimap or a scroll edge, not for an observer, not while paused.
+**  Read for the pointer's present place, so the caller moves the pointer first.
+*/
+bool UITouchOrderChainAllowed()
+{
+	return GameRunning && !GameObserve && !GamePaused && !GameEstablishing
+		   && CursorState == CursorStates::Point && CursorBuilding == nullptr
+		   && CursorOn == ECursorOn::Map && UI.MouseViewport != nullptr
+		   && UI.MouseViewport->IsInsideMapArea(CursorScreenPos)
+		   && !Selected.empty() && CanSelectMultipleUnits(*Selected[0]->Player);
+}
+
+/**
+**  TOUCH-R5: may a tap-then-drag add its box to the selection? Only where a drag draws a
+**  selection box at all: in pointer mode. An empty selection is allowed (the box then
+**  simply selects).
+*/
+bool UITouchAddBoxAllowed()
+{
+	return GameRunning && !GameEstablishing
+		   && CursorState == CursorStates::Point && CursorBuilding == nullptr;
+}
+
+// TOUCH-ADD-BOX: a click on empty ground clears the selection (the original's behaviour),
+// and the first tap of a tap-then-drag is such a click. What it cleared is kept here for a
+// second so that the box of the pair is added to it, as TOUCH-R5 says.
+static std::vector<int> TouchClearedUnits;       /// unit numbers of the own selection just cleared
+static unsigned long TouchClearedTicks = 0;      /// when
+
+static void TouchRememberClearedSelection()
+{
+	TouchClearedUnits.clear();
+	if (Selected.empty() || Selected[0]->Player != ThisPlayer) {
+		return;
+	}
+	for (const CUnit *unit : Selected) {
+		TouchClearedUnits.push_back(UnitNumber(*unit));
+	}
+	TouchClearedTicks = GetTicks();
+}
+
+void UITouchRestoreClearedSelection()
+{
+	if (TouchClearedUnits.empty()) {
+		return;
+	}
+	if (Selected.empty() && GetTicks() - TouchClearedTicks <= 1000) {
+		for (const int number : TouchClearedUnits) {
+			CUnit &unit = UnitManager->GetSlotUnit(number);
+			if (!unit.IsAliveOnMap() || unit.Player != ThisPlayer) {
+				continue;
+			}
+			if (Selected.empty()) {
+				SelectSingleUnit(unit);
+			} else {
+				SelectUnit(unit);
+			}
+		}
+		if (!Selected.empty()) {
+			NetworkSendSelection(&Selected[0], Selected.size());
+			SelectionChanged();
+		}
+	}
+	TouchClearedUnits.clear();
+}
+
+// TOUCH-R7 (option B): the press of a finger in placement mode only takes hold of the
+// preview; what it was is known at the release.
+static bool TouchPlacePressed = false;   /// left button went down on the map in placement mode
+static bool TouchPlaceOnPreview = false; /// ... on the preview itself
+static bool TouchPlaceDragged = false;   /// the pointer moved before the release: a drag, not a tap
+static PixelPos TouchPlaceGrab(0, 0);    /// finger minus the preview's top-left corner, in map pixels; kept while dragging
+
+/**
+**  TOUCH-R7: top-left tile of the preview for a finger at a screen point that holds the
+**  building at TouchPlaceGrab. Owner decision 2026-10-08, Q4 = B: the finger marks the
+**  middle of the building, and a drag keeps the grabbed point. The corner is rounded to the
+**  nearest tile; the footprint is kept inside the map.
+**
+**  @param vp         viewport the finger is on.
+**  @param screenPos  the finger.
+*/
+static Vec2i TouchPlacementTile(const CViewport &vp, const PixelPos &screenPos)
+{
+	const PixelPos corner = vp.ScreenToMapPixelPos(screenPos) - TouchPlaceGrab;
+	int tx = static_cast<int>(std::floor(static_cast<double>(corner.x) / PixelTileSize.x + 0.5));
+	int ty = static_cast<int>(std::floor(static_cast<double>(corner.y) / PixelTileSize.y + 0.5));
+
+	tx = std::max(0, std::min(tx, static_cast<int>(Map.Info.MapWidth) - CursorBuilding->TileWidth));
+	ty = std::max(0, std::min(ty, static_cast<int>(Map.Info.MapHeight) - CursorBuilding->TileHeight));
+	return Vec2i(tx, ty);
 }
 
 /**
@@ -999,6 +1134,12 @@ void UIHandleMouseMove(const PixelPos &cursorPos)
 		void ActionDraw();
 		ActionDraw();
 		return;
+	}
+
+	if (TouchPlacePressed) {
+		// TOUCH-R7: a tap sends its press and release with no pointer motion between them
+		// (video/sdl.cpp FlushPendingTouchClick); any motion while pressed makes it a drag.
+		TouchPlaceDragged = true;
 	}
 
 	OldCursorOn = CursorOn;
@@ -1051,6 +1192,11 @@ void UIHandleMouseMove(const PixelPos &cursorPos)
 	if (CursorOn == ECursorOn::Map && UI.MouseViewport->IsInsideMapArea(CursorScreenPos)) {
 		const CViewport &vp = *UI.MouseViewport;
 		const Vec2i tilePos = vp.ScreenToTilePos(cursorPos);
+
+		if (TouchPlacePressed && CursorBuilding && (MouseButtons & LeftButton)) {
+			// TOUCH-R7: the preview goes with the dragging finger, held at the grabbed point.
+			SetBuildingPreviewTile(vp, TouchPlacementTile(vp, cursorPos));
+		}
 
 		try {
 			if (CursorBuilding && (MouseButtons & LeftButton) && Selected.at(0)
@@ -1551,11 +1697,14 @@ static void DoSelectionButtons(int num, unsigned)
 		return;
 	}
 
-	if (static_cast<size_t>(num) >= Selected.size() || !(MouseButtons & LeftButton)) {
+	// PANEL-A: `num` is a cell of the selection grid
+	const std::vector<CUnit *> &cells = GetSelectionCells();
+	if (static_cast<size_t>(num) >= cells.size() || cells[num] == nullptr
+		|| !(MouseButtons & LeftButton)) {
 		return;
 	}
 
-	CUnit &unit = *Selected[num];
+	CUnit &unit = *cells[num];
 
 	if ((KeyModifiers & ModifierControl) || (MouseButtons & (LeftButton << MouseDoubleShift))) {
 		if (KeyModifiers & ModifierShift) {
@@ -1656,11 +1805,14 @@ static void UISelectStateButtonDown(unsigned)
 			}
 			int num = ButtonUnderCursor;
 
-			if (static_cast<size_t>(num) >= Selected.size() || !(MouseButtons & LeftButton)) {
+			// PANEL-A: `num` is a cell of the selection grid
+			const std::vector<CUnit *> &cells = GetSelectionCells();
+			if (static_cast<size_t>(num) >= cells.size() || cells[num] == nullptr
+				|| !(MouseButtons & LeftButton)) {
 				return;
 			}
 
-			CUnit &unit = *Selected[num];
+			CUnit &unit = *cells[num];
 
 			const Vec2i tilePos = unit.tilePos;
 			UnitUnderCursor = &unit;
@@ -1686,6 +1838,80 @@ static void UISelectStateButtonDown(unsigned)
 }
 
 
+/**
+**  Place the building of the placement mode on a tile (the body of a placing click).
+**
+**  @param tilePos  top-left tile of the building.
+*/
+static void PlaceBuildingAt(const Vec2i &tilePos)
+{
+	bool explored = CanBuildOnArea(*Selected[0], tilePos);
+
+	// 0 Test build, don't really build
+	if (CanBuildUnitType(Selected[0], *CursorBuilding, tilePos, 0) && (explored || ReplayRevealMap)) {
+		const EFlushMode flush =
+			!(KeyModifiers & ModifierShift) ? EFlushMode::On : EFlushMode::Off;
+		PlayGameSound(GameSounds.PlacementSuccess[ThisPlayer->Race].Sound.get(), MaxSampleVolume);
+		PlayUnitSound(*Selected[0], EUnitVoice::Build);
+		for (CUnit *unit : Selected) {
+			SendCommandBuildBuilding(*unit, tilePos, *CursorBuilding, flush);
+		}
+		if (!(KeyModifiers & (ModifierAlt | ModifierShift))) {
+			CancelBuildingMode();
+		}
+	} else {
+		PlayGameSound(GameSounds.PlacementError[ThisPlayer->Race].Sound.get(),
+		              MaxSampleVolume);
+	}
+}
+
+/**
+**  TOUCH-R7: the left button went down on the map in placement mode. On the preview: it is
+**  held at the touched point (a release without motion will place). Elsewhere: the preview
+**  goes there, its middle under the finger (Q4 = B).
+**
+**  @param screenPos  the pointer.
+*/
+static void TouchPlacementPress(const PixelPos &screenPos)
+{
+	const CViewport &vp = *UI.MouseViewport;
+	const Vec2i tilePos = vp.ScreenToTilePos(screenPos);
+	Vec2i preview;
+
+	TouchPlacePressed = true;
+	TouchPlaceDragged = false;
+	if (GetBuildingPreviewTile(vp, preview)
+		&& tilePos.x >= preview.x && tilePos.x < preview.x + CursorBuilding->TileWidth
+		&& tilePos.y >= preview.y && tilePos.y < preview.y + CursorBuilding->TileHeight) {
+		TouchPlaceOnPreview = true;
+		TouchPlaceGrab = vp.ScreenToMapPixelPos(screenPos) - Map.TilePosToMapPixelPos_TopLeft(preview);
+	} else {
+		TouchPlaceOnPreview = false;
+		// half the footprint, in map pixels: the middle of the building
+		TouchPlaceGrab = PixelPos(CursorBuilding->TileWidth * PixelTileSize.x / 2,
+		                          CursorBuilding->TileHeight * PixelTileSize.y / 2);
+		SetBuildingPreviewTile(vp, TouchPlacementTile(vp, screenPos));
+	}
+}
+
+/**
+**  TOUCH-R7: the left button came up after TouchPlacementPress. A tap on the preview places
+**  the building; a tap elsewhere and every drag have only moved the preview.
+*/
+static void TouchPlacementRelease()
+{
+	const bool confirm = TouchPlaceOnPreview && !TouchPlaceDragged;
+	Vec2i tilePos;
+
+	TouchPlacePressed = false;
+	TouchPlaceOnPreview = false;
+	TouchPlaceDragged = false;
+	if (confirm && CursorBuilding && !Selected.empty() && UI.MouseViewport
+		&& GetBuildingPreviewTile(*UI.MouseViewport, tilePos)) {
+		PlaceBuildingAt(tilePos);
+	}
+}
+
 static void UIHandleButtonDown_OnMap(unsigned button)
 {
 	Assert(UI.MouseViewport);
@@ -1702,23 +1928,12 @@ static void UIHandleButtonDown_OnMap(unsigned button)
 		if (Selected[0] && (MouseButtons & LeftButton)
 			&& UI.MouseViewport->IsInsideMapArea(CursorScreenPos)) {// enter select mode
 			const Vec2i tilePos = UI.MouseViewport->ScreenToTilePos(CursorScreenPos);
-			bool explored = CanBuildOnArea(*Selected[0], tilePos);
 
-			// 0 Test build, don't really build
-			if (CanBuildUnitType(Selected[0], *CursorBuilding, tilePos, 0) && (explored || ReplayRevealMap)) {
-				const EFlushMode flush =
-					!(KeyModifiers & ModifierShift) ? EFlushMode::On : EFlushMode::Off;
-				PlayGameSound(GameSounds.PlacementSuccess[ThisPlayer->Race].Sound.get(), MaxSampleVolume);
-				PlayUnitSound(*Selected[0], EUnitVoice::Build);
-				for (CUnit *unit : Selected) {
-					SendCommandBuildBuilding(*unit, tilePos, *CursorBuilding, flush);
-				}
-				if (!(KeyModifiers & (ModifierAlt | ModifierShift))) {
-					CancelBuildingMode();
-				}
+			if (UiTouchMode()) {
+				// TOUCH-R7: a finger's press does not place; see TouchPlacementRelease.
+				TouchPlacementPress(CursorScreenPos);
 			} else {
-				PlayGameSound(GameSounds.PlacementError[ThisPlayer->Race].Sound.get(),
-				              MaxSampleVolume);
+				PlaceBuildingAt(tilePos);
 			}
 		} else {
 			CancelBuildingMode();
@@ -1984,6 +2199,13 @@ void UIHandleButtonDown(unsigned button)
 */
 void UIHandleButtonUp(unsigned button)
 {
+	if (TouchPlacePressed && (1 << (button & 0xFF)) == LeftButton) {
+		// TOUCH-R7: the release that belongs to TouchPlacementPress, with or without the
+		// double-click bit (a double tap is "put the preview there", then "place").
+		TouchPlacementRelease();
+		return;
+	}
+
 	//
 	//  Move map.
 	//
@@ -2161,6 +2383,17 @@ void UIHandleButtonUp(unsigned button)
 				}
 			} else {
 				num = 0;
+				if (!Selected.empty()) {
+					// A left click on ground with no unit under it clears the selection: the
+					// original's own behaviour (its captures u0x of work/agent-orig-scenes, taken
+					// at a 2960x1848 client). The owner first chose a double tap for touch while
+					// this was unknown and changed it to the original's single click on
+					// 2026-10-08 (as UiUnselectAll).
+					TouchRememberClearedSelection();
+					UnSelectAll();
+					NetworkSendSelection((CUnit **)nullptr, 0);
+					SelectionChanged();
+				}
 			}
 		}
 
@@ -2188,7 +2421,13 @@ void UIHandleButtonUp(unsigned button)
 				} else {
 					PlayGameSound(GameSounds.Click.Sound.get(), MaxSampleVolume);
 				}
-				if (Selected[0]->Player == ThisPlayer) {
+				// M666-4: the original prints nothing at the bottom of the map view when a unit is
+				// selected -- no bright ink in rows 1640..1847 of ten 2960x1848 captures with one
+				// or more units selected (work/agent-orig-scenes/captures s01 i03 u02 u05 hs00 k24
+				// c25 b02 b03 t11; work/agent-fix-hudrest/tools, section M666-4 of HUDREST_READY).
+				// Preference.NoStatusLineTooltips is the HUD's existing "no hint line" switch
+				// (scripts/ui.lua, HUD-003); the classic line stays for a UI that keeps hints.
+				if (Selected[0]->Player == ThisPlayer && !Preference.NoStatusLineTooltips) {
 					char buf[64];
 					if (Selected[0]->Player->UnitTypesCount[Selected[0]->Type->Slot] > 1) {
 						snprintf(buf, sizeof(buf), _("You have ~<%d~> %ss"),

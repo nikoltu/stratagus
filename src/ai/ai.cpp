@@ -140,6 +140,7 @@
 #include "stratagus.h"
 
 #include "ai.h"
+#include "wc2ai.h"
 #include "ai_local.h"
 
 #include "actions.h"
@@ -411,6 +412,8 @@ void SaveAi(CFile &file)
 			SaveAiPlayer(file, i, *Players[i].Ai);
 		}
 	}
+	// What each player's original script has reached.
+	file.printf("%s", Wc2AiSaveText().c_str());
 
 	DebugPrint("FIXME: Saving lua function definition isn't supported\n");
 }
@@ -1008,6 +1011,8 @@ void AiResearchComplete(CUnit &unit, const CUpgrade *what)
 void AiEachCycle(CPlayer &player)
 {
 	AiPlayer = player.Ai.get();
+	// The original's script of this player, when the map named one: it advances every cycle.
+	Wc2AiCycle(player.Index);
 }
 
 /**
@@ -1024,8 +1029,11 @@ void AiEachSecond(CPlayer &player)
 	}
 #endif
 
-	//  Advance script
-	AiExecuteScript();
+	//  Advance script. A player run by its original script takes its wants from there; its Lua
+	//  script does not run beside it.
+	if (!Wc2AiSecond(player.Index)) {
+		AiExecuteScript();
+	}
 
 	//  Look if everything is fine.
 	AiCheckUnits();

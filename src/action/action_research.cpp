@@ -144,6 +144,7 @@ void COrder_Research::Execute(CUnit &unit) /* override */
 		this->Finished = true;
 		return;
 	}
+	const bool firstUnit = player.UpgradeTimers.Upgrades[upgrade.ID] == 0;
 	player.UpgradeTimers.Upgrades[upgrade.ID] += std::max(1, player.SpeedResearch / SPEEDUP_FACTOR);
 	if (player.UpgradeTimers.Upgrades[upgrade.ID] >= upgrade.Costs[TimeCost]) {
 		if (upgrade.Name.empty()) {
@@ -166,7 +167,10 @@ void COrder_Research::Execute(CUnit &unit) /* override */
 		this->Finished = true;
 		return ;
 	}
-	unit.Wait = CYCLES_PER_SECOND / 6;
+	unit.Wait = WC2_FRAMES_PER_TIME_UNIT - 1; // one tick per WC2_FRAMES_PER_TIME_UNIT cycles
+	if (firstUnit) {
+		unit.Wait += WC2_RESEARCH_EXTRA_FRAMES;
+	}
 }
 
 void COrder_Research::Cancel(CUnit &unit) /* override */

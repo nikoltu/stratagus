@@ -2462,7 +2462,14 @@ static std::string SaveGlobal(lua_State *l, bool is_root, std::vector<std::strin
 		}
 
 		if (auto value = LuaValueToString(l)) {
-			res += lhsLine + " = " + *value + "\n";
+			// A key that is neither a string nor a number leaves lhsLine empty (the two branches above
+			// are the only ones that fill it), and emitting " = true" for such an entry writes a save
+			// file that is not valid Lua -- the load then fails with "unexpected symbol near '='" and
+			// takes the game down with it. A representable value under an unrepresentable key could not
+			// be restored anyway, so skip it, exactly as an unrepresentable value is skipped below.
+			if (!lhsLine.empty()) {
+				res += lhsLine + " = " + *value + "\n";
+			}
 		} else {
 			const int type_value = lua_type(l, -1);
 			if (type_value == LUA_TTABLE) {

@@ -89,6 +89,83 @@ static void EnsureHDTileGraphic()
 }
 
 /**
+**  Classic view: load the classic terrain tiles of this map's tileset beside the HD atlas. The cells
+**  come from the game folder's Data/Art/hd/classic/<atlasName>.png/.json (frames "<nativePrefix>_N",
+**  32px) and are coloured by the tileset palette Data/Art/bgs/<Group>/<era>.ppl, not by the PNG's
+**  own palette. Megatile M -> frame "<nativePrefix>_<M-16>", as for the HD atlas. Any missing or
+**  unreadable file leaves Map.ClassicTileAtlas null: the terrain then stays Remastered in both views.
+*/
+static void LoadClassicTileAtlas(const char *atlasName, const char *nativePrefix, const char *era)
+{
+	const Uint32 start = SDL_GetTicks();
+	const std::string group(nativePrefix, strchr(nativePrefix, '/') ? strchr(nativePrefix, '/') : nativePrefix);
+	const std::string pplPath = std::string("Data/Art/bgs/") + group + "/" + era + ".ppl";
+	const std::string jsonPath = std::string("Data/Art/hd/classic/") + atlasName + ".json";
+
+	unsigned char ppl[768];
+	bool pplOk = false;
+	const auto resolved = LibraryFileName(pplPath);
+	if (!resolved.empty()) {
+		auto fp = std::make_unique<CFile>();
+		if (fp->open(resolved.c_str(), CL_OPEN_READ) != -1) {
+			pplOk = (size_t) fp->read(ppl, sizeof(ppl)) == sizeof(ppl);
+			fp->close();
+		}
+	}
+	if (!pplOk) {
+		ErrorPrint("Classic terrain: '%s' not readable, no classic terrain for this map\n", pplPath.c_str());
+		return;
+	}
+
+	const std::string prefix = std::string(nativePrefix) + "_";
+	auto atlas = std::make_shared<CAtlasGraphic>();
+	const std::string fogPrefix = "fog_of_war_masks/mask_";
+	if (!atlas->LoadTexturePacker(jsonPath, false, false, ppl, true, prefix.c_str(), fogPrefix.c_str())) {
+		ErrorPrint("Classic terrain: '%s' not readable, no classic terrain for this map\n", jsonPath.c_str());
+		return;
+	}
+	Map.ClassicTileAtlas = std::move(atlas);
+
+	int count = Map.ClassicTileAtlas->NumFrames() + 16;
+	if (Map.TileGraphic && Map.TileGraphic->NumFrames > count) {
+		count = Map.TileGraphic->NumFrames;
+	}
+	Map.ClassicTileAtlasFrameForTile.assign(count, -1);
+	std::string name;
+	for (int m = 16; m < count; ++m) {
+		name = prefix;
+		name += std::to_string(m - 16);
+		Map.ClassicTileAtlasFrameForTile[m] = Map.ClassicTileAtlas->FrameByName(name.c_str());
+	}
+
+	// Classic fog: mask_N is the frame for TiledFogTable value N; value 0 (no mask) is never drawn,
+	// so slot 0 carries the full cell. One missing frame -> no classic fog for this map.
+	int tiles = 0;
+	for (const int frame : Map.ClassicTileAtlasFrameForTile) {
+		tiles += frame >= 0;
+	}
+	Map.ClassicFogFrames.assign(16, -1);
+	Map.ClassicFogDitherFrames.assign(16, -1);
+	bool fogOk = true;
+	for (int i = 0; i < 16; ++i) {
+		name = fogPrefix + (i ? std::to_string(i) : std::string("solid"));
+		Map.ClassicFogFrames[i] = Map.ClassicTileAtlas->FrameByName(name.c_str());
+		Map.ClassicFogDitherFrames[i] = Map.ClassicTileAtlas->FrameByName((name + "_dither").c_str());
+		if (Map.ClassicFogFrames[i] < 0 || Map.ClassicFogDitherFrames[i] < 0) {
+			fogOk = false;
+		}
+	}
+	if (!fogOk) {
+		ErrorPrint("Classic fog: a frame '%sN' is missing in %s, the fog stays Remastered\n",
+		           fogPrefix.c_str(), atlasName);
+		Map.ClassicFogFrames.clear();
+		Map.ClassicFogDitherFrames.clear();
+	}
+	ErrorPrint("Classic terrain: %s, %d tiles, %s fog masks, palette %s.ppl, %u ms\n",
+	           atlasName, tiles, fogOk ? "16" : "no", era, (unsigned) (SDL_GetTicks() - start));
+}
+
+/**
 **  World HD (P1): lazily load the RAW Remastered terrain atlas for this map's tileset and precompute
 **  the megatile-index -> atlas-frame lookup used by the per-tile blit. The atlas is a .hdatlas (P0
 **  format) deployed beside the classic tileset image as tilesets/<dir>/terrain/<era>.hdatlas (its
@@ -112,6 +189,10 @@ static void EnsureHDTileAtlas()
 	Map.HDTileAtlasImageFile = Map.Tileset.ImageFile;
 	Map.HDTileAtlas = nullptr;             // drop any atlas derived for the previous tileset
 	Map.HDTileAtlasFrameForTile.clear();
+	Map.ClassicTileAtlas = nullptr;        // classic view: the same latch covers the classic tiles
+	Map.ClassicTileAtlasFrameForTile.clear();
+	Map.ClassicFogFrames.clear();
+	Map.ClassicFogDitherFrames.clear();
 
 	const std::string &img = Map.Tileset.ImageFile;
 	// WargusHD: prefer the NATIVE Remastered terrain atlas (Data/Art/hd/classic/classic_<x>.json,
@@ -145,6 +226,9 @@ static void EnsureHDTileAtlas()
 	if (!atlasName) {
 		return;
 	}
+
+	// Classic view: both sets stay loaded, so a switch never loads anything.
+	LoadClassicTileAtlas(atlasName, nativePrefix, era);
 
 	auto atlas = std::make_shared<CAtlasGraphic>();
 	std::string prefix;
@@ -508,6 +592,9 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 	// the classic native path => no change). Positions below are pre-scaled to the zoomed screen.
 	GpuWorldDrawZoom = GpuWorldDrawActive ? this->Zoom : 1.0f;
 
+	// Classic view: read once per pass. Off, or no classic tiles loaded -> the HD choice below stands.
+	const bool classicTiles = IsClassicView() && Map.ClassicTileAtlas;
+
 	while (dy <= ey && sy < map_max) {
 		int sx = this->MapPos.x + sy;
 		int dx = this->TopLeftPos.x - this->Offset.x;
@@ -538,8 +625,15 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 			// atlas carries its own GPU textures, so it overrides all three classic paths; only the
 			// blit is replaced (flags, DEBUG overlay, grid, increments below are untouched). Fog
 			// (M<16) and out-of-range tiles map to -1 and fall through to the classic path.
-			const int hdFrame = (Map.HDTileAtlas && tile < Map.HDTileAtlasFrameForTile.size())
-									? Map.HDTileAtlasFrameForTile[tile] : -1;
+			const CAtlasGraphic *tileAtlas = Map.HDTileAtlas.get();
+			int hdFrame = (tileAtlas && tile < Map.HDTileAtlasFrameForTile.size())
+							  ? Map.HDTileAtlasFrameForTile[tile] : -1;
+			// Classic view: the classic cell of the same megatile; a megatile without one keeps the HD frame.
+			if (classicTiles && tile < Map.ClassicTileAtlasFrameForTile.size()
+				&& Map.ClassicTileAtlasFrameForTile[tile] >= 0) {
+				tileAtlas = Map.ClassicTileAtlas.get();
+				hdFrame = Map.ClassicTileAtlasFrameForTile[tile];
+			}
 			if (drawZoom != 1.0f) {
 				// Crisp-zoom terrain: dx/dy are LOGICAL positions (this pass runs with
 				// origin 0 and Zoom-1 stepping, exactly like the classic path), so multiply
@@ -553,7 +647,7 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				const int sy1 = static_cast<int>(std::lround((dy + graphicTileSize.y) * drawZoom));
 				if (hdFrame >= 0) {
 					const SDL_Rect dst = { sx0, sy0, sx1 - sx0, sy1 - sy0 };
-					Map.HDTileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+					tileAtlas->DrawAtlasFrameFull(hdFrame, dst);
 				} else {
 					CGraphic *const src = Map.HDTileGraphic ? Map.HDTileGraphic.get()
 														    : Map.TileGraphic.get();
@@ -578,14 +672,14 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				                + static_cast<int>(std::lround((dy + graphicTileSize.y - this->TopLeftPos.y) * z));
 				const SDL_Rect dst = { zx, zy, zx1 - zx, zy1 - zy };
 				if (hdFrame >= 0) {
-					Map.HDTileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+					tileAtlas->DrawAtlasFrameFull(hdFrame, dst);
 				} else {
 					Map.TileGraphic->DrawFrameClipTexDst(tile, dst);
 				}
 			} else {
 				if (hdFrame >= 0) {
 					const SDL_Rect dst = { dx, dy, graphicTileSize.x, graphicTileSize.y };
-					Map.HDTileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+					tileAtlas->DrawAtlasFrameFull(hdFrame, dst);
 				} else {
 					Map.TileGraphic->DrawFrameClip(tile, dx, dy);
 				}
@@ -692,12 +786,9 @@ void CViewport::Draw(const fieldHighlightChecker highlightChecker /* = nullptr *
 	// Building-placement preview must scale with the world; when zoomed we render it inside the
 	// offscreen (below) so it upscales identically to the placed building. Capture the tile now,
 	// while the viewport still holds its real Zoom/origin.
-	const bool drawBuildCursor = (this == UI.MouseViewport && CursorBuilding
-	                              && CursorOn == ECursorOn::Map && zoomed);
+	// (TOUCH-R7: with a finger the preview stands on its own tile, see GetBuildingPreviewTile.)
 	Vec2i buildCursorTile(0, 0);
-	if (drawBuildCursor) {
-		buildCursorTile = this->ScreenToTilePos(CursorScreenPos);
-	}
+	const bool drawBuildCursor = zoomed && GetBuildingPreviewTile(*this, buildCursorTile);
 
 	// Crisp-at-zoom (A2) path. Only diverges from the classic pipeline when the runtime flag
 	// is on AND the viewport is actually zoomed; otherwise everything below is byte-for-byte

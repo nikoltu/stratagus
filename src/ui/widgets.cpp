@@ -46,8 +46,12 @@
 #include "loadingscreen.h"
 #include "sound.h"
 #include "util.h"
+#include "script.h"
 
 #include <guisan/text.hpp>
+#include <guisan/focushandler.hpp>
+#include <cstdlib>
+#include <algorithm>
 
 /*----------------------------------------------------------------------------
 -- Variables
@@ -64,6 +68,17 @@ static std::stack<MenuScreen *> MenuStack;
 /*----------------------------------------------------------------------------
 --  Functions
 ----------------------------------------------------------------------------*/
+
+// NG99: whether the guichan widget layer currently owns input. NOT `!MenuStack.empty()` -- that
+// stack is only pushed by the non-looping MenuScreen::run(false) branch below, so every menu
+// opened with run() (which is every out-of-game menu) leaves it empty, and the touch layer would
+// have skipped exactly the screens the stale hover shows on. Both run branches do set the guichan
+// callbacks, and sdl.cpp already routes events by that same test, so this is the honest predicate
+// for "the pointer belongs to a menu, not to the game".
+bool GuichanOwnsInput()
+{
+	return GetCallbacks() == &GuichanCallbacks;
+}
 
 #if USING_TOLUAPP
 
@@ -250,6 +265,13 @@ void DrawGuichanWidgets()
 		if (top && top->isVisible() && !MenuStack.empty()) {
 			OverlayDirty = true;
 		}
+		// Behind an in-game window the game is shown in greys (not behind the briefing or any
+		// screen shown while no game runs).
+		const bool window = GameRunning && top && top->isVisible() && !MenuStack.empty();
+		// HUD-PAUSE-GREY: the same greys while the game stands paused with no window up (the
+		// header's Pause button); the frame is then read again every frame, see the function.
+		const bool pausedBare = GameRunning && GamePaused && !window && !Editor.Running;
+		GreyFrameUnderMenu(window || pausedBare, pausedBare);
 		auto oldScreen = TheScreen;
 		TheScreen = static_cast<gcn::SDLGraphics*>(Gui->getGraphics())->getTarget();
 		Gui->draw();
@@ -408,11 +430,9 @@ void CImageButton::draw(gcn::Graphics *graphics) /* override */
 		img = disabledImage ? disabledImage.get() : normalImage.get();
 	} else if (isPressed()) {
 		img = pressedImage ? pressedImage.get() : normalImage.get();
-#if 0
-	} else if (0 && hasMouse()) {
-		// FIXME: add mouse-over image
-		img = nullptr;
-#endif
+	} else if (mHasMouse && hoverImage) {
+		// Remastered three-state button (skins.json: button / button_hover / button_active).
+		img = hoverImage.get();
 	} else {
 		img = normalImage.get();
 	}
@@ -490,6 +510,30 @@ ImageRadioButton::ImageRadioButton(const std::string &caption,
 /**
 **  Draw the image radio button (not the caption)
 */
+/**
+**  NG59: draw a check/radio box sprite SCALED to the widget's box instead of at its native pixel
+**  size. The art on disk is 56x56 (the checkbox and radio sprites), and it used to be blitted at
+**  exactly that size, so the control was 56 device px on every screen -- it did not scale with the
+**  UI at all. That is
+**  near-enough right only at one resolution; the original's box is 67.5 logical, which is 56 device
+**  px only when Video.Height/2160 happens to be ~0.81. Scaling to the widget's own square box makes
+**  the Lua side able to ask for the measured logical size at any resolution.
+**  The sprite is restored to its original size afterwards, as the list-row art is, because the same
+**  CGraphic is shared by every check box on screen.
+*/
+static void DrawBoxSpriteScaled(gcn::Graphics *graphics, const gcn::Image *img, int box)
+{
+	auto *g = dynamic_cast<CGraphic *>(const_cast<gcn::Image *>(img));
+	if (!g || box <= 0) {
+		graphics->drawImage(img, 0, 0, 0, (box - img->getHeight()) / 2,
+		                    img->getWidth(), img->getHeight());
+		return;
+	}
+	g->Resize(box, box);
+	graphics->drawImage(g, 0, 0, 0, 0, box, box);
+	g->SetOriginalSize();
+}
+
 void ImageRadioButton::drawBox(gcn::Graphics *graphics) /* override */
 {
 	const gcn::Image *img = nullptr;
@@ -513,8 +557,7 @@ void ImageRadioButton::drawBox(gcn::Graphics *graphics) /* override */
 	}
 
 	if (img) {
-		graphics->drawImage(img, 0, 0, 0, (getHeight() - img->getHeight()) / 2,
-							img->getWidth(), img->getHeight());
+		DrawBoxSpriteScaled(graphics, img, getHeight());
 	} else {
 		RadioButton::drawBox(graphics);
 	}
@@ -530,14 +573,10 @@ void ImageRadioButton::draw(gcn::Graphics *graphics) /* override */
 	graphics->setFont(getFont());
 	graphics->setColor(getForegroundColor());
 
-	int width;
-	if (uncheckedNormalImage) {
-		width = uncheckedNormalImage->getWidth();
-		width += width / 2;
-	} else {
-		width = getHeight();
-		width += width / 2;
-	}
+	// NG59: the box is drawn as a square of getHeight() (see DrawBoxSpriteScaled), so the caption
+	// offset follows the DRAWN box rather than the sprite's native width.
+	int width = getHeight();
+	width += width / 2;
 
 	graphics->drawText(getCaption(), width - 2, (getHeight() - getFont()->getHeight()) / 2);
 
@@ -616,6 +655,7 @@ ImageCheckBox::ImageCheckBox(const std::string &caption, bool marked) :
 /**
 **  Draw the image checkbox
 */
+
 void ImageCheckBox::draw(gcn::Graphics *graphics) /* override */
 {
 	drawBox(graphics);
@@ -623,14 +663,10 @@ void ImageCheckBox::draw(gcn::Graphics *graphics) /* override */
 	graphics->setFont(getFont());
 	graphics->setColor(getForegroundColor());
 
-	int width;
-	if (uncheckedNormalImage) {
-		width = uncheckedNormalImage->getWidth();
-		width += width / 2;
-	} else {
-		width = getHeight();
-		width += width / 2;
-	}
+	// NG59: the box is drawn as a square of getHeight() (see DrawBoxSpriteScaled), so the caption
+	// offset follows the DRAWN box rather than the sprite's native width.
+	int width = getHeight();
+	width += width / 2;
 
 	graphics->drawText(getCaption(), width - 2, (getHeight() - getFont()->getHeight()) / 2);
 
@@ -665,8 +701,7 @@ void ImageCheckBox::drawBox(gcn::Graphics *graphics) /* override */
 	}
 
 	if (img) {
-		graphics->drawImage(img, 0, 0, 0, (getHeight() - img->getHeight()) / 2,
-							img->getWidth(), img->getHeight());
+		DrawBoxSpriteScaled(graphics, img, getHeight());
 	} else {
 		CheckBox::drawBox(graphics);
 	}
@@ -771,6 +806,24 @@ void ImageSlider::drawMarker(gcn::Graphics *graphics) /* override */
 void ImageSlider::draw(gcn::Graphics *graphics) /* override */
 {
 	const gcn::Image *img = isEnabled() ? backgroundImage.get() : disabledBackgroundImage.get();
+
+	if (!img && trackThickness > 0 && getOrientation() == Orientation::Horizontal) {
+		// Remastered two-tone track (skins.json widget_slider_*): everything left of the marker
+		// is drawn in `color`, the remainder in `secondary_color`. There is no track SPRITE in
+		// the skin data at all, which is why a single-tone bar was all we had before.
+		const int h = trackThickness;
+		const int y = (getHeight() - h) / 2;
+		const int split =
+			std::clamp(getMarkerPosition() + getMarkerLength() / 2, 0, getWidth());
+		graphics->setColor(trackFilled);
+		graphics->fillRectangle(gcn::Rectangle(0, y, split, h));
+		graphics->setColor(trackUnfilled);
+		graphics->fillRectangle(gcn::Rectangle(split, y, getWidth() - split, h));
+		if (isEnabled()) {
+			drawMarker(graphics);
+		}
+		return;
+	}
 
 	if (img) {
 		graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
@@ -903,12 +956,22 @@ void MultiLineLabel::adjustSize()
 		}
 	}
 	this->setWidth(width);
-	this->setHeight(this->getFont()->getHeight() * this->mTextRows.size());
+	this->setHeight(this->lineHeight() * this->mTextRows.size());   // NG101
 }
 
 /**
 **  Draw the label
 */
+// NG101: the line advance this label stacks rows by -- the font's declared leading when it has one,
+// otherwise the sheet's cell height, which is the old behaviour.
+int MultiLineLabel::lineHeight() const
+{
+	if (const auto *f = dynamic_cast<const CFont *>(this->getFont())) {
+		return f->LineHeight();
+	}
+	return this->getFont()->getHeight();
+}
+
 void MultiLineLabel::draw(gcn::Graphics *graphics)
 {
 	graphics->setFont(getFont());
@@ -935,10 +998,10 @@ void MultiLineLabel::draw(gcn::Graphics *graphics)
 			textY = 0;
 			break;
 		case CENTER:
-			textY = (this->getHeight() - (int)this->mTextRows.size() * this->getFont()->getHeight()) / 2;
+			textY = (this->getHeight() - (int)this->mTextRows.size() * this->lineHeight()) / 2;   // NG101
 			break;
 		case BOTTOM:
-			textY = this->getHeight() - (int)this->mTextRows.size() * this->getFont()->getHeight();
+			textY = this->getHeight() - (int)this->mTextRows.size() * this->lineHeight();   // NG101
 			break;
 		default:
 			textY = 0;
@@ -948,8 +1011,8 @@ void MultiLineLabel::draw(gcn::Graphics *graphics)
 
 	for (int i = 0; i < (int)this->mTextRows.size(); ++i) {
 		if (this->mTextRows[i].length() != 0)
-			graphics->drawText(this->mTextRows[i], textX, textY + i * this->getFont()->getHeight(),
-						   this->getAlignment());
+			graphics->drawText(this->mTextRows[i], textX, textY + i * this->lineHeight(),
+						   this->getAlignment());   // NG101: the font's declared line advance
 	}
 }
 
@@ -1108,6 +1171,27 @@ void ScrollingWidget::add(gcn::Widget *widget, int x, int y)
 */
 void ScrollingWidget::logic() /* override */
 {
+	float step = speedY;
+	if (speedPerSecond > 0.f) {
+		// By the clock: the same pace whatever the frame rate.
+		const unsigned int now = SDL_GetTicks();
+		step = lastTicks ? speedPerSecond * (now - lastTicks) / 1000.f : 0.f;
+		lastTicks = now ? now : 1;
+	}
+	if (hasRest) {
+		// The content stops at its rest position instead of leaving the widget.
+		if (containerY - step > restY) {
+			containerY -= step;
+			container.setY((int)containerY);
+		} else if (!finished) {
+			containerY = (float)restY;
+			container.setY(restY);
+			finished = true;
+			distributeActionEvent();
+		}
+		return;
+	}
+	const float speedY = step;
 	if (container.getHeight() + containerY - speedY > 0) {
 		// the bottom of the container is lower than the top
 		// of the widget. It is thus still visible.
@@ -1126,6 +1210,7 @@ void ScrollingWidget::restart()
 {
 	container.setY(0);
 	containerY = 0.f;
+	lastTicks = 0;
 	finished = (container.getHeight() == getHeight());
 }
 
@@ -1697,8 +1782,8 @@ void ImageListBox::draw(gcn::Graphics *graphics) /* override */
 	int i;
 	int y = 0;
 	CGraphic *base = itemImage.get();
-	const int rowH = base->getHeight();
-	const int fontHeight = std::max<int>(getFont()->getHeight(), rowH);
+	const int rowH = rowHeight();                 // NG94: layout height, not the sprite's own
+	const int fontHeight = rowH;
 
 	// Rows fill the VISIBLE list width -- the ScrollArea's children area, which already excludes the
 	// vertical scrollbar -- flush left. Using getWidth() (the text-driven listbox width from
@@ -1718,17 +1803,50 @@ void ImageListBox::draw(gcn::Graphics *graphics) /* override */
 		// Locked campaign missions (index >= unlockedCount) draw a GRAYED row image (the real row
 		// sprite desaturated in the engine, since gcn fillRectangle ignores alpha) and dimmed text.
 		const bool locked = (unlockedCount >= 0 && i >= unlockedCount);
-		CGraphic *rowImg = (locked && lockedItemImage) ? lockedItemImage.get() : base;
+		// CF5(b): the pointer states come first, because they are what the pointer is telling the
+		// player right now -- except over a LOCKED row, which must not light up as if it could be
+		// chosen. "Pressed" is a press that has not yet turned into a scroll, the same drag/tap
+		// split the selection uses.
+		const bool pressed = mDragScrolling && !mDidDrag;
+		CGraphic *rowImg = base;
+		if (locked && lockedItemImage) {
+			rowImg = lockedItemImage.get();
+		} else if (locked && unselectedItemImage) {
+			// NG108: with no locked-specific plate bound, a locked row is drawn like any other
+			// non-selected row. The original does exactly that -- its fresh-campaign capture has
+			// eleven locked rows all carrying the same plate as the available one, and locking
+			// shows only in the text colour below.
+			rowImg = unselectedItemImage.get();
+		} else if (!locked && i == mHoverIndex && pressed && activeItemImage) {
+			rowImg = activeItemImage.get();
+		} else if (!locked && i == mHoverIndex && hoverItemImage) {
+			rowImg = hoverItemImage.get();
+		} else if (!locked && i != mSelected && unselectedItemImage) {
+			// Unselected rows draw DIMMED; the selected row keeps the full-brightness sprite.
+			rowImg = unselectedItemImage.get();
+		}
 		rowImg->Resize(rowW, rowH);
 		graphics->drawImage(rowImg, 0, 0, 0, y, rowW, rowH);
 		rowImg->SetOriginalSize();
 
 		const int textY = y + (fontHeight - getFont()->getHeight()) / 2;
-		graphics->setColor(locked ? gcn::Color(150, 150, 150) : getForegroundColor());
+		// NG108: measured off the original's mission-select capture -- locked row text is
+		// 110,110,110 there, not the 150 this used.
+		// NG121: the HOVERED row's text is gold. Measured on custom-scenario-selection-3440x1440.png:
+		// 240,210,80 dominates the hovered row's glyphs (1339 px of it) where a normal row's glyphs
+		// are 220,220,220 (1800 px). Applied only when the hover PLATE is bound, so a list that does
+		// not opt into the hover state renders exactly as before.
+		const bool hovered = !locked && i == mHoverIndex && hoverItemImage != nullptr;
+		graphics->setColor(locked   ? gcn::Color(110, 110, 110)
+		                   : hovered ? gcn::Color(240, 210, 80)
+		                             : getForegroundColor());
+		const bool leftAligned = textLeftPad >= 0;
+		const int textX = leftAligned ? textLeftPad : rowW / 2;
+		const auto align = leftAligned ? gcn::Graphics::Left : gcn::Graphics::Center;
 		if (i == mSelected) {
-			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", rowW / 2, textY, gcn::Graphics::Center);
+			graphics->drawText("~<" + mListModel->getElementAt(i) + "~>", textX, textY, align);
 		} else {
-			graphics->drawText(mListModel->getElementAt(i), rowW / 2, textY, gcn::Graphics::Center);
+			graphics->drawText(mListModel->getElementAt(i), textX, textY, align);
 		}
 		graphics->setColor(getForegroundColor());
 
@@ -1764,12 +1882,15 @@ void ImageListBox::adjustSize()
 {
 	if (mListModel != nullptr)
 	{
-		setHeight((itemImage ? std::max<int>(getFont()->getHeight(), itemImage->getHeight()) : getFont()->getHeight()) * mListModel->getNumberOfElements());
+			setHeight(rowHeight() * mListModel->getNumberOfElements());   // NG94
 	}
 }
 
 int ImageListBox::rowHeight() const
 {
+	if (forcedRowHeight > 0) {          // NG94: an explicit layout height wins over the sprite's own
+		return forcedRowHeight;
+	}
 	return itemImage ? std::max<int>(getFont()->getHeight(), itemImage->getHeight())
 	                 : getFont()->getHeight();
 }
@@ -1777,58 +1898,75 @@ int ImageListBox::rowHeight() const
 void ImageListBox::logic() /* override */
 {
 	adjustSize();
-	if (mFling) {
-		gcn::ScrollArea *scrollArea = dynamic_cast<gcn::ScrollArea *>(getParent());
-		if (scrollArea == nullptr) {
-			mFling = false;
-			return;
-		}
-		scrollArea->setVerticalScrollAmount(
-			scrollArea->getVerticalScrollAmount() - (int)mDragVelY);
-		mDragVelY *= 0.88f; // decay
-		const float v = mDragVelY < 0.f ? -mDragVelY : mDragVelY;
-		if (v < 1.f) {
-			mFling = false;
-			mDragVelY = 0.f;
-		}
-	}
 }
 
 void ImageListBox::mousePressed(gcn::MouseEvent &event) /* override */
 {
 	if (event.getButton() == gcn::MouseInput::Left) {
-		// Begin a possible drag-to-scroll. The row selection is deferred to
-		// mouseReleased so a finger DRAG scrolls the list while a stationary
-		// tap/click still selects (see mouseDragged / mouseReleased).
-		// event.getY() is relative to this content widget, whose own Y moves as
-		// the list scrolls; adding getY() yields a scroll-invariant viewport Y.
+		// The row selection is deferred to mouseReleased so that a finger DRAG scrolls the
+		// list while a stationary tap/click still selects. The scrolling itself is done by
+		// the enclosing TouchScrollArea, which owns that gesture for every scroll container;
+		// this only has to know whether the gesture ended as a drag.
 		mDragScrolling = true;
 		mDidDrag = false;
-		mFling = false;
-		mDragVelY = 0.f;
+		// event.getY() is relative to this content widget, whose own Y moves as the list
+		// scrolls; adding getY() yields a scroll-invariant viewport Y. The travel is measured
+		// here as well as in the container, because a list with nothing to scroll still has to
+		// tell a swipe from a tap.
 		mDragStartY = event.getY() + getY();
 		mDragLastY = mDragStartY;
+		// A touch produces no Moved event before the press, so light the row here too.
+		setHoverFromY(event.getY());
 	} else if (event.getButton() == gcn::MouseInput::Right) {
 		setSelected(-1);
 		distributeActionEvent();
 	}
 }
 
+// CF5(b): which row the pointer is on. The original is a desktop build and this is its hover state;
+// our synthetic pointer stays where the finger lifted, so a touched row keeps the plate afterwards --
+// the same platform question NG99 already records for the campaign card, inherited here rather than
+// resolved by inventing a touch model the original does not have.
+void ImageListBox::setHoverFromY(int y)
+{
+	const int rowH = rowHeight();
+	const int count = mListModel ? mListModel->getNumberOfElements() : 0;
+	const int row = (rowH > 0 && y >= 0) ? (y / rowH) : -1;
+	mHoverIndex = (row >= 0 && row < count) ? row : -1;
+}
+
+void ImageListBox::mouseMoved(gcn::MouseEvent &event) /* override */
+{
+	setHoverFromY(event.getY());
+}
+
+void ImageListBox::mouseExited(gcn::MouseEvent &) /* override */
+{
+	mHoverIndex = -1;
+}
+
 void ImageListBox::mouseDragged(gcn::MouseEvent &event) /* override */
 {
-	gcn::ScrollArea *scrollArea = dynamic_cast<gcn::ScrollArea *>(getParent());
-	if (mDragScrolling && scrollArea != nullptr) {
+	if (mDragScrolling) {
 		const int y = event.getY() + getY(); // scroll-invariant viewport Y
-		const int dy = y - mDragLastY;
+		if (std::abs(y - mDragStartY) > TouchScrollArea::DragThreshold) {
+			mDidDrag = true; // enough travel: this gesture scrolls, it does not select
+		}
+		// The enclosing container owns the scrolling and does it for every list on a screen --
+		// with one exception this list cannot delegate to. A DropDown builds its own scroll area
+		// internally (gcn::DropDown), so the open list of a dropdown sits in a PLAIN ScrollArea
+		// that knows nothing about a finger. Drive that one from here. The two branches are
+		// mutually exclusive, so a gesture is still applied exactly once.
+		if (dynamic_cast<TouchScrollArea *>(getParent()) == nullptr) {
+			if (auto *scrollArea = dynamic_cast<gcn::ScrollArea *>(getParent())) {
+				const int dy = y - mDragLastY;
+				if (dy != 0) {
+					scrollArea->setVerticalScrollAmount(
+						scrollArea->getVerticalScrollAmount() - dy);
+				}
+			}
+		}
 		mDragLastY = y;
-		const int moved = (y - mDragStartY) < 0 ? (mDragStartY - y) : (y - mDragStartY);
-		if (moved > 6) {
-			mDidDrag = true; // enough travel: this gesture scrolls, not selects
-		}
-		if (dy != 0) {
-			mDragVelY = (float)dy;
-			scrollArea->setVerticalScrollAmount(scrollArea->getVerticalScrollAmount() - dy);
-		}
 	}
 	event.consume();
 }
@@ -1837,17 +1975,202 @@ void ImageListBox::mouseReleased(gcn::MouseEvent &event) /* override */
 {
 	if (event.getButton() == gcn::MouseInput::Left && mDragScrolling) {
 		mDragScrolling = false;
+		// Ask the container again rather than trusting the value cached in mouseDragged: the
+		// event reaches this widget BEFORE it bubbles to the container, so the cached flag is
+		// always one drag event behind.
+		if (auto *scrollArea = dynamic_cast<TouchScrollArea *>(getParent())) {
+			mDidDrag = mDidDrag || scrollArea->isContentDragged();
+		}
 		if (!mDidDrag) {
 			// A tap/click, not a drag: select the row under the cursor.
 			setSelected(event.getY() / rowHeight());
 			distributeActionEvent();
-		} else {
-			// A real drag: hand the last velocity to a short momentum fling.
-			const float v = mDragVelY < 0.f ? -mDragVelY : mDragVelY;
-			mFling = v > 1.f;
 		}
 	}
 	event.consume();
+}
+
+/*----------------------------------------------------------------------------
+--  TouchScrollArea
+----------------------------------------------------------------------------*/
+
+// NG115: draw a scrollbar part SCALED to the rect it was given, instead of at the art's own pixel
+// size clipped to that rect. drawVBar already did this -- which is why the track width matched the
+// original while the arrows did not -- and the arrows, the pressed arrows and the markers did not,
+// so their on-screen size was the baked art's native size and ignored setScrollbarWidth entirely.
+// That is why the visible bar measured 149.6 logical against the original's 61.5, and why narrowing
+// the parameter only clipped the art rather than sizing it.
+static void DrawScrollPartScaled(gcn::Graphics *graphics, CGraphic *img, const gcn::Rectangle &dim)
+{
+	if (img == nullptr || dim.width <= 0 || dim.height <= 0) {
+		return;
+	}
+	img->Resize(dim.width, dim.height);
+	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	img->SetOriginalSize();
+}
+
+
+// The pending activation of the widget the gesture started on. Guisan fires a control from the
+// Clicked event, and Gui::handleMouseReleased only distributes Clicked while the focus handler
+// still names that widget as the last one pressed. Clearing it is therefore the exact way to
+// say "this gesture turned into a scroll, not a press" without reaching into the child.
+void TouchScrollArea::cancelPendingClick()
+{
+	if (mClickCancelled) {
+		return;
+	}
+	mClickCancelled = true;
+	if (gcn::FocusHandler *focusHandler = _getFocusHandler()) {
+		focusHandler->setLastWidgetPressed(nullptr);
+	}
+}
+
+void TouchScrollArea::mousePressed(gcn::MouseEvent &event) /* override */
+{
+	mDragging = false;
+	mDidDrag = false;
+	mClickCancelled = false;
+	mFling = false;
+	mVelX = mVelY = 0.f;
+
+	gcn::ScrollArea::mousePressed(event);
+
+	if (event.getButton() != gcn::MouseInput::Left) {
+		return;
+	}
+	// The base has first claim: an arrow, the marker or the bar takes the press as its own.
+	if (mUpButtonPressed || mDownButtonPressed || mLeftButtonPressed || mRightButtonPressed
+	    || mIsVerticalMarkerDragged || mIsHorizontalMarkerDragged) {
+		return;
+	}
+	// Only the viewport itself, and only when there is somewhere to scroll to.
+	if (!getChildrenArea().isContaining(event.getX(), event.getY())) {
+		return;
+	}
+	if (getVerticalMaxScroll() <= 0 && getHorizontalMaxScroll() <= 0) {
+		return;
+	}
+	mDragging = true;
+	mStartX = mLastX = event.getX();
+	mStartY = mLastY = event.getY();
+}
+
+void TouchScrollArea::mouseDragged(gcn::MouseEvent &event) /* override */
+{
+	gcn::ScrollArea::mouseDragged(event);
+
+	if (!mDragging || mIsVerticalMarkerDragged || mIsHorizontalMarkerDragged) {
+		return;
+	}
+	// event coordinates are rebased to this container by Gui::distributeMouseEvent, whatever
+	// descendant the press landed on, and the container does not move as its content scrolls.
+	const int x = event.getX();
+	const int y = event.getY();
+	const int dx = x - mLastX;
+	const int dy = y - mLastY;
+	mLastX = x;
+	mLastY = y;
+
+	const int movedX = std::abs(x - mStartX);
+	const int movedY = std::abs(y - mStartY);
+	if (movedX > DragThreshold || movedY > DragThreshold) {
+		mDidDrag = true;
+		cancelPendingClick();
+	}
+	if (dy != 0 && getVerticalMaxScroll() > 0) {
+		mVelY = (float) dy;
+		setVerticalScrollAmount(getVerticalScrollAmount() - dy);
+	}
+	if (dx != 0 && getHorizontalMaxScroll() > 0) {
+		mVelX = (float) dx;
+		setHorizontalScrollAmount(getHorizontalScrollAmount() - dx);
+	}
+}
+
+void TouchScrollArea::mouseReleased(gcn::MouseEvent &event) /* override */
+{
+	const bool wasDrag = mDidDrag;
+	mDragging = false;
+
+	gcn::ScrollArea::mouseReleased(event);
+
+	// A real drag hands its last velocity to a short momentum fling; a tap leaves the
+	// content exactly where it was.
+	mFling = wasDrag && (std::abs(mVelY) > 1.f || std::abs(mVelX) > 1.f);
+	if (!mFling) {
+		mVelX = mVelY = 0.f;
+	}
+}
+
+void TouchScrollArea::logic() /* override */
+{
+	if (mFling) {
+		if (std::abs(mVelY) >= 1.f && getVerticalMaxScroll() > 0) {
+			setVerticalScrollAmount(getVerticalScrollAmount() - (int) mVelY);
+		}
+		if (std::abs(mVelX) >= 1.f && getHorizontalMaxScroll() > 0) {
+			setHorizontalScrollAmount(getHorizontalScrollAmount() - (int) mVelX);
+		}
+		mVelY *= FlingDecay;
+		mVelX *= FlingDecay;
+		if (std::abs(mVelY) < 1.f && std::abs(mVelX) < 1.f) {
+			mFling = false;
+			mVelX = mVelY = 0.f;
+		}
+	}
+	gcn::ScrollArea::logic();
+}
+
+// NG130: the Remastered scrollbar, drawn the way NG115 established -- each part SCALED to the rect
+// it is given, never at the art's own pixel size. With no image bound each falls straight back to
+// the base class, so nothing that does not opt in changes.
+void TouchScrollArea::drawUpButton(gcn::Graphics *graphics) /* override */
+{
+	if (!upButtonImage) {
+		gcn::ScrollArea::drawUpButton(graphics);
+		return;
+	}
+	const gcn::Rectangle dim = getUpButtonDimension();
+	graphics->pushClipArea(dim);
+	DrawScrollPartScaled(graphics, upButtonImage.get(), dim);
+	graphics->popClipArea();
+}
+
+void TouchScrollArea::drawDownButton(gcn::Graphics *graphics) /* override */
+{
+	if (!downButtonImage) {
+		gcn::ScrollArea::drawDownButton(graphics);
+		return;
+	}
+	const gcn::Rectangle dim = getDownButtonDimension();
+	graphics->pushClipArea(dim);
+	DrawScrollPartScaled(graphics, downButtonImage.get(), dim);
+	graphics->popClipArea();
+}
+
+void TouchScrollArea::drawVBar(gcn::Graphics *graphics) /* override */
+{
+	if (!vBarImage) {
+		gcn::ScrollArea::drawVBar(graphics);
+		return;
+	}
+	const gcn::Rectangle dim = getVerticalBarDimension();
+	graphics->pushClipArea(dim);
+	DrawScrollPartScaled(graphics, vBarImage.get(), dim);
+	graphics->popClipArea();
+}
+
+void TouchScrollArea::drawVMarker(gcn::Graphics *graphics) /* override */
+{
+	if (!markerImage) {
+		gcn::ScrollArea::drawVMarker(graphics);
+		return;
+	}
+	const gcn::Rectangle dim = getVerticalMarkerDimension();
+	graphics->pushClipArea(dim);
+	DrawScrollPartScaled(graphics, markerImage.get(), dim);
+	graphics->popClipArea();
 }
 
 static void scrollToRectangle(gcn::ScrollArea &scrollArea, const gcn::Rectangle &rectangle)
@@ -1947,11 +2270,46 @@ void ListBoxWidget::setList(lua_State *lua, lua_Object *lo)
 /**
 **  Set the list
 */
+void ImageListBoxWidget::setItemImage(std::shared_ptr<CGraphic> image)
+{
+	itemImage = image;
+	listbox.setItemImage(image);
+	// The content height only becomes correct once the row art is known (ImageListBox::adjustSize
+	// derives the row height from this image), and the scrollbar policy is derived from that height --
+	// so re-check it here, or the bar is judged unnecessary on the first frames and is not drawn.
+	checkPolicies();
+	// Scroll-arrow step. guisan defaults it to a flat 10 px, which suits its own ~10 px text rows;
+	// nothing in this project ever set it. Our rows carry the Remastered button art and are ~96 px, so
+	// an arrow tap moved the list a tenth of a row -- ten taps to advance ONE entry (measured on the
+	// mission list: first row 396 -> 406 -> 436 px over four taps). Step by the list's OWN row height,
+	// which comes from the row art rather than from a chosen constant.
+	const int rh = listbox.rowHeight();
+	if (rh > 0) {
+		setUpButtonScrollAmount(rh);
+		setDownButtonScrollAmount(rh);
+	}
+}
+
+void ImageListBoxWidget::setRowHeight(int h)   // NG94
+{
+	listbox.setRowHeight(h);
+	checkPolicies();
+	if (h > 0) {
+		setUpButtonScrollAmount(h);
+		setDownButtonScrollAmount(h);
+	}
+}
+
 void ImageListBoxWidget::setList(lua_State *lua, lua_Object *lo)
 {
 	lualistmodel.setList(lua, lo);
 	listbox.setListModel(&lualistmodel);
 	adjustSize();
+	// adjustSize() above only fixes the WIDTH. The content HEIGHT is the listbox's own business and
+	// must be re-derived whenever the element count changes, so the scrollbar policy below sees the
+	// real height rather than a stale one.
+	listbox.adjustSize();
+	checkPolicies();
 }
 
 /**
@@ -2128,10 +2486,18 @@ void ImageListBoxWidget::draw(gcn::Graphics *graphics) /* override */
 	gcn::Rectangle rect = getChildrenArea();
 	CGraphic *img = itemImage.get();
 	img->Resize(rect.width, img->getHeight());
+	// NG91: this underlay used to tile the row sprite over the WHOLE viewport, so a list with two
+	// saves in a ten-row-tall frame drew two captioned rows and eight empty ones. That is the classic
+	// Stratagus "save slot" look, and the Remastered does not have it: in
+	// load-menu-3440x1440.png the one save draws one row strip and the rest of the content frame is
+	// bare parchment. Stop at the number of elements the list actually has -- the listbox draws its
+	// own per-element row art on top of this, so nothing that was visible before disappears.
+	const int rows = getNumberOfElements();
+	const int rowH = listbox.rowHeight();         // NG94: same height the listbox draws its rows at
 	int y = 0;
-	while (y + img->getHeight() <= rect.height) {
-		graphics->drawImage(img, 0, 0, 0, y, getWidth(), img->getHeight());
-		y += img->getHeight();
+	for (int drawn = 0; drawn < rows && y + rowH <= rect.height; ++drawn) {
+		graphics->drawImage(img, 0, 0, 0, y, getWidth(), rowH);
+		y += rowH;
 	}
 	img->SetOriginalSize();
 
@@ -2221,9 +2587,7 @@ void ImageListBoxWidget::drawUpButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getUpButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = upButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, upButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2231,9 +2595,7 @@ void ImageListBoxWidget::drawDownButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getDownButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = downButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, downButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2241,9 +2603,7 @@ void ImageListBoxWidget::drawLeftButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getLeftButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = leftButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, leftButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2251,9 +2611,7 @@ void ImageListBoxWidget::drawRightButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getRightButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = rightButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, rightButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2261,9 +2619,7 @@ void ImageListBoxWidget::drawUpPressedButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getUpButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = upPressedButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, upPressedButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2271,9 +2627,7 @@ void ImageListBoxWidget::drawDownPressedButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getDownButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = downPressedButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, downPressedButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2281,9 +2635,7 @@ void ImageListBoxWidget::drawLeftPressedButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getLeftButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = leftPressedButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, leftPressedButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2291,9 +2643,7 @@ void ImageListBoxWidget::drawRightPressedButton(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getRightButtonDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = rightPressedButtonImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+	DrawScrollPartScaled(graphics, rightPressedButtonImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2323,25 +2673,19 @@ void ImageListBoxWidget::drawVBar(gcn::Graphics *graphics)
 	graphics->popClipArea();
 }
 
-void ImageListBoxWidget::drawHMarker(gcn::Graphics *graphics)
+void ImageListBoxWidget::drawHMarker(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getHorizontalMarkerDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = markerImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
-
+	DrawScrollPartScaled(graphics, markerImage.get(), dim);
 	graphics->popClipArea();
 }
 
-void ImageListBoxWidget::drawVMarker(gcn::Graphics *graphics)
+void ImageListBoxWidget::drawVMarker(gcn::Graphics* graphics)
 {
 	gcn::Rectangle dim = getVerticalMarkerDimension();
 	graphics->pushClipArea(dim);
-
-	const CGraphic *img = markerImage.get();
-	graphics->drawImage(img, 0, 0, 0, 0, img->getWidth(), img->getHeight());
-
+	DrawScrollPartScaled(graphics, markerImage.get(), dim);
 	graphics->popClipArea();
 }
 
@@ -2461,6 +2805,19 @@ void ImageDropDownWidget::setList(lua_State *lua, lua_Object *lo)
 {
 	mListModel->setList(lua, lo);
 	setListModel(mListModel.get());
+	// NG51: `gcn::ListBox::adjustSize` is NOT virtual, so the base `setListModel` above sizes the
+	// open list from the FONT height while our rows are as tall as the row sprite. The list then
+	// ends mid-way through its last row and that row's text is never drawn (seen on the Music
+	// Version dropdown: two plates, only the first one's caption). Re-run OUR adjustSize, then let
+	// the dropdown recompute its dropped-down height from it. Same root cause family as NG41.
+	mImageListBox->adjustSize();
+	adjustHeight();
+	// NG51, actual cause: the open list's rows were drawn but their TEXT was invisible -- the row
+	// PLATE appeared and the caption did not. The inner list keeps its own foreground colour and
+	// never inherited the dropdown's, so an unselected row drew dark-on-dark. (The selected row is
+	// drawn through the "~<...~>" highlight path, which is why exactly one caption was readable.)
+	mImageListBox->setForegroundColor(getForegroundColor());
+	mImageListBox->setBaseColor(getBaseColor());
 }
 
 /**
@@ -2470,7 +2827,15 @@ void ImageDropDownWidget::setSize(int width, int height)
 {
 	mFieldHeight = height;   // remember the intended closed-field height (see adjustHeight)
 	DropDown::setSize(width, height);
-	this->mListBox->setSize(width, height);
+	// NG51 -- THE cause of the clipped open list: this used to force the LIST BOX to the closed
+	// field's height, i.e. exactly one row, so a two-entry dropdown drew its second row plate cut
+	// in half and never drew that row's caption at all (Music Version: "Remastered" readable,
+	// "Classic" absent). The open list must be as tall as its CONTENT.
+	this->mListBox->setWidth(width);
+	// NG51: the original left-aligns the open list's rows, at the same inset as the closed field.
+	this->mImageListBox->setTextLeftPad(20);
+	this->mImageListBox->adjustSize();   // rows x row-sprite height
+	adjustHeight();
 }
 
 void ImageDropDownWidget::draw(gcn::Graphics *graphics) /* override */
@@ -2586,6 +2951,30 @@ int ImageDropDownWidget::setSelectedItem(lua_State *lua, lua_Object *lo)
 	return idx;
 }
 
+// How much room a dropped-down list actually has below the field. The base class measures it against
+// the immediate parent, which is right on a plain panel and wrong inside a scrolling column: there
+// the parent is the tall content container, so the list is sized to room the viewport does not have
+// and the ScrollArea clips whatever falls past its bottom edge - on the Preferences page a six-item
+// list showed three and a half. Measure against the nearest enclosing scroll viewport when there is
+// one, remembering that the content container's own Y carries the current scroll offset.
+static int DropDownRoomBelow(gcn::Widget *widget)
+{
+	gcn::Widget *parent = widget->getParent();
+	if (parent == nullptr) {
+		return 0;
+	}
+	int room = parent->getHeight() - widget->getY();
+	int y = widget->getY();
+	for (gcn::Widget *p = parent; p != nullptr; p = p->getParent()) {
+		if (auto *scrollArea = dynamic_cast<gcn::ScrollArea *>(p)) {
+			room = std::min(room, scrollArea->getChildrenArea().height - y);
+			break;
+		}
+		y += p->getY();
+	}
+	return room;
+}
+
 void ImageDropDownWidget::adjustHeight()
 {
 	Assert(mScrollArea && mScrollArea->getContent() != nullptr);
@@ -2609,7 +2998,7 @@ void ImageDropDownWidget::adjustHeight()
 
 	if (mDroppedDown && getParent())
 	{
-		int h = getParent()->getHeight() - getY();
+		int h = DropDownRoomBelow(this);
 
 		if (listBoxHeight > h - h2 - 2)
 		{
@@ -2624,7 +3013,13 @@ void ImageDropDownWidget::adjustHeight()
 	}
 
 	mScrollArea->setWidth(getWidth());
-	mScrollArea->setPosition(0, h2 + 2);
+	// NG51 -- THE cause of the clipped open list. DropDown::getChildrenArea() ALREADY offsets the
+	// children by mFoldedUpHeight + 1 and clips them to getHeight() - mFoldedUpHeight - 2, so a
+	// scroll area positioned at (0, h2 + 2) is offset a SECOND time: the list drew 74 px too low
+	// (measured: first row plate at container y 490 where the geometry says 414) and lost the same
+	// 74 px off the bottom, which is why a three-row list showed two rows and a sliver. The base
+	// class positions it at (0, 0) for exactly this reason; so do we.
+	mScrollArea->setPosition(0, 0);
 }
 
 void ImageDropDownWidget::setFont(gcn::Font *font)
@@ -2744,6 +3139,19 @@ MenuScreen::MenuScreen() : Container(), runLoop(true)
 /**
 **  Run the menu.  Loops until stop is called.
 */
+/// Tell the HUD script that the first in-game window came up or the last one went: the header's
+/// second button reads "Resume", dim, while one is up (scripts/<race>/ui_pandora.lua). "Gone" is
+/// told whenever the stack empties, so a window closed after the game ended leaves no stale state.
+static void TellHudWindowState(bool up)
+{
+	if (Editor.Running || (up && !GameRunning)) {
+		return;
+	}
+	CclCommand(up ? "if (WargusHD_InGameWindow ~= nil) then WargusHD_InGameWindow(true) end"
+	              : "if (WargusHD_InGameWindow ~= nil) then WargusHD_InGameWindow(false) end",
+	           false);
+}
+
 int MenuScreen::run(bool loop)
 {
 	// B6-1: the boot loading screen stays up through the guichan.lua menu build; the first
@@ -2772,6 +3180,29 @@ int MenuScreen::run(bool loop)
 	} else {
 		SetCallbacks(&GuichanCallbacks);
 		MenuStack.push(this);
+		TellHudWindowState(true);
+		// NG40: the tap that OPENS this menu is delivered as press-then-release, but the callback set
+		// switches to guichan between the two, so guisan receives the press and never the release and
+		// is left believing a button is still held. The next press is then treated as a continuation
+		// and the widget under it never fires -- measured as "the first tap on a freshly opened menu
+		// does nothing", 3 times out of 3. Feed the input driver a synthetic release so it starts this
+		// menu with a clean button state. A release with no matching press does not raise an action,
+		// so this cannot click anything by itself.
+		if (Input) {
+			SDL_Event up{};
+			up.type = SDL_MOUSEBUTTONUP;
+			up.button.type = SDL_MOUSEBUTTONUP;
+			up.button.button = SDL_BUTTON_LEFT;
+			up.button.state = SDL_RELEASED;
+			up.button.clicks = 1;
+			up.button.x = CursorScreenPos.x;
+			up.button.y = CursorScreenPos.y;
+			try {
+				Input->pushInput(up);
+			} catch (const gcn::Exception &) {
+				// ignore
+			}
+		}
 	}
 
 	return this->loopResult;
@@ -2802,6 +3233,7 @@ void MenuScreen::stop(int result, bool stopAll)
 				SetCallbacks(&EditorCallbacks);
 			}
 			GamePaused = false;
+			TellHudWindowState(false);
 			UI.StatusLine.Clear();
 			if (GameRunning) {
 				UIHandleMouseMove(CursorScreenPos);

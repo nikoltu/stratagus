@@ -39,9 +39,12 @@
 #include "hd_synth_graphics.h"
 #include "intern_video.h"
 #include "iolib.h"
+#include "map.h"
+#include "network.h"
 #include "nineslice.h"
 #include "player.h"
 #include "stratagus.h"
+#include "debug_bridge.h"
 #include <cstring>
 #include "ui.h"
 
@@ -82,6 +85,26 @@ float GpuWorldDrawZoom = 1.0f;
 // GPU-pipeline (Phase 5). See video.h. 1.0 => world renders straight to the backbuffer (no change).
 // Overwritten once at video init from <internal>/world_scale.txt on Android; clamped to [0.25, 1.0].
 float WorldRenderScale = 1.0f;
+
+// Classic view. See video.h. Presentation only: never part of a saved game or a network message.
+static bool ClassicView = false;
+
+void SetClassicView(bool on)
+{
+	if (ClassicView == on) {
+		return;
+	}
+	ClassicView = on;
+	ErrorPrint("ClassicView: %s\n", on ? "on" : "off");
+	if (on && Map.HDTileAtlasTried && !Map.ClassicTileAtlas) {
+		ErrorPrint("ClassicView: no classic terrain for this map, the terrain stays Remastered\n");
+	}
+}
+
+bool IsClassicView()
+{
+	return ClassicView;
+}
 
 // Upload an RGBA (paletteless) surface to a nearest-filtered, alpha-blended GPU texture. Returns
 // nullptr for paletted surfaces (kept on the CPU path for colour-cycling / palette remap) or on
@@ -655,6 +678,7 @@ bool CAtlasGraphic::Load(const std::string &path)
 	const fs::path dir = resolved.parent_path();
 	pages.reserve(pageCount);
 	for (uint32_t i = 0; i < pageCount; ++i) {
+		NetworkLoadingPing(); // a page takes seconds to decode: a loading device is not a dead one
 		const fs::path pagePath = dir / pageNames[i];
 		auto pf = std::make_unique<CFile>();
 		if (pf->open(pagePath.string().c_str(), CL_OPEN_READ) == -1) {
@@ -694,11 +718,143 @@ bool CAtlasGraphic::Load(const std::string &path)
 	return true;
 }
 
+// Classic view: cut the given frames out of an 8-bit indexed page into small RGBA pages, coloured by
+// `rgba` (one R,G,B,A entry per index), and upload those instead of the whole page (a classic page is
+// 38.8 MB as RGBA; its tiles are 1.5 MB). Each record is re-pointed at its new place. A frame that
+// cannot be placed gets a page index no draw accepts.
+// `cuts` (empty, or one entry per frame) marks the fog mask frames: CutKeyed = index 0 is nothing,
+// CutDither = keep only the checkerboard pixels, CutSolid = a full cell of the masks' colour.
+enum { CutKeyed = 1, CutDither = 2, CutSolid = 4 };
+static bool UploadPalettedFrames(SDL_Surface *indexed, const uint8_t rgba[256][4], int maxDim,
+                                 std::vector<hdatlas::HdFrameRecord> &frames,
+                                 std::vector<SDL_Texture *> &pages,
+                                 const std::vector<uint8_t> &cuts)
+{
+	const int side = std::min(maxDim, 1024);
+	struct Slot { int page; int x; int y; };
+	std::vector<Slot> slots(frames.size(), Slot{-1, 0, 0});
+	std::vector<int> pageHeights;
+	int shelfX = 0, shelfY = 0, shelfH = 0;
+	for (size_t i = 0; i < frames.size(); ++i) {
+		const hdatlas::HdFrameRecord &rec = frames[i];
+		const int fw = rec.sw, fh = rec.sh;
+		if (fw == 0 || fh == 0 || fw > side || fh > side
+			|| rec.sx + fw > indexed->w || rec.sy + fh > indexed->h) {
+			continue;
+		}
+		if (shelfX + fw > side) { // wrap to the next shelf row
+			shelfX = 0;
+			shelfY += shelfH;
+			shelfH = 0;
+		}
+		if (shelfY + fh > side) { // page full -> start a fresh page
+			pageHeights.push_back(shelfY + shelfH);
+			shelfX = shelfY = shelfH = 0;
+		}
+		slots[i] = Slot{(int) pageHeights.size(), shelfX, shelfY};
+		shelfX += fw;
+		if (fh > shelfH) {
+			shelfH = fh;
+		}
+	}
+	if (shelfY + shelfH > 0) {
+		pageHeights.push_back(shelfY + shelfH);
+	}
+	if (pageHeights.empty()) {
+		return false;
+	}
+
+	SDL_LockSurface(indexed);
+	const Uint8 *srcBase = static_cast<const Uint8 *>(indexed->pixels);
+	// The colour of the solid cells is the masks' own: the first mask pixel that is not index 0.
+	const uint8_t *ink = nullptr;
+	for (size_t i = 0; !ink && i < cuts.size(); ++i) {
+		if (cuts[i] != CutKeyed || slots[i].page < 0) {
+			continue;
+		}
+		for (int y = 0; !ink && y < frames[i].sh; ++y) {
+			const Uint8 *src = srcBase + (frames[i].sy + y) * indexed->pitch + frames[i].sx;
+			for (int x = 0; x < frames[i].sw; ++x) {
+				if (src[x]) {
+					ink = rgba[src[x]];
+					break;
+				}
+			}
+		}
+	}
+	bool ok = true;
+	for (size_t p = 0; ok && p < pageHeights.size(); ++p) {
+		SDL_Surface *page =
+		    SDL_CreateRGBSurfaceWithFormat(0, side, pageHeights[p], 32, SDL_PIXELFORMAT_RGBA32);
+		if (!page) {
+			ok = false;
+			break;
+		}
+		SDL_FillRect(page, nullptr, SDL_MapRGBA(page->format, 0, 0, 0, 0));
+		Uint8 *dstBase = static_cast<Uint8 *>(page->pixels);
+		for (size_t i = 0; i < frames.size(); ++i) {
+			if (slots[i].page != (int) p) {
+				continue;
+			}
+			const hdatlas::HdFrameRecord &rec = frames[i];
+			const int cut = i < cuts.size() ? cuts[i] : 0;
+			for (int y = 0; y < rec.sh; ++y) {
+				const Uint8 *src = srcBase + (rec.sy + y) * indexed->pitch + rec.sx;
+				Uint8 *dst = dstBase + (slots[i].y + y) * page->pitch + slots[i].x * 4;
+				if (cut) {
+					// Fog mask cell: the page was cleared to nothing, write only the kept pixels.
+					for (int x = 0; x < rec.sw; ++x, dst += 4) {
+						if ((cut & CutDither) && !hdatlas::classicFogDither(x, y)) {
+							continue;
+						}
+						if (cut & CutSolid) {
+							if (ink) {
+								memcpy(dst, ink, 4);
+							}
+						} else if (src[x]) {
+							memcpy(dst, rgba[src[x]], 4);
+						}
+					}
+					continue;
+				}
+				for (int x = 0; x < rec.sw; ++x, dst += 4) {
+					memcpy(dst, rgba[src[x]], 4);
+				}
+			}
+		}
+		NetworkLoadingPing(); // every cut page
+		SDL_Texture *tex = UploadSurfaceToTexture(page);
+		SDL_FreeSurface(page);
+		if (!tex) {
+			ok = false;
+			break;
+		}
+		pages.push_back(tex);
+	}
+	SDL_UnlockSurface(indexed);
+	if (!ok) {
+		return false;
+	}
+	for (size_t i = 0; i < frames.size(); ++i) {
+		hdatlas::HdFrameRecord &rec = frames[i];
+		if (slots[i].page < 0) {
+			rec.page = 0xFFFF;
+			continue;
+		}
+		rec.page = (uint16_t) slots[i].page;
+		rec.sx = (uint16_t) slots[i].x;
+		rec.sy = (uint16_t) slots[i].y;
+	}
+	return true;
+}
+
 // WargusHD: load a native Remastered TexturePacker atlas (<name>.json + its meta.image PNG page)
 // directly, with NO offline .hdatlas conversion step. Builds the same frames/pages/byHash model as
 // Load() so every draw method + FrameByName work unchanged. Frame keys keep their full TexturePacker
 // name (e.g. "Forest/forest_0"). Single page (meta.image). Returns false on any failure.
-bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask, bool fogMask)
+bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask, bool fogMask,
+                                      const unsigned char *palette, bool nearest,
+                                      const char *framePrefix, const char *maskPrefix)
 {
 	if (!pages.empty()) {
 		return true; // already loaded; single-shot
@@ -757,7 +913,13 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		// index 0 is the transparent key (magenta 255,0,255). A plain SDL_ConvertSurfaceFormat keeps
 		// index-0 pixels OPAQUE, so tree/scenery/fog frames upload a red/pink halo. Colour-key index 0
 		// and colour-key-blit onto a transparent RGBA32 target so keyed pixels become alpha 0.
-		if (!surface->format || surface->format->BytesPerPixel != 4) {
+		if (palette) {
+			// Classic view: the page stays indexed; it is coloured by `palette` at the cut below.
+			if (!surface->format || surface->format->BytesPerPixel != 1) {
+				SDL_FreeSurface(surface);
+				return false;
+			}
+		} else if (!surface->format || surface->format->BytesPerPixel != 4) {
 			const bool paletted = surface->format && surface->format->BytesPerPixel == 1;
 			if (paletted && !fogMask) {
 				SDL_SetColorKey(surface, SDL_TRUE, 0);
@@ -774,20 +936,37 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 			SDL_FreeSurface(surface);
 			surface = conv;
 		}
-		if (teamMask) {
+		if (palette) {
+			// nothing more to prepare
+		} else if (teamMask) {
 			// A luminance mask converts to RGBA as (lum,lum,lum,255) -> opaque. Remap so the luminance
 			// becomes ALPHA and RGB is white: the _team overlay's colour-mod then tints only the bright
 			// (team-colourable) pixels and leaves the rest transparent.
 			SDL_LockSurface(surface);
 			const SDL_PixelFormat *f = surface->format;
 			Uint8 *base = static_cast<Uint8 *>(surface->pixels);
-			for (int y = 0; y < surface->h; ++y) {
-				Uint32 *row = reinterpret_cast<Uint32 *>(base + y * surface->pitch);
-				for (int x = 0; x < surface->w; ++x) {
-					Uint8 r, g, b, a;
-					SDL_GetRGBA(row[x], f, &r, &g, &b, &a);
-					const Uint8 lum = (Uint8)((r * 77 + g * 150 + b * 29) >> 8);
-					row[x] = SDL_MapRGBA(f, 255, 255, 255, lum);
+			if (f->format == SDL_PIXELFORMAT_RGBA32) {
+				// STUTTER-LOAD-SPEED: the bytes stand as R, G, B, A; the same sum without two SDL
+				// calls per pixel (a mask page has up to 60 million of them).
+				for (int y = 0; y < surface->h; ++y) {
+					Uint8 *px = base + y * surface->pitch;
+					for (int x = 0; x < surface->w; ++x, px += 4) {
+						const Uint8 lum = (Uint8)((px[0] * 77 + px[1] * 150 + px[2] * 29) >> 8);
+						px[0] = 255;
+						px[1] = 255;
+						px[2] = 255;
+						px[3] = lum;
+					}
+				}
+			} else {
+				for (int y = 0; y < surface->h; ++y) {
+					Uint32 *row = reinterpret_cast<Uint32 *>(base + y * surface->pitch);
+					for (int x = 0; x < surface->w; ++x) {
+						Uint8 r, g, b, a;
+						SDL_GetRGBA(row[x], f, &r, &g, &b, &a);
+						const Uint8 lum = (Uint8)((r * 77 + g * 150 + b * 29) >> 8);
+						row[x] = SDL_MapRGBA(f, 255, 255, 255, lum);
+					}
 				}
 			}
 			SDL_UnlockSurface(surface);
@@ -811,8 +990,17 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		out = (int) v->asInt(0);
 		return true;
 	};
+	const size_t framePrefixLen = framePrefix ? strlen(framePrefix) : 0;
+	// Classic view: fog mask frames are kept beside the prefixed ones; `cuts` says how each is cut.
+	const size_t maskPrefixLen = (palette && maskPrefix) ? strlen(maskPrefix) : 0;
+	std::vector<uint8_t> cuts;
+	int firstMask = -1;
 	for (const auto &kv : *framesNode->object) {
 		const std::string &name = kv.first;
+		const bool isMask = maskPrefixLen && name.compare(0, maskPrefixLen, maskPrefix) == 0;
+		if (!isMask && framePrefixLen && name.compare(0, framePrefixLen, framePrefix) != 0) {
+			continue;
+		}
 		const content::JsonValue &f = kv.second;
 		const content::JsonValue *frameRect = f.find("frame");
 		int fx = 0, fy = 0, fw = 0, fh = 0;
@@ -843,6 +1031,31 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		rec.rotated = 0;
 		byHash.emplace(rec.nameHash, (uint32_t) frames.size());
 		frames.push_back(rec);
+		if (maskPrefixLen) {
+			cuts.push_back(isMask ? CutKeyed : 0);
+			if (isMask) {
+				if (firstMask < 0) {
+					firstMask = (int) frames.size() - 1;
+				}
+				rec.nameHash = hdatlas::fnv1a((name + "_dither").c_str());
+				byHash.emplace(rec.nameHash, (uint32_t) frames.size());
+				frames.push_back(rec);
+				cuts.push_back(CutKeyed | CutDither);
+			}
+		}
+	}
+	if (firstMask >= 0) {
+		// Two full cells of the size of a mask: all fog, and all explored-but-unseen ground.
+		hdatlas::HdFrameRecord rec = frames[firstMask];
+		const std::string solid = std::string(maskPrefix) + "solid";
+		rec.nameHash = hdatlas::fnv1a(solid.c_str());
+		byHash.emplace(rec.nameHash, (uint32_t) frames.size());
+		frames.push_back(rec);
+		cuts.push_back(CutSolid);
+		rec.nameHash = hdatlas::fnv1a((solid + "_dither").c_str());
+		byHash.emplace(rec.nameHash, (uint32_t) frames.size());
+		frames.push_back(rec);
+		cuts.push_back(CutSolid | CutDither);
 	}
 	if (frames.empty() || !pageSurface) {
 		if (pageSurface) { SDL_FreeSurface(pageSurface); }
@@ -865,8 +1078,14 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 			maxDim = std::min(info.max_texture_width, info.max_texture_height);
 		}
 	}
+	NetworkLoadingPing(); // between the decode and the upload
 	bool uploadOk = true;
-	if (pageSurface->w <= maxDim && pageSurface->h <= maxDim) {
+	if (palette) {
+		// Tiles: index 0 is a normal colour. Fog masks (index 0 = nothing) are told apart by `cuts`.
+		uint8_t rgba[256][4];
+		hdatlas::expandPalette6(palette, false, rgba);
+		uploadOk = UploadPalettedFrames(pageSurface, rgba, maxDim, frames, pages, cuts);
+	} else if (pageSurface->w <= maxDim && pageSurface->h <= maxDim) {
 		SDL_Texture *tex = UploadSurfaceToTexture(pageSurface);
 		if (tex) {
 			pages.push_back(tex);
@@ -880,6 +1099,7 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		} else {
 			int shelfX = 0, shelfY = 0, shelfH = 0, pageIdx = 0;
 			auto flushPage = [&]() -> bool {
+				NetworkLoadingPing(); // every re-packed page
 				SDL_Texture *tex = UploadSurfaceToTexture(page);
 				if (!tex) {
 					return false;
@@ -933,7 +1153,7 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		pages.clear();
 		return false;
 	}
-	if (fogMask) {
+	if (fogMask && !nearest) {
 		// EM1: the 216x216 bgs_Fow masks are drawn scaled DOWN to the ~66px tile screen rect; the
 		// default nearest filtering quantizes their smooth alpha gradients into hard tile-edge
 		// staircases ("two masks" artifact). Filter the fog pages bilinearly so the authored
@@ -1001,6 +1221,48 @@ void CAtlasGraphic::DrawAtlasFrameClipScaled(int frame, int dstX, int dstY, int 
 	                dstY + (int) std::lround(rec.offy * syScale),
 	                (int) std::lround(rec.sw * sxScale),
 	                (int) std::lround(rec.sh * syScale)};
+	const bool tint = (r != 255 || g != 255 || b != 255);
+	if (tint) {
+		SDL_SetTextureColorMod(pages[rec.page], r, g, b);
+	}
+	if (flip) {
+		SDL_RenderCopyEx(TheRenderer, pages[rec.page], &src, &dst, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+	} else {
+		SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
+	}
+	if (tint) {
+		SDL_SetTextureColorMod(pages[rec.page], 255, 255, 255);
+	}
+}
+
+// SPRITE-SCALE-TRUE (SPEC_SPRITE_SCALE_TRUE.md section 4): the frame's own canvas, centred on
+// (cx, cy), at `s` screen pixels per native pixel. Trim offset, mirroring and tint are handled as in
+// DrawAtlasFrameClipScaled; the difference is that no caller-side rectangle stands in for the canvas.
+void CAtlasGraphic::DrawAtlasFrameCentred(int frame, float cx, float cy, float s, bool flip,
+                                          uint8_t r, uint8_t g, uint8_t b) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size()) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	// The trimmed content lives at [offx, offx + sw] inside the cw-wide canvas; mirrored, it lives
+	// at [cw - offx - sw, cw - offx] (NG7).
+	const int offxEff = flip ? (rec.cw - rec.offx - rec.sw) : rec.offx;
+	const double halfW = rec.cw / 2.0;
+	const double halfH = rec.ch / 2.0;
+	const int x0 = (int) std::lround(cx + (offxEff - halfW) * s);
+	const int x1 = (int) std::lround(cx + (offxEff + rec.sw - halfW) * s);
+	const int y0 = (int) std::lround(cy + (rec.offy - halfH) * s);
+	const int y1 = (int) std::lround(cy + (rec.offy + rec.sh - halfH) * s);
+	if (x1 <= x0 || y1 <= y0) {
+		return;
+	}
+	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
+	SDL_Rect dst = {x0, y0, x1 - x0, y1 - y0};
 	const bool tint = (r != 255 || g != 255 || b != 255);
 	if (tint) {
 		SDL_SetTextureColorMod(pages[rec.page], r, g, b);
@@ -1125,8 +1387,14 @@ SDL_Texture *CPlayerColorGraphic::GetHudFrameColorTexture(unsigned frame, int co
 		for (int i = 0; i < n; ++i) {
 			Uint8 *p = base + i * 4; // RGBA32: p[0]=R p[1]=G p[2]=B p[3]=A
 			const int r = p[0], g = p[1], b = p[2], a = p[3];
-			// magenta team-mask test: high R & B, low G, roughly balanced R~B
-			if (a > 24 && r > 48 && b > 48 && g < r - 24 && g < b - 24 && std::abs(r - b) < 120) {
+			// M666-9: a strip built with the game's team mask carries the exact key (v, 0, v)
+			// (BuildHDIconStrip). The guess -- high R & B, low G, roughly balanced R~B -- stays
+			// for a strip read from a file; on the game's art it finds about half of the team
+			// region (1470 of 3120 px on forest_0) and none of it on a red picture (forest_40).
+			const bool team = HDIconStripHasTeamKey()
+			                  ? (g == 0 && r == b && r > 0)
+			                  : (r > 48 && b > 48 && g < r - 24 && g < b - 24 && std::abs(r - b) < 120);
+			if (a > 24 && team) {
 				const int inten = (r + b) / 2; // mask "grey" -> shade the player colour
 				p[0] = (Uint8)(c0.R * inten / 255);
 				p[1] = (Uint8)(c0.G * inten / 255);
@@ -1195,6 +1463,21 @@ void CGraphic::DrawFrameClipScaled(unsigned frame, int x, int y, int w, int h,
 		WarnInvalidGraphicFrame(*this, frame, false);
 		return;
 	}
+	// M666-3: in the HUD phase go to the backbuffer like the unscaled draws do (DrawSub,
+	// DrawFrameClip): the sheet's texture, or the per-frame one of a sheet too big for a texture.
+	if (GpuHudDrawActive && surface == TheScreen) {
+		SDL_Rect dst = {x, y, w, h};
+		if (mTexture) {
+			SDL_Rect src = {frame_map[frame].x, frame_map[frame].y, Width, Height};
+			HudRenderCopy(mTexture, src, dst);
+			return;
+		}
+		if (SDL_Texture *ft = GetHudFrameTexture(frame)) {
+			SDL_Rect src = {0, 0, Width, Height};
+			HudRenderCopy(ft, src, dst);
+			return;
+		}
+	}
 	SDL_Rect srect = {Sint16(frame_map[frame].x), Sint16(frame_map[frame].y),
 					  Uint16(Width), Uint16(Height)};
 	SDL_Rect drect = {Sint16(x), Sint16(y), Uint16(w), Uint16(h)};
@@ -1230,6 +1513,44 @@ void CGraphic::DrawNineSlice(const SDL_Rect &dest,
 			HudRenderCopy(mTexture, srect, drect);
 		} else {
 			SDL_BlitScaled(mSurface, &srect, surface, &drect);
+		}
+	}
+}
+
+void CGraphic::DrawNineSliceScaled(const SDL_Rect &dest, int srcBorder, int dstBorder,
+								   unsigned frame /*= 0*/) const
+{
+	if (frame >= frame_map.size()) {
+		WarnInvalidGraphicFrame(*this, frame, false);
+		return;
+	}
+	if (dest.w <= 0 || dest.h <= 0) {
+		return;
+	}
+	const int ox = frame_map[frame].x;
+	const int oy = frame_map[frame].y;
+	// Neither border may pass the middle of its rectangle.
+	const int sb = std::max(0, std::min(srcBorder, std::min(Width, Height) / 2));
+	const int db = std::max(0, std::min(dstBorder, std::min(dest.w, dest.h) / 2));
+	const int sx[4] = {0, sb, Width - sb, Width};
+	const int sy[4] = {0, sb, Height - sb, Height};
+	const int dx[4] = {dest.x, dest.x + db, dest.x + dest.w - db, dest.x + dest.w};
+	const int dy[4] = {dest.y, dest.y + db, dest.y + dest.h - db, dest.y + dest.h};
+
+	// Same GPU/CPU split as DrawNineSlice.
+	const bool gpu = GpuHudDrawActive && mTexture;
+	for (int row = 0; row < 3; ++row) {
+		for (int col = 0; col < 3; ++col) {
+			SDL_Rect srect = {ox + sx[col], oy + sy[row], sx[col + 1] - sx[col], sy[row + 1] - sy[row]};
+			SDL_Rect drect = {dx[col], dy[row], dx[col + 1] - dx[col], dy[row + 1] - dy[row]};
+			if (srect.w <= 0 || srect.h <= 0 || drect.w <= 0 || drect.h <= 0) {
+				continue;
+			}
+			if (gpu) {
+				HudRenderCopy(mTexture, srect, drect);
+			} else {
+				SDL_BlitScaled(mSurface, &srect, TheScreen, &drect);
+			}
 		}
 	}
 }
@@ -1474,6 +1795,18 @@ void CPlayerColorGraphic::DrawPlayerColorFrameClipScaled(int colorIndex, unsigne
 														 int x, int y, int w, int h,
 														 SDL_Surface *surface /*= TheScreen*/)
 {
+	// M666-9: the same per-player frame texture DrawPlayerColorFrameClip uses for the oversized
+	// icon sheet. Without it the scaled draw fell to the plain blit below and the picture kept the
+	// art's own purple (portrait cloth (80, 24, 88) beside blue units, capture c666_c).
+	if (GpuHudDrawActive && !mTexture && surface == TheScreen && !TeamMask
+	    && mSurface && mSurface->format->palette == nullptr) {
+		if (SDL_Texture *ft = GetHudFrameColorTexture(frame, colorIndex)) {
+			SDL_Rect src = {0, 0, Width, Height};
+			SDL_Rect dst = {x, y, w, h};
+			HudRenderCopy(ft, src, dst);
+			return;
+		}
+	}
 	if (mSurface && mSurface->format->palette == nullptr && TeamMask) {
 		SDL_Surface *saved = mSurface;
 		mSurface = GetColorVariant(colorIndex, false);
@@ -1892,18 +2225,36 @@ static SDL_Surface *MakePlaceholderSurface(int w, int h)
 */
 void CGraphic::Load(bool grayscale)
 {
+	// NG68: beat the debug watchdog's heartbeat. The blocking phase of a mission load is the
+	// per-sprite graphics load, and it runs with the loading screen INACTIVE, so neither the
+	// ShowLoadProgress hook nor the UpdateLoadingScreen one covers it -- the watchdog kept
+	// reporting "main loop STALLED 3..11s at 'UpdateDisplay:begin'" on every mission load, which
+	// is a false alarm pointing at the wrong place. This is the choke point that actually spends
+	// the seconds (one call per image file, not a per-frame path), and a genuine hang while
+	// loading a sprite now trips the watchdog labelled 'loading:graphics'.
+	DBG_CHECKPOINT("loading:graphics");
 	if (mSurface) {
 		return;
 	}
+	NetworkLoadingPing(); // LAN-MESH S8: the long part of a load; nothing happens outside one
 
 	// IC1: a few HD command graphics are synthesised in-engine from the native Remastered atlases
 	// (Portrait-face icons, portrait_button frame states) rather than shipping a derived PNG, so
 	// they are reachable from the Remastered folder alone. Try the builder by basename first; if the
 	// native atlas is absent the builder returns nullptr and we fall back to the on-disk file below.
+	// ICON-TEAM-KEY: true for the icon strip built with the team key (see the upload below).
+	bool teamKeyedStrip = false;
 	{
 		const std::string base = File.filename().string();
 		if (base == "icons_hd.png") {
-			mSurface = BuildHDIconStrip();
+			// The classic tileset directory in the path names the portrait set; the atlas keys are
+			// the terrain atlas names (classic wasteland == swamp_, classic swamp == xswamp_).
+			const std::string path = File.generic_string();
+			const char *set = path.find("/winter/") != std::string::npos ? "ice"
+			                  : path.find("/wasteland/") != std::string::npos ? "swamp"
+			                  : path.find("/swamp/") != std::string::npos ? "xswamp" : "forest";
+			mSurface = BuildHDIconStrip(set);
+			teamKeyedStrip = mSurface && HDIconStripHasTeamKey();
 		} else if (base == "hd_cmd_frame.png") {
 			mSurface = BuildHDCommandFrameStrip();
 		} else if (base == "hud_TopLeft.png" || base == "hud_TileableLeft.png") {
@@ -1913,13 +2264,18 @@ void CGraphic::Load(bool grayscale)
 			const char *frame = (base == "hud_TopLeft.png") ? "TopLeft" : "TileableLeft";
 			mSurface = BuildHDSidebarPanel(race, frame);
 		} else if (base == "f5_menu.png") {
-			mSurface = BuildHDHudF5Strip(Width ? Width : 200, Height ? Height : 100);
+			const std::string path = File.string();
+			const char *race = (path.find("/orc/") != std::string::npos
+			                    || path.find("\\orc\\") != std::string::npos) ? "orc" : "human";
+			mSurface = BuildHDHudF5Strip(race, Width ? Width : 200, Height ? Height : 100);
 		} else if (base == "hud_btn_small.png" || base == "hud_btn_small_pressed.png") {
 			const std::string path = File.string();
 			const char *race = (path.find("/orc/") != std::string::npos
 			                    || path.find("\\orc\\") != std::string::npos) ? "Orc" : "Human";
 			const bool pressed = (base == "hud_btn_small_pressed.png");
 			mSurface = BuildHDHudSmallButton(race, pressed, Width ? Width : 400, Height ? Height : 100);
+		} else if (base == "hud_complete_bar.png") {
+			mSurface = BuildHDHudCompleteBar(Width ? Width : 790, Height ? Height : 100);
 		}
 	}
 
@@ -2005,7 +2361,22 @@ void CGraphic::Load(bool grayscale)
 	// CPU compositor. mSurface is intentionally NOT freed here: CPU-read consumers (screenshots,
 	// the debug colour bridge) and the non-GPU / zoomed CPU draw paths still need it. Paletted
 	// graphics return nullptr and stay fully on the CPU path.
-	if (!mTexture) {
+	// ICON-TEAM-KEY: the icon strip that carries the team key (v, 0, v) gets no sheet texture.
+	// Every HUD draw of it then takes a per-frame texture (GetHudFrameTexture), and a draw in a
+	// player's colour the recoloured one (GetHudFrameColorTexture) -- the path written for a GL
+	// size cap below the strip's 24304 px, where the upload fails by itself. With a cap above that
+	// (32768 on the emulator, EVIDENCE-F2-001) the upload succeeded, both `!mTexture` gates of
+	// DrawPlayerColorFrameClip[Scaled] were shut and the sheet went to the screen as stored: the
+	// team region of the portrait and of the command icons showed the key itself, 1393 px of
+	// exact (v, 0, v) in the worker's portrait of work/c671_e.png.
+	if (teamKeyedStrip) {
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			LogPrint("ICONS team key strip %dx%d: no sheet texture, per-frame textures\n",
+			         mSurface->w, mSurface->h);
+		}
+	} else if (!mTexture) {
 		mTexture = UploadSurfaceToTexture(mSurface);
 	}
 }
@@ -2638,7 +3009,6 @@ void FreeGraphics()
 
 // Debug bridge: expose the (file-scope) loaded-graphic registry read-only, so the
 // `assets` command can enumerate loaded sprites without touching GraphicHash directly.
-#include "debug_bridge.h"
 void DebugBridge_CollectGraphics(std::vector<DebugGraphicInfo> &out)
 {
 	out.reserve(GraphicHash.size());

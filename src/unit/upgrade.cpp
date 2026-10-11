@@ -59,7 +59,7 @@
 --  Declarations
 ----------------------------------------------------------------------------*/
 
-static void AllowUnitId(CPlayer &player, int id, int units);
+void AllowUnitId(CPlayer &player, int id, int units);
 
 /*----------------------------------------------------------------------------
 --  Variables
@@ -980,7 +980,7 @@ void IndividualUpgradeLost(CUnit &unit, const CUpgrade *upgrade)
 **  @param id      unit type id
 **  @param units   maximum amount of units allowed
 */
-static void AllowUnitId(CPlayer &player, int id, int units)
+void AllowUnitId(CPlayer &player, int id, int units)
 {
 	player.Allow.Units[id] = units;
 }

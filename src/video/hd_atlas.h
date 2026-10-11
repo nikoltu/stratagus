@@ -66,4 +66,28 @@ inline uint32_t fnv1a(const char *s)
 	return h;
 }
 
+/// Classic view: expand a 256-entry palette of 6-bit R,G,B triplets (the layout of the game's
+/// .ppl files) into R,G,B,A bytes. Each value is multiplied by 4; alpha is 255. With keyIndex0
+/// index 0 becomes fully transparent (sprites, masks); without it index 0 is a normal colour (tiles).
+inline void expandPalette6(const uint8_t *ppl, bool keyIndex0, uint8_t out[256][4])
+{
+	for (int i = 0; i < 256; ++i) {
+		for (int c = 0; c < 3; ++c) {
+			out[i][c] = static_cast<uint8_t>((ppl[i * 3 + c] & 0x3F) * 4);
+		}
+		out[i][3] = 255;
+	}
+	if (keyIndex0) {
+		out[0][0] = out[0][1] = out[0][2] = out[0][3] = 0;
+	}
+}
+
+/// Classic view: the one-pixel checkerboard of explored-but-unseen ground. True for the pixels of
+/// a fog cell that stay black: those whose column + row (counted inside the cell) is even. The
+/// classic fog masks end in the same checkerboard, so a dithered mask and its neighbours join.
+inline bool classicFogDither(int x, int y)
+{
+	return ((x + y) & 1) == 0;
+}
+
 } // namespace hdatlas

@@ -49,6 +49,7 @@
 #include "spell/spell_summon.h"
 #include "spell/spell_teleport.h"
 #include "luacallback.h"
+#include "net_message.h"
 #include "script_sound.h"
 #include "script.h"
 #include "unittype.h"
@@ -341,6 +342,11 @@ static int CclDefineSpell(lua_State *l)
 		spell = it->get();
 		LuaDebugPrint(l, "Redefining spell-type '%s'\n", identname.data());
 	} else {
+		// The spell id travels in the type byte of a command packet.
+		if (!IsNetworkSpellId(SpellTypeTable.size())) {
+			LuaError(l, "Too many spells: '%s' would be spell %d, a network command can name spell 0..%d",
+			         identname.data(), int(SpellTypeTable.size()), MaxNetworkSpellId);
+		}
 		SpellTypeTable.push_back(std::make_unique<SpellType>(SpellTypeTable.size(), std::string{identname}));
 		spell = SpellTypeTable.back().get();
 		for (CUnitType *unitType : getUnitTypes()) { // adjust array for caster already defined

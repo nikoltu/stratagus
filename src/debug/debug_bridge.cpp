@@ -32,6 +32,8 @@
 #include "filesystem.h"
 #include "interface.h"
 #include "map.h"
+#include "net_message.h"
+#include "network.h"
 #include "parameters.h"
 #include "player.h"
 #include "script.h"
@@ -51,7 +53,6 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
 #include <ctime>
 #include <chrono>
 #include <csignal>
@@ -71,6 +72,7 @@
 #endif
 
 #ifdef __ANDROID__
+#include <SDL_system.h>
 #include <android/log.h>
 #define DBG_LOG_TAG "WargusHD"
 #endif
@@ -87,6 +89,9 @@ extern std::unique_ptr<gcn::Gui> Gui;
 ----------------------------------------------------------------------------*/
 
 static bool DbgInited = false;
+/// Whether the command file is read and the debug Lua calls exist. On Android only a build
+/// marked debuggable asks for it (the game activity keeps the file "debug_bridge" in the app's files folder); elsewhere always.
+static bool DbgCommands = true;
 static fs::path DbgDir;       /// <UserDirectory>/wdbg
 static fs::path DbgCmdFile;   /// wdbg/cmd
 static fs::path DbgOutFile;   /// wdbg/out.json
@@ -653,6 +658,117 @@ std::string CmdLua(const std::string &code)
 	return InjectorResult(true, ret);
 }
 
+// Lua DebugNetQuitPlayer(player): in a single-player game, take a player out the way a player
+// of a network game goes out for good - the executed quit command, reason "connection lost".
+// To look at the rule for a gone player's units on one device (`lua DebugNetQuitPlayer(1)`).
+// It exists only with the debug bridge: registered by DebugBridge_Init, defined nowhere else.
+// Returns true if the quit ran.
+int CclDebugNetQuitPlayer(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const int player = LuaToNumber(l, 1);
+
+	if (IsNetworkGame() || !InjectorGameReady() || player < 0 || player >= NumPlayers
+		|| player == PlayerNumNeutral || player == ThisPlayer->Index
+		|| Players[player].Type == PlayerTypes::PlayerNobody || Players[player].Gone) {
+		lua_pushboolean(l, 0);
+		return 1;
+	}
+	NetworkExecQuit(player, NetQuitLost);
+	lua_pushboolean(l, 1);
+	return 1;
+}
+
+// Lua DebugNetFakeWait(table or nil): make NetWaitState() tell a made-up wait until it is
+// cleared, to look at the waiting plate and at the held loading line on one device. Only what
+// the scripts are told is made up; nothing of the network code is touched and no cycle stops.
+//   DebugNetFakeWait{name = "Thrall", ms = 45000, allowance = 100000}   a player is awaited
+//   DebugNetFakeWait{name = "Thrall", removing = true}                  his removal is agreed
+//   DebugNetFakeWait{selfout = true, reason = "connection_lost"}        this device is out
+//   DebugNetFakeWait{held = true, names = {"Thrall", "Lothar"}}         the game has not begun
+//   DebugNetFakeWait(nil)                                               the network's state again
+// The times count down in real time. The plate script is read in if the game has not read it.
+// It exists only with the debug bridge: registered by DebugBridge_Init, defined nowhere else.
+int CclDebugNetFakeWait(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	if (!lua_istable(l, 1)) {
+		NetworkSetFakeWaitView(nullptr);
+		lua_pushboolean(l, 1);
+		return 1;
+	}
+	const auto text = [l](const char *name) {
+		std::string value;
+		lua_getfield(l, 1, name);
+		if (lua_isstring(l, -1)) {
+			value = lua_tostring(l, -1);
+		}
+		lua_pop(l, 1);
+		return value;
+	};
+	const auto number = [l](const char *name, int fallback) {
+		lua_getfield(l, 1, name);
+		const int value = lua_isnumber(l, -1) ? static_cast<int>(lua_tonumber(l, -1)) : fallback;
+		lua_pop(l, 1);
+		return value;
+	};
+	const auto flag = [l](const char *name) {
+		lua_getfield(l, 1, name);
+		const bool value = lua_toboolean(l, -1) != 0;
+		lua_pop(l, 1);
+		return value;
+	};
+	CNetWaitView view;
+
+	view.SelfLoaded = true;
+	if (flag("held")) {
+		view.Phase = "start";
+		view.Held = true;
+		const int ms = number("ms", -1);
+		lua_getfield(l, 1, "names");
+		if (lua_istable(l, -1)) {
+			const int count = lua_rawlen(l, -1);
+			for (int i = 1; i <= count; ++i) {
+				lua_rawgeti(l, -1, i);
+				if (lua_isstring(l, -1)) {
+					CNetWaitPlayer player;
+					player.Player = i;
+					player.Name = lua_tostring(l, -1);
+					player.State = "loading";
+					player.MsLeft = ms;
+					view.Players.push_back(player);
+				}
+				lua_pop(l, 1);
+			}
+		}
+		lua_pop(l, 1);
+	} else if (flag("selfout")) {
+		view.Phase = "game";
+		view.SelfOut = true;
+		view.SelfOutReason = text("reason");
+		if (view.SelfOutReason.empty()) {
+			view.SelfOutReason = "connection_lost";
+		}
+	} else {
+		view.Phase = "game";
+		view.Player = number("player", -1);
+		view.Name = text("name");
+		view.MsLeft = number("ms", 60000);
+		view.AllowanceMsLeft = number("allowance", 120000);
+		view.Removing = flag("removing");
+		CNetWaitPlayer player;
+		player.Player = view.Player;
+		player.Name = view.Name;
+		player.State = view.Removing ? "removing" : "silent";
+		player.MsLeft = view.MsLeft;
+		view.Players.push_back(player);
+	}
+	NetworkSetFakeWaitView(&view);
+	CclCommand("if (NetWaitFrame == nil) then Load(\"scripts/lan_wait.lua\") end");
+	lua_pushboolean(l, 1);
+	return 1;
+}
+
 std::string CmdTrain(const std::vector<std::string> &tok)
 {
 	if (!InjectorGameReady()) return InjectorResult(false, "no game");
@@ -929,6 +1045,88 @@ std::string CmdHud()
 	return j.s;
 }
 
+// Play a finger gesture into the touch layer (video/sdl.cpp). Usage: touch <steps>,
+// steps `d X Y`, `m X Y`, `u`, `w MS`, and `d2` / `m2` / `u2` for a second finger; X, Y in
+// logical framebuffer pixels (the space of the `hud` and `touchinfo` rects). The script plays
+// over the following frames; read the outcome with `touchinfo` or `state` afterwards.
+std::string CmdTouch(const std::string &script)
+{
+	Json j;
+	std::string error;
+	const bool ok = DebugBridge_TouchScript(script, error);
+	j.ch('{');
+	j.boolean("ok", ok);
+	if (!ok) {
+		j.comma(); j.str("msg", error);
+	}
+	j.ch('}');
+	return j.s;
+}
+
+// What the touch routes can be checked against: the touch layer's own state, the group
+// strip (rect, state and unit count per group), the placement preview, the selection with
+// the length of each unit's order queue, and the Shift bit (must be 0 between gestures).
+std::string CmdTouchInfo()
+{
+	Json j;
+	j.ch('{');
+	j.key_("touch"); j.ch('{'); j.raw(DebugBridge_TouchState()); j.ch('}');
+	j.comma(); j.boolean("touchMode", UiTouchMode());
+	j.comma(); j.num("keyModifiers", KeyModifiers);
+	j.comma(); j.num("cursorState", static_cast<long>(CursorState));
+	j.comma(); j.boolean("stripShown", GameRunning && UiTouchGroupStripShown());
+
+	j.comma(); j.key_("groups"); j.ch('[');
+	for (int group = 1; group <= 9; ++group) {
+		int x = 0, y = 0, w = 0, h = 0;
+		const bool fits = GameRunning && UiTouchGroupSlotRect(group, x, y, w, h);
+		if (group > 1) j.comma();
+		j.ch('{');
+		j.num("group", group);
+		j.comma(); j.num("count", GameRunning ? static_cast<long>(GetUnitsOfGroup(group).size()) : 0);
+		j.comma(); j.num("state", fits ? UiTouchGroupSlotState(group) : 0);
+		j.comma(); j.num("x", x);
+		j.comma(); j.num("y", y);
+		j.comma(); j.num("w", w);
+		j.comma(); j.num("h", h);
+		j.ch('}');
+	}
+	j.ch(']');
+
+	j.comma(); j.key_("preview");
+	Vec2i tile;
+	if (GameRunning && CursorBuilding && UI.SelectedViewport
+		&& GetBuildingPreviewTile(*UI.SelectedViewport, tile)) {
+		j.ch('{');
+		j.str("type", CursorBuilding->Ident);
+		j.comma(); j.num("tileX", tile.x);
+		j.comma(); j.num("tileY", tile.y);
+		j.comma(); j.num("tileW", CursorBuilding->TileWidth);
+		j.comma(); j.num("tileH", CursorBuilding->TileHeight);
+		j.ch('}');
+	} else {
+		j.raw("null");
+	}
+	j.comma(); j.key_("building");
+	if (CursorBuilding) {
+		j.esc(CursorBuilding->Ident);
+	} else {
+		j.raw("null");
+	}
+
+	j.comma(); j.key_("selected"); j.ch('[');
+	for (size_t i = 0; i < Selected.size(); ++i) {
+		if (i) j.comma();
+		j.ch('{');
+		j.num("id", Selected[i] ? static_cast<long>(UnitNumber(*Selected[i])) : -1);
+		j.comma(); j.num("orders", Selected[i] ? static_cast<long>(Selected[i]->Orders.size()) : 0);
+		j.ch('}');
+	}
+	j.ch(']');
+	j.ch('}');
+	return j.s;
+}
+
 std::string Dispatch(const std::string &cmdline)
 {
 	// Trim leading whitespace.
@@ -968,6 +1166,9 @@ std::string Dispatch(const std::string &cmdline)
 	if (verb == "pcolor")    return CmdPColor(Tokenize(line));
 	// --- HUD layout dump ---
 	if (verb == "hud")       return CmdHud();
+	// --- touch routes: play a gesture, read what it did ---
+	if (verb == "touch")     return CmdTouch((sp != std::string::npos) ? line.substr(sp + 1) : "");
+	if (verb == "touchinfo") return CmdTouchInfo();
 	// --- arbitrary Lua eval (UI testing: open any menu without touch navigation) ---
 	if (verb == "lua") {
 		std::string code = (sp != std::string::npos) ? line.substr(sp + 1) : "";
@@ -1289,6 +1490,21 @@ void DebugBridge_Init()
 
 	DbgInited = true;
 
+#ifdef __ANDROID__
+	{
+		// A file, not an environment variable: where the library runs under binary translation
+		// (an x86 emulator) the Java side and this side do not share an environment.
+		const char *files = SDL_AndroidGetInternalStoragePath();
+		std::error_code markEc;
+		DbgCommands = files != nullptr && fs::exists(fs::path(files) / "debug_bridge", markEc);
+	}
+	__android_log_print(ANDROID_LOG_INFO, DBG_LOG_TAG, "debug bridge commands %s", DbgCommands ? "on" : "off");
+#endif
+	if (Lua && DbgCommands) {
+		lua_register(Lua, "DebugNetQuitPlayer", CclDebugNetQuitPlayer);
+		lua_register(Lua, "DebugNetFakeWait", CclDebugNetFakeWait);
+	}
+
 	WriteStatus();
 
 	DebugBridge_StartWatchdog();
@@ -1315,6 +1531,9 @@ void DebugBridge_Poll()
 
 	WriteStatus();
 
+	if (!DbgCommands) {
+		return; // status and crash records only
+	}
 	std::error_code ec;
 	if (!fs::exists(DbgCmdFile, ec)) {
 		return;

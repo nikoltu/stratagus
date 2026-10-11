@@ -292,9 +292,13 @@ void COrder_UpgradeTo::Execute(CUnit &unit) /* override */
 	const CUnitType &newtype = *this->Type;
 	const CUnitStats &newstats = newtype.Stats[player.Index];
 
+	const bool firstUnit = this->Ticks == 0;
 	this->Ticks += std::max(1, player.SpeedUpgrade / SPEEDUP_FACTOR);
 	if (!this->Instant && this->Ticks < newstats.Costs[TimeCost]) {
-		unit.Wait = CYCLES_PER_SECOND / 6;
+		unit.Wait = WC2_FRAMES_PER_TIME_UNIT - 1; // one tick per WC2_FRAMES_PER_TIME_UNIT cycles
+		if (firstUnit) {
+			unit.Wait += WC2_RESEARCH_EXTRA_FRAMES;
+		}
 		return ;
 	}
 

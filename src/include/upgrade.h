@@ -102,6 +102,7 @@ extern void IndividualUpgradeLost(CUnit &unit, const CUpgrade *upgrade); /// Mak
 // id -- unit type id, af -- `A'llow/`F'orbid
 
 extern int UnitIdAllowed(const CPlayer &player, int id);
+extern void AllowUnitId(CPlayer &player, int id, int units);
 extern void AllowUpgradeId(CPlayer &player, int id, char af);
 
 extern char UpgradeIdAllowed(const CPlayer &player, int id);

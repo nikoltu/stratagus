@@ -64,6 +64,13 @@ void CStatusLine::Draw()
 void CStatusLine::Set(const std::string &status)
 {
 	if (KeyState != EKeyState::Input) {
+		// NG37: the text and the cost icons are ONE message, and the costs used to outlive the text
+		// that owned them -- DrawCosts() paints at a fixed TextX + 268 whatever the current text is,
+		// so a transient notice ("Autosave") appeared beside, or on top of, the resource icons left
+		// over from the last button hint. Whoever sets the text owns the costs: clear them here and
+		// let the one caller that has costs (UpdateStatusLineForButton) re-set them immediately
+		// afterwards, which is exactly what it already does.
+		this->ClearCosts();
 		this->StatusLine = status;
 	}
 }
@@ -104,22 +111,42 @@ void CStatusLine::ClearCosts()
 */
 void CStatusLine::DrawCosts()
 {
-	int x = UI.StatusLine.TextX + 268;
-	CLabel label(GetGameFont());
+	// NG81: 268 and the 20 px icon advance below were both sized for the classic small-font
+	// layout. Used unscaled in the HD HUD they overprint: remaster_small measures "BUILD FARM"
+	// at 226 so it clears, but "BUILD BARRACKS" at 315 and "BUILD BASIC STRUCTURE" at 454 run
+	// under their own icons, and a resource icon measures 87 px against the 20 the amount was
+	// offset by, so each amount was drawn inside its own icon.
+	//
+	// Keep 268 as a MINIMUM so every hint that already fits is placed exactly as before, and
+	// advance past an icon by its real width the way the maintained copy of this same routine
+	// does (CPopupContentTypeCosts::Draw, ui/popup.cpp) -- IconWidth when the UI declares one,
+	// the graphic's own width otherwise, plus this function's existing 5 px gap.
+	const int textWidth = this->Font ? this->Font->Width(this->StatusLine) : 0;
+	int x = UI.StatusLine.TextX + std::max(268, textWidth + 5);
+	// COSTFONT: the amounts belong to the hint beside them, so they take its face. They used to
+	// draw in the classic bitmap game font, which renders them visibly smaller than the text they
+	// annotate. The original cannot be doing that: the Oracle's `fonts` table (E1) has exactly ONE
+	// enUS typeface, Data/font/BLQ55.ttf, at three sizes -- there is no second face for it to use.
+	// Our own resource bar already draws the equivalent numbers in remaster_small
+	// (human/ui_pandora.lua). Fall back to the game font if the UI never set one.
+	CLabel label(this->Font ? *this->Font : GetGameFont());
 	if (this->Costs[ManaResCost]) {
-		UI.Resources[ManaResCost].G->DrawFrameClip(UI.Resources[ManaResCost].IconFrame, x, UI.StatusLine.TextY);
+		const CGraphic *manaG = UI.Resources[ManaResCost].G.get();
+		manaG->DrawFrameClip(UI.Resources[ManaResCost].IconFrame, x, UI.StatusLine.TextY);
 
-		x += 20;
+		const int manaOffset = UI.Resources[ManaResCost].IconWidth;
+		x += (manaOffset != -1 ? manaOffset : manaG->Width) + 5;
 		x += label.Draw(x, UI.StatusLine.TextY, this->Costs[ManaResCost]);
 	}
 
 	for (unsigned int i = 1; i <= MaxCosts; ++i) {
 		if (this->Costs[i]) {
 			x += 5;
-			if (UI.Resources[i].G) {
-				UI.Resources[i].G->DrawFrameClip(UI.Resources[i].IconFrame,
+			if (const CGraphic *G = UI.Resources[i].G.get()) {
+				G->DrawFrameClip(UI.Resources[i].IconFrame,
 					x, UI.StatusLine.TextY);
-				x += 20;
+				const int xOffset = UI.Resources[i].IconWidth;
+				x += (xOffset != -1 ? xOffset : G->Width) + 5;
 			}
 			x += label.Draw(x, UI.StatusLine.TextY, this->Costs[i]);
 			if (x > Video.Width - 60) {
@@ -135,6 +162,8 @@ void CStatusLine::DrawCosts()
 void CStatusLine::Clear()
 {
 	if (KeyState != EKeyState::Input) {
+		// NG37: same ownership rule as Set() -- clearing the message clears its costs.
+		this->ClearCosts();
 		this->StatusLine.clear();
 	}
 }

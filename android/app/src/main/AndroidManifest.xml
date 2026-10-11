@@ -23,6 +23,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- A LAN room and a LAN game hold a Wi-Fi lock: without it a tablet's Wi-Fi saves power and
+         answers the other devices late or not at all. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- First-run content gate: read the user-selected Warcraft II: Remastered files folder. -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
@@ -48,15 +51,48 @@
             </intent-filter>
         </activity>
 
+        <!-- First-run gate: storage access, the game folder and its verification. -->
+        <activity
+            android:name=".GateActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+
+        <!-- Preparing screen: unpacks the bundled content and reports what is in place. -->
+        <activity
+            android:name=".PrepActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+
+        <!-- The launcher's shell. -->
+        <activity
+            android:name=".HomeActivity"
+            android:label="@string/app_name"
+            android:windowSoftInputMode="adjustNothing"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+
+        <!-- Developer screen: starts the game from request files and shows what it returned. -->
+        <activity
+            android:name=".LaunchActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="sensorLandscape"
+            android:launchMode="singleTop"
+            android:exported="false" />
+
+        <!-- The game runs in a process of its own and is started only through GameLaunch. -->
         <activity
             android:name=".WargusHDActivity"
+            android:process=":game"
+            android:theme="@style/GameTheme"
             android:label="@string/app_name"
             android:alwaysRetainTaskState="true"
             android:launchMode="singleInstance"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:screenOrientation="sensorLandscape"
             android:preferMinimalPostProcessing="true"
-            android:exported="true" />
+            android:exported="false" />
     </application>
 
 </manifest>

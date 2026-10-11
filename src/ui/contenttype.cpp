@@ -33,6 +33,9 @@
 --  Includes
 ----------------------------------------------------------------------------*/
 
+#include <algorithm>
+#include <string>
+#include <type_traits>
 #include "stratagus.h"
 
 #include "ui/contenttype.h"
@@ -57,6 +60,36 @@ extern UStrInt GetComponent(const CUnit &unit, int index, EnumVariable e, int t)
 **  @param unit         unit with variable to show.
 **  @param defaultfont  default font if no specific font in extra data.
 */
+// UPGRADE-LOOK: the original prints the bonus an upgrade gives - "Damage: 2-9+2", "Armor: 2+2" - with
+// the "+n" in yellow (255, 204, 0) (work/agent-orig-7 captures f3_footman_w1, f5_footman_w1a1). The
+// card's texts mark that part as reverse ("~<...~>"); the baked HD face takes no font colour, so
+// the marked part is tinted here. Returns the drawn width, as CLabel::Draw does.
+static int DrawWithBonusTint(CLabel &label, int x, int y, std::string_view text)
+{
+	int w = 0;
+	while (!text.empty()) {
+		const auto open = text.find("~<");
+		if (open == std::string_view::npos) {
+			w += label.Draw(x + w, y, text);
+			break;
+		}
+		if (open > 0) {
+			w += label.Draw(x + w, y, text.substr(0, open));
+		}
+		text.remove_prefix(open + 2);
+		const auto close = text.find("~>");
+		const std::string_view marked = text.substr(0, close);
+		SetGlyphTint(255, 204, 0);
+		w += label.Draw(x + w, y, marked);
+		SetGlyphTint(255, 255, 255);
+		if (close == std::string_view::npos) {
+			break;
+		}
+		text.remove_prefix(close + 2);
+	}
+	return w;
+}
+
 void CContentTypeText::Draw(const CUnit &unit, CFont *defaultfont) const /* override */
 {
 	int x = this->Pos.x;
@@ -72,7 +105,7 @@ void CContentTypeText::Draw(const CUnit &unit, CFont *defaultfont) const /* over
 		std::string::size_type pos;
 		if ((pos = text.find("~|")) != std::string::npos) {
 			const int offsetx = font.Width(std::string_view(text).substr(0, pos));
-			x += label.Draw(x - offsetx, y, text) - offsetx;
+			x += DrawWithBonusTint(label, x - offsetx, y, text) - offsetx;
 		} else if (this->Centered) {
 			x += (label.DrawCentered(x, y, text) * 2);
 		} else {
@@ -87,8 +120,20 @@ void CContentTypeText::Draw(const CUnit &unit, CFont *defaultfont) const /* over
 
 	if (this->Index != -1) {
 		if (!this->Stat) {
-			std::visit([&](const auto &value) { label.Draw(x, y, value); },
-			           GetComponent(unit, this->Index, this->Component, 0));
+			// CASTER-PANEL: a value with no caption before it and Centered set is centred on its
+			// position (the number inside the "Magic:" bar, work/agent-orig-6/ORIG6.md).
+			const bool centred = this->Centered && !this->Text;
+			std::visit([&](const auto &value) {
+				if (centred) {
+					if constexpr (std::is_same_v<std::decay_t<decltype(value)>, int>) {
+						label.DrawCentered(x, y, std::to_string(value));
+					} else {
+						label.DrawCentered(x, y, std::string_view(value));
+					}
+				} else {
+					label.Draw(x, y, value);
+				}
+			}, GetComponent(unit, this->Index, this->Component, 0));
 		} else {
 			int value = unit.Type->MapDefaultStat.Variables[this->Index].Value;
 			int diff = unit.Stats->Variables[this->Index].Value - value;
@@ -98,7 +143,7 @@ void CContentTypeText::Draw(const CUnit &unit, CFont *defaultfont) const /* over
 			} else {
 				char buf[64];
 				snprintf(buf, sizeof(buf), diff > 0 ? "%d~<+%d~>" : "%d~<-%d~>", value, diff);
-				label.Draw(x, y, buf);
+				DrawWithBonusTint(label, x, y, buf);
 			}
 		}
 	}
@@ -305,7 +350,18 @@ void CContentTypeLifeBar::Draw(const CUnit &unit, CFont *) const /* override */
 	}
 	const Uint32 color = IndexToColor(this->colors[i]);
 
-	if (this->borderColor) {
+	if (this->hasSeat) {
+		// M666-9: the original's bar sits on a black seat and its unfilled part is grey (skin
+		// `hud_hp_bar`; k = 3, work/agent-orig-scenes/captures e01, hi10, i02: fill x 21..170,
+		// y 633..647; black x 15..176, y 627..653). The margins and the grey come from Lua.
+		Video.FillRectangleClip(ColorBlack, this->Pos.x - 1 - this->seat[0], this->Pos.y - 1 - this->seat[1],
+		                        this->Width + this->seat[0] + this->seat[2],
+		                        this->Height + this->seat[1] + this->seat[3]);
+		if (this->hasTrack) {
+			Video.FillRectangleClip(Video.MapRGB(TheScreen->format, this->track), this->Pos.x - 1,
+			                        this->Pos.y - 1, this->Width, this->Height);
+		}
+	} else if (this->borderColor) {
 		// Border. We have a simple heuristic to determine how big it is...
 		// TODO: make configurable?
 		auto thickness = this->Height <= 6 ? 2 : 3;
@@ -341,6 +397,28 @@ void CContentTypeCompleteBar::Draw(const CUnit &unit, CFont *) const /* override
 	int h = this->height;
 	Assert(w > 0);
 	Assert(h > 4);
+	if (this->frame > 0) {
+		// The frame from its outer edge inwards, as measured at six pixels: three light steps,
+		// a dark one, then black; scaled to the thickness asked for.
+		static const int steps[6][3] = {{252, 248, 240}, {243, 239, 231}, {159, 157, 152},
+		                                {75, 74, 71}, {8, 8, 8}, {8, 8, 8}};
+		const int t = this->frame;
+		for (int i = 0; i < t && 2 * i < w && 2 * i < h; ++i) {
+			const int *c = steps[std::min(5, i * 6 / t)];
+			Video.DrawRectangleClip(Video.MapRGB(TheScreen->format, c[0], c[1], c[2]), x + i, y + i, w - 2 * i, h - 2 * i);
+		}
+		const int tw = w - 2 * t;
+		const int th = h - 2 * t;
+		if (tw > 0 && th > 0) {
+			const CVariable &v = unit.Variable[this->varIndex];
+			const int fw = std::max(0, std::min(tw, (int) ((long long) v.Value * tw / v.Max)));
+			Video.FillRectangleClip(Video.MapRGB(TheScreen->format, trackRGB[0], trackRGB[1], trackRGB[2]), x + t, y + t, tw, th);
+			if (fw > 0) {
+				Video.FillRectangleClip(Video.MapRGB(TheScreen->format, fillRGB[0], fillRGB[1], fillRGB[2]), x + t, y + t, fw, th);
+			}
+		}
+		return;
+	}
 	const Uint32 color = (colorIndex != -1) ? IndexToColor(colorIndex) : UI.CompletedBarColor;
 	const int f = (100 * unit.Variable[this->varIndex].Value) / unit.Variable[this->varIndex].Max;
 
@@ -622,6 +700,22 @@ void CContentTypeLifeBar::Parse(lua_State *l) /* override */
 			} else {
 				this->borderColor = LuaToUnsignedNumber(l, -1);
 			}
+		} else if (key == "Seat") {
+			// M666-9: {left, top, right, bottom} px of black around the bar
+			if (!lua_istable(l, -1) || lua_rawlen(l, -1) != 4) {
+				LuaError(l, "incorrect argument, need list of size 4 with {left, top, right, bottom}");
+			}
+			for (int i = 0; i < 4; ++i) {
+				this->seat[i] = LuaToNumber(l, -1, i + 1);
+			}
+			this->hasSeat = true;
+		} else if (key == "Track") {
+			// M666-9: {r, g, b} of the unfilled part
+			if (!lua_istable(l, -1) || lua_rawlen(l, -1) != 3) {
+				LuaError(l, "incorrect argument, need list of size 3 with {r, g, b}");
+			}
+			this->track = CColor(LuaToNumber(l, -1, 1), LuaToNumber(l, -1, 2), LuaToNumber(l, -1, 3));
+			this->hasTrack = true;
 		} else {
 			LuaError(l, "'%s' invalid for method 'LifeBar' in DefinePanelContents", key.data());
 		}
@@ -667,6 +761,16 @@ void CContentTypeCompleteBar::Parse(lua_State *l) /* override */
 			this->colorIndex = GetColorIndexByName(colorName);
 			if (colorIndex == -1) {
 				LuaError(l, "incorrect color: '%s' ", colorName.data());
+			}
+		} else if (key == "Frame") {
+			this->frame = LuaToNumber(l, -1);
+		} else if (key == "FillRGB" || key == "TrackRGB") {
+			int *rgb = (key == "FillRGB") ? this->fillRGB : this->trackRGB;
+			if (!lua_istable(l, -1) || lua_rawlen(l, -1) != 3) {
+				LuaError(l, "CompleteBar: %s needs {r, g, b}", key.data());
+			}
+			for (int i = 0; i < 3; ++i) {
+				rgb[i] = LuaToNumber(l, -1, i + 1);
 			}
 		} else {
 			LuaError(l, "'%s' invalid for method 'CompleteBar' in DefinePanelContents", key.data());

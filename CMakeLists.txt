@@ -146,6 +146,8 @@ source_group(animation FILES ${animation_SRCS})
 set(ai_SRCS
 	src/ai/ai_building.cpp
 	src/ai/ai.cpp
+	src/ai/wc2ai_data.cpp
+	src/ai/wc2ai.cpp
 	src/ai/ai_force.cpp
 	src/ai/ai_magic.cpp
 	src/ai/ai_plan.cpp
@@ -239,6 +241,9 @@ source_group(missile FILES ${missile_SRCS})
 set(network_SRCS
 	src/network/commands.cpp
 	src/network/net_lowlevel.cpp
+	src/network/net_mesh.cpp
+	src/network/net_mesh_glue.cpp
+	src/network/net_mesh_wire.cpp
 	src/network/net_message.cpp
 	src/network/netconnect.cpp
 	src/network/network.cpp
@@ -309,6 +314,11 @@ set(stratagusmain_SRCS
 	src/stratagus/translate.cpp
 	src/stratagus/util.cpp
 	src/stratagus/wc2data.cpp
+	src/stratagus/globalsave.cpp
+	src/stratagus/launchresult.cpp
+	src/stratagus/launcher_bridge.cpp
+	src/stratagus/wc2mission.cpp
+	src/stratagus/wc2strings.cpp
 )
 source_group(stratagusmain FILES ${stratagus_SRCS})
 
@@ -355,6 +365,7 @@ set(video_SRCS
 	src/video/linedraw.cpp
 	src/video/mng.cpp
 	src/video/movie.cpp
+	src/video/webm_movie.cpp
 	src/video/nineslice.cpp
 	src/video/uianchor.cpp
 	src/video/uiscale.cpp
@@ -515,9 +526,13 @@ set(stratagus_generic_HDRS
 	src/include/movie.h
 	src/include/net_lowlevel.h
 	src/include/net_serialization.h
+	src/include/net_mesh.h
+	src/include/net_mesh_glue.h
+	src/include/net_mesh_wire.h
 	src/include/net_message.h
 	src/include/netconnect.h
 	src/include/network.h
+	src/include/network_test_hooks.h
 	src/include/network/netsockets.h
 	src/include/parameters.h
 	src/include/particle.h
@@ -565,6 +580,7 @@ set(stratagus_generic_HDRS
 set(stratagus_tests_SRCS
 	tests/main.cpp
 	tests/stratagus/test_action_built.cpp
+	tests/stratagus/test_command_quit.cpp
 	tests/stratagus/test_depend.cpp
 	tests/stratagus/test_format.cpp
 	tests/stratagus/test_luacallback.cpp
@@ -574,6 +590,8 @@ set(stratagus_tests_SRCS
 	tests/stratagus/test_unitptr.cpp
 	tests/stratagus/test_util.cpp
 	tests/network/test_net_lowlevel.cpp
+	tests/network/test_net_mesh.cpp
+	tests/network/test_net_mesh_glue.cpp
 	tests/network/test_net_message.cpp
 	tests/network/test_netconnect.cpp
 	tests/network/test_network.cpp
@@ -1186,7 +1204,9 @@ if(ANDROID)
 	# on are not pulled in transitively. Link them explicitly into libmain.so:
 	# android (looper/sensor/native-window), log (__android_log_print), OpenSLES
 	# (audio), and GLES/EGL (video), plus dl for SDL's dlopen paths.
-	target_link_libraries(stratagus PUBLIC android log dl GLESv1_CM GLESv2 EGL OpenSLES)
+	# mediandk: AMediaExtractor/AMediaCodec/AImageReader for the Remastered WebM cinematics
+	# (src/video/webm_movie.cpp, audit item MV1).
+	target_link_libraries(stratagus PUBLIC android log dl GLESv1_CM GLESv2 EGL OpenSLES mediandk)
 endif()
 
 target_include_directories(stratagus_lib SYSTEM PRIVATE third-party/mdns third-party/spiritless_po/include)

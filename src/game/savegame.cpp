@@ -247,6 +247,13 @@ void StartSavedGame(const std::string &filename)
 	SaveGameLoading = true;
 	CleanPlayers();
 	LoadGame(ExpandPath(filename));
+	// NG55: a malformed save no longer aborts the process; it also must not start a map from the
+	// half-loaded state it left behind.
+	extern bool LastLoadFailed;
+	if (LastLoadFailed) {
+		SaveGameLoading = false;
+		return;
+	}
 
 	StartMap(filename, false);
 	//SetDefaultTextColors(nc, rc);

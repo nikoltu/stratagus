@@ -190,6 +190,10 @@ static void PlaceUnits()
 **
 **  @param filename  File name to be loaded.
 */
+/// NG55: set when LoadGame gave up on a malformed save, so the caller can back out instead of
+/// starting a map from half-loaded state.
+bool LastLoadFailed = false;
+
 void LoadGame(const fs::path &filename)
 {
 	// log will be enabled if found in the save game
@@ -201,7 +205,18 @@ void LoadGame(const fs::path &filename)
 
 	LuaGarbageCollect();
 	InitUnitTypes(1);
-	LuaLoadFile(filename);
+	// NG55: a save file that fails to parse used to take the whole process down -- LuaLoadFile
+	// defaults to exitOnError, so one bad line in a .sav.gz meant ::exit(1) with no message to the
+	// player. (NG53 fixed the writer that was producing such files; this is the reading side.)
+	// Report the failure and let the caller return to the menu instead.
+	if (LuaLoadFile(filename, "", /*exitOnError=*/false) != 0) {
+		ErrorPrint("Can't load the saved game '%s' -- the file is not valid.\n",
+		           filename.u8string().c_str());
+		SaveGameLoading = false;
+		LastLoadFailed = true;
+		return;
+	}
+	LastLoadFailed = false;
 	LuaGarbageCollect();
 
 	PlaceUnits();

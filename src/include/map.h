@@ -276,6 +276,17 @@ public:
 	/// Megatile index (CTile.tile / SeenTile) -> atlas frame index, or -1 when no HD frame exists
 	/// (fog M<16, or M-16 beyond the atlas). Precomputed once by the loader for O(1) hot-loop use.
 	std::vector<int> HDTileAtlasFrameForTile;
+	/// Classic view: the classic terrain tiles of the same tileset (32px cells of classic_<x>, coloured
+	/// by the tileset .ppl). Loaded beside HDTileAtlas and kept with it, so a switch of the view only
+	/// changes which of the two the tile blit reads. Null when the classic files are absent.
+	std::shared_ptr<CAtlasGraphic> ClassicTileAtlas;
+	/// Megatile index -> ClassicTileAtlas frame index, or -1 (same rule as HDTileAtlasFrameForTile).
+	std::vector<int> ClassicTileAtlasFrameForTile;
+	/// Classic view: fog frames of ClassicTileAtlas by TiledFogTable value, 16 each, or both empty
+	/// (the fog then stays Remastered). Entry 0 is the full cell. ClassicFogFrames = never-seen map
+	/// (the masks as they are); ClassicFogDitherFrames = explored-but-unseen ground (checkerboard).
+	std::vector<int> ClassicFogFrames;
+	std::vector<int> ClassicFogDitherFrames;
 	bool isMapInitialized = false ;
 
 	CMapInfo Info;             /// descriptive information

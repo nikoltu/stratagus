@@ -570,6 +570,19 @@ void DrawPopup(const ButtonAction &button, const CUIButton &uibutton, int x, int
 			break;
 	}
 
+	if (popup.RemasteredLayout) {
+		// HUD-020: the original's panel has one fixed layout and one fixed place.
+		bool allowed = true;
+		for (const CUnit *unit : Selected) {
+			if (!IsButtonAllowed(*unit, button)) {
+				allowed = false;
+				break;
+			}
+		}
+		DrawRemasteredTooltip(popup, button, Costs, allowed);
+		return;
+	}
+
 	int popupWidth, popupHeight;
 	if (useCache) {
 		popupWidth = popupCache.popupWidth;
@@ -582,14 +595,45 @@ void DrawPopup(const ButtonAction &button, const CUIButton &uibutton, int x, int
 		popupCache.popupHeight = popupHeight;
 	}
 
-	x = std::min<int>(x, Video.Width - 1 - popupWidth);
-	clamp<int>(&x, 0, Video.Width - 1);
-	y = y - popupHeight - 10;
-	clamp<int>(&y, 0, Video.Height - 1);
+	if (popup.FixedX >= 0 && popup.FixedY >= 0) {
+		// IG-T1: the Remastered's tooltip does not follow the button -- it sits at the bottom left
+		// of the map area (measured on the live original client: box x 188..419, y 703..750 in a
+		// 1296x779 client, i.e. 48 px tall = the 240 px sprite at its declared scale 5).
+		// The fields are LOGICAL (3840x2160) units: Video.Height is still 0 while the scripts are
+		// being loaded, so a value scaled in Lua at definition time would be zero.
+		//
+		// NG81: read the canvas, never recompute it. Height/2160 is only the right scale when the
+		// framebuffer is itself 16:9; on a letterboxed surface it is too large and carries no
+		// origin, so the box was placed 124 px right of its sidebar anchor and its bottom edge
+		// landed 59 px below the canvas, on top of the status line's own hint and cost icons.
+		const double s = Video.HudCanvas.Scale;
+		x = Video.HudCanvas.X + (int) (popup.FixedX * s + 0.5);
+		if (popup.FixedHeight > 0) {
+			popupHeight = (int) (popup.FixedHeight * s + 0.5);
+		}
+		// FixedY is the BOTTOM edge of the box: the original anchors its tooltip to the bottom of
+		// the map area and grows it upwards as the text needs, rather than forcing a height.
+		// WORLD-ZOOM-RULE: FixedY was authored against a 2160-unit-high canvas, i.e. it says
+		// "2160 - FixedY units above the bottom". The picture is no longer 2160 units high
+		// (2772 units at 2960x1848), so the distance is taken from the picture's bottom edge.
+		y = Video.HudCanvas.Y + Video.HudCanvas.H - (int) ((2160 - popup.FixedY) * s + 0.5) - popupHeight;
+		clamp<int>(&y, 0, Video.Height - 1);
+	} else {
+		x = std::min<int>(x, Video.Width - 1 - popupWidth);
+		clamp<int>(&x, 0, Video.Width - 1);
+		y = y - popupHeight - 10;
+		clamp<int>(&y, 0, Video.Height - 1);
+	}
 
 	// Background
-	Video.FillTransRectangle(popup.BackgroundColor, x, y, popupWidth, popupHeight, popup.BackgroundColor >> ASHIFT);
-	Video.DrawRectangle(popup.BorderColor, x, y, popupWidth, popupHeight);
+	if (popup.BackgroundImage) {
+		SDL_Rect dst = {x, y, popupWidth, popupHeight};
+		const int b = popup.BackgroundBorder;
+		popup.BackgroundImage->DrawNineSlice(dst, b, b, b, b);
+	} else {
+		Video.FillTransRectangle(popup.BackgroundColor, x, y, popupWidth, popupHeight, popup.BackgroundColor >> ASHIFT);
+		Video.DrawRectangle(popup.BorderColor, x, y, popupWidth, popupHeight);
+	}
 
 	// Contents
 	for (auto &contentPtr : popup.Contents) {
@@ -793,6 +837,23 @@ void CButtonPanel::Draw()
 		if (cooldownSpell) {
 			buttons[i].Icon.Icon->DrawCooldownSpellIcon(pos,
 														maxCooldown * 100 / SpellTypeTable[buttons[i].Value]->CoolDown);
+		} else if (gray && !Preference.GrayscaleIcons) {
+			// PANEL-D: a button that is shown but not allowed is the whole button -- frame,
+			// picture and letter -- at half brightness, colours kept: dim = 0.499 x lit
+			// (residual 0.25 of 255) for the Catapult and Ogre buttons of the orc Barracks,
+			// captures b03 (lit) and b04 (dim) of work/agent-orig-scenes; the ring's mean
+			// 167.6 -> 83.6, the letter's brightest pixel 255 -> 127; the same in b05, b06,
+			// hb11 (work/agent-prep-panels/tools/dim.py, vbtn.py). Black at 128 of 255 over
+			// the cell gives 127 / 255 = 0.498. No hover or pressed state: the button does
+			// nothing (CButtonPanel::DoClicked).
+			int player = -1;
+			if (Selected.empty() == false && Selected[0]->IsAlive()) {
+				player = Selected[0]->RescuedFrom ? Selected[0]->RescuedFrom->Index : Selected[0]->Player->Index;
+			}
+			const ButtonStyle &cell = *UI.ButtonPanel.Buttons[i].Style;
+			buttons[i].Icon.Icon->DrawUnitIcon(cell, 0, pos, text,
+											   player == -1 ? -1 : GameSettings.Presets[player].PlayerColor);
+			Video.FillTransRectangleClip(ColorBlack, pos.x, pos.y, cell.Width, cell.Height, 128);
 		} else if (gray) {
 			buttons[i].Icon.Icon->DrawGrayscaleIcon(pos);
 		} else {
@@ -811,10 +872,19 @@ void CButtonPanel::Draw()
 	for (int i = 0; i < (int) UI.ButtonPanel.Buttons.size(); ++i) {
 		if (ButtonAreaUnderCursor == ButtonArea::Button &&
 			ButtonUnderCursor == i && KeyState != EKeyState::Input) {
-				// NG13: WC2 shows command-button hints in the bottom status bar, not as a floating
-				// StarCraft-style popup. Route the hint (title + costs) to UI.StatusLine and suppress
-				// the floating DrawPopup for the command panel.
-				UpdateStatusLineForButton(buttons[i]);
+				// NG13 said the original shows hints only in the bottom status bar. Running the
+				// original client and hovering a command button DISPROVED half of that: it draws a
+				// tooltip panel as well, at the bottom left of the map area (cycle 87). Do both --
+				// the status line, and the popup at the position its definition carries (IG-T1).
+				// HUD-003 / HUD-020: the original prints no hint at the bottom edge; the panel
+				// carries the name and the costs (captures o08, o11, o26).
+				if (!Preference.NoStatusLineTooltips) {
+					UpdateStatusLineForButton(buttons[i]);
+				}
+				if (!buttons[i].Popup.empty()) {
+					DrawPopup(buttons[i], UI.ButtonPanel.Buttons[i],
+					          UI.ButtonPanel.Buttons[i].X, UI.ButtonPanel.Buttons[i].Y);
+				}
 		}
 	}
 }
@@ -1056,8 +1126,12 @@ static void UpdateButtonPanelSingleUnit(const CUnit &unit, std::vector<ButtonAct
 			researchCheck = false;
 		}
 
+		// PANEL-D: a building that trains shows Cancel and nothing else (captures t01, ht20 of
+		// work/agent-orig-scenes), also no dim button.
+		const bool onlyCancel = !EnableTrainingQueue && unit.CurrentAction() == UnitAction::Train;
+
 		// is button allowed after all?
-		if ((buttonaction.AlwaysShow && (*buttonActions)[pos - 1].Pos == -1 && researchCheck) || allow) {
+		if ((buttonaction.AlwaysShow && !onlyCancel && (*buttonActions)[pos - 1].Pos == -1 && researchCheck) || allow) {
 			// OverWrite, So take last valid button.
 			(*buttonActions)[pos - 1] = buttonaction;
 		}
@@ -1281,9 +1355,16 @@ void CButtonPanel::DoClicked_Build(int button)
 	// FIXME: store pointer in button table!
 	CUnitType &type = *getUnitTypes()[CurrentButtons[button].Value];
 	if (!Selected[0]->Player->CheckUnitType(type)) {
-		UI.StatusLine.Set(_("Select Location"));
+		// HUD-003: nothing is printed while a building is being placed (captures
+		// o12_h_place_farm, o31_h1_place_farm).
+		if (!Preference.NoStatusLineTooltips) {
+			UI.StatusLine.Set(_("Select Location"));
+		} else {
+			UI.StatusLine.Clear();
+		}
 		UI.StatusLine.ClearCosts();
 		CursorBuilding = &type;
+		ResetBuildingPreview(); // TOUCH-R7: a newly chosen building has no place yet
 		// FIXME: check is this =9 necessary?
 		CurrentButtonLevel = 9; // level 9 is cancel-only
 		UI.ButtonPanel.Update();

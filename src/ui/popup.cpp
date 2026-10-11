@@ -44,15 +44,272 @@
 #include "trigger.h"
 #include "ui.h"
 #include "unittype.h"
+#include "upgrade.h"
+#include "wc2strings.h"
 #include "video.h"
+
+/**
+**  IG-T1: the Remastered's own tooltip text for whatever this button targets.
+**
+**  The original keys its tooltips off a numeric id (`unit_N_tooltip_advice`, `upgrade_N_tooltip`,
+**  `spell_N_tooltip`), and our objects now carry the original's display NAMES (TX1), so the id is
+**  a straight reverse lookup. Empty when the button targets nothing with a Remastered counterpart,
+**  in which case the caller keeps Wargus's own Description.
+*/
+static std::string RemasteredButtonText(const ButtonAction &button, const char *suffix)
+{
+	std::string family;
+	std::string name;
+	switch (button.Action) {
+		case ButtonCmd::Build:
+		case ButtonCmd::Train:
+		case ButtonCmd::UpgradeTo:
+			family = "unit";
+			if (button.Value >= 0 && button.Value < (int) getUnitTypes().size()) {
+				name = getUnitTypes()[button.Value]->Name;
+			}
+			break;
+		case ButtonCmd::Research:
+			family = "upgrade";
+			if (button.Value >= 0 && button.Value < (int) AllUpgrades.size() && AllUpgrades[button.Value]) {
+				name = AllUpgrades[button.Value]->Name;
+			}
+			break;
+		case ButtonCmd::SpellCast:
+			family = "spell";
+			if (button.Value >= 0 && button.Value < (int) SpellTypeTable.size() && SpellTypeTable[button.Value]) {
+				name = SpellTypeTable[button.Value]->Name;
+			}
+			break;
+		default:
+			return std::string();
+	}
+	if (name.empty()) {
+		return std::string();
+	}
+	const int id = GetWC2Id(family, name);
+	if (id < 0) {
+		return std::string();
+	}
+	return GetWC2String(family + "_" + std::to_string(id) + suffix);
+}
+
+/**
+**  IG-T1: the plain COMMAND buttons have their own names in the original, in the classic
+**  `stat_txt_*` block -- "Move", "Stop", "Attack", "Repair", "Patrol", "Stand Ground",
+**  "Build Basic Structure", "Build Advanced Structure", "Cancel". Wargus spells the same commands
+**  in shouting caps with a hotkey marker ("~!MOVE"); the original's tooltip shows the proper-case
+**  name, and puts the hotkey letter in the icon corner instead (which we already draw).
+*/
+static std::string RemasteredCommandName(const ButtonAction &button)
+{
+	int id = 0;
+	switch (button.Action) {
+		case ButtonCmd::Move: id = 392; break;
+		case ButtonCmd::Stop: id = 393; break;
+		case ButtonCmd::Attack: id = 394; break;
+		case ButtonCmd::Repair: id = 395; break;
+		// HUD-020: 396 is the worker's harvest command (capture o46_o1_peon_hover_harvest).
+		case ButtonCmd::Harvest: id = 396; break;
+		// HUD-020: 398 / 399 name the two build PAGES, not a building (capture o09_h_hover_build
+		// shows 398 on the page button; o11_h_build_hover1 shows unit_58_build on the Farm button).
+		// A Build button therefore falls through to unit_<id>_build in GetDraw().
+		case ButtonCmd::Button:
+			if (button.Value == 1) {
+				id = 398;
+			} else if (button.Value == 2) {
+				id = 399;
+			} else {
+				return std::string();
+			}
+			break;
+		case ButtonCmd::StandGround: id = 403; break;
+		case ButtonCmd::Patrol: id = 404; break;
+		case ButtonCmd::Cancel:
+		case ButtonCmd::CancelUpgrade:
+		case ButtonCmd::CancelTrain:
+		case ButtonCmd::CancelBuild: id = 407; break;
+		default: return std::string();
+	}
+	return GetWC2String("stat_txt_" + std::to_string(id));
+}
 
 static std::string GetDraw(EPopupButtonInfo infoType, const ButtonAction &button)
 {
 	switch (infoType) {
 		default:
-		case EPopupButtonInfo::Hint: return button.Hint;
-		case EPopupButtonInfo::Description: return button.Description;
+		case EPopupButtonInfo::Hint: {
+			// IG-T1: prefer the original's own wording for the command and for anything it names.
+			std::string s = RemasteredCommandName(button);
+			if (s.empty()) {
+				s = RemasteredButtonText(button, "_build");   // "Train Grunt", "Build Farm", ...
+			}
+			if (s.empty()) {
+				s = RemasteredButtonText(button, "");         // the plain name
+			}
+			return s.empty() ? button.Hint : s;
+		}
+		case EPopupButtonInfo::Description: {
+			// IG-T1: prefer the original's advice, then its plain tooltip, then Wargus's own text.
+			std::string s = RemasteredButtonText(button, "_tooltip_advice");
+			if (s.empty()) {
+				s = RemasteredButtonText(button, "_tooltip");
+			}
+			if (!s.empty()) {
+				const std::string req = RemasteredButtonText(button, "_requirement");
+				if (!req.empty()) {
+					s += "\n" + req;
+				}
+				return s;
+			}
+			return button.Description;
+		}
 		case EPopupButtonInfo::Dependencies: return PrintDependencies(*ThisPlayer, button);
+	}
+}
+
+/*----------------------------------------------------------------------------
+--  HUD-020: the original's tooltip panel
+----------------------------------------------------------------------------*/
+
+namespace
+{
+// Oracle table `tooltip_layout_contract` (EXE builder 0x516AF0, HUD call 0x518C48), in the
+// original's logical UI units: 480 rows, so one unit is 4.5 units of the 2160-row HUD space.
+// Each value was also read off the captures o08 / o11 / o26 / o48 (SPEC_TOOLTIP_PANEL.md par. 1).
+constexpr double TipUnit = 2160.0 / 480.0;
+constexpr int TipX = 184;          // fixed_x
+constexpr int TipInset = 20;       // horizontal_content_inset, vertical_content_inset
+constexpr int TipCompactW = 200;   // compact_content_width
+constexpr int TipExpandedW = 400;  // expanded_content_width
+constexpr int TipLineH = 16;       // title_height, line_height
+constexpr int TipCostH = 14;       // cost_row_height
+constexpr int TipBottom = 24;      // bottom_anchor_offset
+constexpr int TipBodyMax = 3;      // compact_to_expanded_rule: body lines that still fit compact
+constexpr int TipBorder = 70 / 5;  // skins.json `hud_tooltip`: "9slice" 70 at "scale" 5
+// Captures o11_h_build_hover1 / o48_o1_build_hover3: the cost columns are one third of the
+// content width apart (133 px and 266 px at 2 px per unit).
+constexpr int TipCostColumns = 3;
+// Captures o11 / o26 / o48: the amount starts 34 px (2 px per unit) right of its icon's left edge.
+// UNVERIFIED to +-1 unit: read from ink, not from the builder.
+constexpr int TipAmountX = 17;
+// Where the capitals of the tooltip's face sit in its glyph cell: the baked faces stand every
+// glyph on one baseline placed so that a capital is centred in the cell's height (FontBaker), so
+// the middle of the capitals is half the cell below the text position, whatever the face and its
+// scale. Measured: face remaster_small, cell 68 px on a 2960x1746 surface, capitals on rows
+// y + 20 .. y + 48, middle y + 34 (device capture e21_h1_peasant); face remaster_hud, cell 59 px
+// at the HUD step 3, capitals on rows y + 17 .. y + 41, middle y + 29 (capture work/c666_c.png,
+// "Peon" drawn at y 535, ink rows 552..576). The original centres the capitals in a row: capital
+// top = row top + 4 units of 16, capital height 8 to 8.5 units (captures o08, o26).
+int TipCapMid(const CFont &font)
+{
+	return font.Height() / 2;
+}
+
+int TipLineCount(const std::string &text, int width, const CFont &font)
+{
+	int n = 0;
+	while (!GetLineFont(n + 1, text, width, &font).empty()) {
+		++n;
+	}
+	return n;
+}
+
+// Body text. Oracle `tooltip_family_contracts`: unit_%d_tooltip_advice, upgrade_%d_tooltip,
+// spell_%d_tooltip; a `stat` command has a title only. Without the game's string file the button
+// keeps its own Description.
+std::string TipBody(const ButtonAction &button)
+{
+	if (GetWC2StringCount() == 0) {
+		return button.Description;
+	}
+	switch (button.Action) {
+		case ButtonCmd::Research:
+		case ButtonCmd::SpellCast:
+			return RemasteredButtonText(button, "_tooltip");
+		default:
+			return RemasteredButtonText(button, "_tooltip_advice");
+	}
+}
+} // namespace
+
+void DrawRemasteredTooltip(const CPopup &popup, const ButtonAction &button, const int *costs,
+						   bool allowed)
+{
+	const CFont &font = popup.DefaultFont ? *popup.DefaultFont : GetSmallFont();
+	const double scale = Video.HudCanvas.Scale * TipUnit;
+	const auto px = [scale](int units) { return (int) (units * scale + 0.5); };
+
+	const std::string title = GetDraw(EPopupButtonInfo::Hint, button);
+	const std::string body = TipBody(button);
+	// The requirement line is absent on an available command (capture o11_h_build_hover1: the Farm
+	// has unit_58_requirement and shows no such line). Shown on a greyed command: STRONGLY_SUPPORTED
+	// by the builder's content order only -- no capture of a greyed button yet.
+	const std::string requirement = allowed ? std::string() : RemasteredButtonText(button, "_requirement");
+
+	// Cost row: gold, lumber, oil (Oracle: "three costs"); mana for a spell.
+	int costIndex[TipCostColumns];
+	int costCount = 0;
+	if (button.Action == ButtonCmd::SpellCast) {
+		if (costs[ManaResCost] > 0) {
+			costIndex[costCount++] = ManaResCost;
+		}
+	} else {
+		for (const int i : {GoldCost, WoodCost, OilCost}) {
+			if (costs[i] > 0 && costCount < TipCostColumns) {
+				costIndex[costCount++] = i;
+			}
+		}
+	}
+
+	int contentW = px(TipCompactW);
+	if (TipLineCount(title, contentW, font) > 1 || TipLineCount(body, contentW, font) > TipBodyMax) {
+		contentW = px(TipExpandedW);
+	}
+	const int bodyLines = TipLineCount(body, contentW, font);
+	const int reqLines = TipLineCount(requirement, contentW, font);
+
+	const int inset = px(TipInset);
+	const int lineH = px(TipLineH);
+	const int costH = costCount ? px(TipCostH) : 0;
+	const int w = contentW + 2 * inset;
+	const int h = 2 * inset + lineH + costH + lineH * (bodyLines + reqLines);
+	const int x = Video.HudCanvas.X + px(TipX);
+	const int y = Video.HudCanvas.Y + Video.HudCanvas.H - px(TipBottom) - h;
+
+	if (popup.BackgroundImage) {
+		const SDL_Rect dst = {x, y, w, h};
+		popup.BackgroundImage->DrawNineSliceScaled(dst, popup.BackgroundBorder, px(TipBorder));
+	} else {
+		Video.FillTransRectangle(popup.BackgroundColor, x, y, w, h, popup.BackgroundColor >> ASHIFT);
+		Video.DrawRectangle(popup.BorderColor, x, y, w, h);
+	}
+
+	// skins.json `hud_widget_text`: text 255,255,255.
+	const CLabel label(font, "white", "white");
+	const int capMid = TipCapMid(font);
+	const int textDy = lineH / 2 - capMid;
+	const int cx = x + inset;
+	int cy = y + inset;
+
+	label.Draw(cx, cy + textDy, GetLineFont(1, title, contentW, &font));
+	cy += lineH;
+
+	for (int k = 0; k < costCount; ++k) {
+		const int i = costIndex[k];
+		const int colX = cx + k * contentW / TipCostColumns;
+		if (const CGraphic *g = UI.Resources[i].G.get()) {
+			g->DrawFrameClip(UI.Resources[i].IconFrame, colX, cy + (costH - g->Height) / 2);
+		}
+		label.Draw(colX + px(TipAmountX), cy + costH / 2 - capMid, costs[i]);
+	}
+	cy += costH;
+
+	for (int n = 1; n <= bodyLines; ++n, cy += lineH) {
+		label.Draw(cx, cy + textDy, GetLineFont(n, body, contentW, &font));
+	}
+	for (int n = 1; n <= reqLines; ++n, cy += lineH) {
+		label.Draw(cx, cy + textDy, GetLineFont(n, requirement, contentW, &font));
 	}
 }
 

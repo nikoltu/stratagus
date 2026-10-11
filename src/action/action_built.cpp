@@ -31,6 +31,8 @@
 //@{
 
 #include "stratagus.h"
+
+#include "wc2strings.h"
 #include "action/action_built.h"
 
 #include "ai.h"
@@ -188,7 +190,10 @@ static void Finish(COrder_Built &order, CUnit &unit)
 		unit.ResourcesHeld = type.StartingResources;
 	}
 
-	player.Notify(ColorGreen, unit.tilePos, _("New %s done"), type.Name.c_str());
+	// No text: the original prints no line for this event (time series of work/agent-orig-scenes2,
+	// SCENES2.md Q1: trainings, buildings and raids covered, none of message_training_complete,
+	// message_work_complete, message_under_attack seen). The minimap mark stays.
+	player.Notify(ColorGreen, unit.tilePos, "%s", "");
 	if (&player == ThisPlayer) {
 		if (type.MapSound.Ready.Sound) {
 			PlayUnitSound(unit, EUnitVoice::Ready);
@@ -250,6 +255,10 @@ COrder_Built::~COrder_Built()
 
 void COrder_Built::Execute(CUnit &unit) /* override */
 {
+	if (unit.Player->Gone) {
+		// The site of a player who is out of the network game stays as it is.
+		return;
+	}
 	const CUnitType &type = *unit.Type;
 
 	int amount;
@@ -270,7 +279,7 @@ void COrder_Built::Execute(CUnit &unit) /* override */
 		return ;
 	}
 
-	const int maxProgress = type.Stats[unit.Player->Index].Costs[TimeCost] * 600;
+	const int maxProgress = (type.Stats[unit.Player->Index].Costs[TimeCost] + WC2_BUILD_EXTRA_TIME_UNITS) * (WC2_BUILD_FRAMES_PER_TIME_UNIT * 100);
 
 	// Check if we should make some random noise
 	// IMPORTANT: this is local randomization, do not use the SyncRand function!
@@ -294,7 +303,7 @@ void COrder_Built::UpdateUnitVariables(CUnit &unit) const /* override */
 	Assert(unit.CurrentOrder() == this);
 
 	unit.Variable[BUILD_INDEX].Value = this->ProgressCounter;
-	unit.Variable[BUILD_INDEX].Max = unit.Type->Stats[unit.Player->Index].Costs[TimeCost] * 600;
+	unit.Variable[BUILD_INDEX].Max = (unit.Type->Stats[unit.Player->Index].Costs[TimeCost] + WC2_BUILD_EXTRA_TIME_UNITS) * (WC2_BUILD_FRAMES_PER_TIME_UNIT * 100);
 
 	// This should happen when building unit with several peons
 	// Maybe also with only one.
@@ -341,7 +350,7 @@ static std::optional<std::size_t> FindCFramePercent(const std::vector<CConstruct
 void COrder_Built::UpdateConstructionFrame(CUnit &unit)
 {
 	const CUnitType &type = *unit.Type;
-	const int percent = this->ProgressCounter / (type.Stats[unit.Player->Index].Costs[TimeCost] * 6);
+	const int percent = this->ProgressCounter / ((type.Stats[unit.Player->Index].Costs[TimeCost] + WC2_BUILD_EXTRA_TIME_UNITS) * WC2_BUILD_FRAMES_PER_TIME_UNIT);
 	const auto index = FindCFramePercent(type.Construction->Frames, percent);
 
 	if (index.has_value() && index.value() != this->Frame) {
@@ -354,6 +363,9 @@ void COrder_Built::UpdateConstructionFrame(CUnit &unit)
 
 void COrder_Built::Progress(CUnit &unit, int amount)
 {
+	if (unit.Player->Gone) {
+		return;
+	}
 	Boost(unit, amount, HP_INDEX);
 	Boost(unit, amount, SHIELD_INDEX);
 
@@ -363,6 +375,9 @@ void COrder_Built::Progress(CUnit &unit, int amount)
 
 void COrder_Built::ProgressHp(CUnit &unit, int amount)
 {
+	if (unit.Player->Gone) {
+		return;
+	}
 	Boost(unit, amount, HP_INDEX);
 
 	this->ProgressCounter += std::max(1, amount * unit.Player->SpeedBuild / SPEEDUP_FACTOR);
@@ -374,7 +389,7 @@ void COrder_Built::Boost(CUnit &building, int amount, int varIndex) const
 {
 	Assert(building.CurrentOrder() == this);
 
-	const int costs = building.Stats->Costs[TimeCost] * 600;
+	const int costs = (building.Stats->Costs[TimeCost] + WC2_BUILD_EXTRA_TIME_UNITS) * (WC2_BUILD_FRAMES_PER_TIME_UNIT * 100);
 	const int progress = this->ProgressCounter;
 	const int newProgress = progress + std::max(1, amount * building.Player->SpeedBuild / SPEEDUP_FACTOR);
 	const int maxValue = building.Variable[varIndex].Max;

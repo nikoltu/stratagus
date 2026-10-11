@@ -35,6 +35,8 @@
 
 #include "stratagus.h"
 
+#include "wc2strings.h"
+
 #include "action/action_train.h"
 
 #include "ai.h"
@@ -190,7 +192,7 @@ void COrder_Train::Execute(CUnit &unit) /* override */
 	this->Ticks += std::max(1, player.SpeedTrain / SPEEDUP_FACTOR);
 
 	if (this->Ticks < cost) {
-		unit.Wait = CYCLES_PER_SECOND / 6;
+		unit.Wait = WC2_FRAMES_PER_TIME_UNIT - 1; // one tick per WC2_FRAMES_PER_TIME_UNIT cycles
 		return ;
 	}
 	this->Ticks = std::min(this->Ticks, cost);
@@ -236,7 +238,10 @@ void COrder_Train::Execute(CUnit &unit) /* override */
 	} */
 
 	DropOutOnSide(*newUnit, LookingW, &unit);
-	player.Notify(ColorGreen, newUnit->tilePos, _("New %s ready"), nType.Name.c_str());
+	// No text: the original prints no line for this event (time series of work/agent-orig-scenes2,
+	// SCENES2.md Q1: trainings, buildings and raids covered, none of message_training_complete,
+	// message_work_complete, message_under_attack seen). The minimap mark stays.
+	player.Notify(ColorGreen, newUnit->tilePos, "%s", "");
 	if (&player == ThisPlayer) {
 		PlayUnitSound(*newUnit, EUnitVoice::Ready);
 	}

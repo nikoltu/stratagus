@@ -35,6 +35,8 @@
 
 #include "stratagus.h"
 
+#include <set>
+
 #include "unittype.h"
 
 #include "actions.h"
@@ -503,7 +505,15 @@ static int CclDefineUnitType(lua_State *l)
 				++k;
 
 				if (value == "file") {
-					type->File = LuaToString(l, -1, k + 1);
+					// HD-ART-STALE-TILESET: the next mission of a campaign runs in the same process and
+					// its tileset script gives a building another file. The graphic loaded for the old
+					// file is let go, so the first draw loads the new one (a summer map drew the winter
+					// buildings of the mission before).
+					const std::string newFile{LuaToString(l, -1, k + 1)};
+					if (type->Sprite && newFile != type->File) {
+						type->Sprite = nullptr;
+					}
+					type->File = newFile;
 				} else if (value == "alt-file") {
 					type->AltFile = LuaToString(l, -1, k + 1);
 				} else if (value == "size") {
@@ -1507,7 +1517,25 @@ CUnitType *CclGetUnitType(lua_State *l)
 	// Be kind allow also strings or symbols
 	if (lua_isstring(l, -1)) {
 		const std::string_view str = LuaToString(l, -1);
-		return &UnitTypeByIdent(str);
+		// CREATEUNIT-BADIDENT: the fatal UnitTypeByIdent used to kill the process here, which made
+		// this function's own null contract unreachable -- CclCreateUnit's `if (unittype == nullptr)
+		// LuaError("Bad unittype")` was dead code, and a single script typo took the game down
+		// through a pcall. Raise the error the way the rest of this function already does.
+		if (CUnitType *type = UnitTypeByIdentOrNull(str)) {
+			return type;
+		}
+		// Stay AUDIBLE. The fatal path printed to the log on its way out; the Lua error alone
+		// reaches only the caller, and a pcall would swallow the typo without a trace. Once per
+		// ident, so a script looping over a bad name cannot flood the channel.
+		{
+			static std::set<std::string> reportedUnknownIdent;
+			std::string s(str);
+			if (reportedUnknownIdent.insert(s).second) {
+				ErrorPrint("Unknown unitType '%s' requested from Lua -- raising a script error\n",
+				           s.c_str());
+			}
+			LuaError(l, "CclGetUnitType: unknown unit-type '%s'", s.c_str());
+		}
 	} else if (lua_isuserdata(l, -1)) {
 		LuaUserData *data = (LuaUserData *)lua_touserdata(l, -1);
 		if (data->Type == LuaUnitType) {

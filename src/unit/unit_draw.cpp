@@ -35,6 +35,7 @@
 ----------------------------------------------------------------------------*/
 
 #include <cmath>
+#include <set>
 #include <vector>
 
 #include "stratagus.h"
@@ -233,9 +234,26 @@ void DrawSelectionCircleWithTrans(IntColor color, int x1, int y1, int x2, int y2
 **  @param x1,y1  Coordinates of the top left corner.
 **  @param x2,y2  Coordinates of the bottom right corner.
 */
+/// M666-7: the rectangle's line is one classic pixel wide, i.e. tile / 32 screen px: 3 px at tile
+/// 96 (work/agent-orig-scenes/captures e01 c25 b02 b03: columns 1871..1873 etc., outer 96 x 96 on a
+/// 1 x 1 unit), 2 px at tile 64 (work/agent-hud/captures o41, o43). The lines go inwards: the outer
+/// size is the one that was measured.
+static void DrawSelectionOutline(IntColor color, int x1, int y1, int x2, int y2)
+{
+	const int t = std::max(1, (int) std::lround(PixelTileSize.x * GpuWorldDrawZoom / 32.0));
+	for (int i = 0; i < t; ++i) {
+		const int w = x2 - x1 - 2 * i;
+		const int h = y2 - y1 - 2 * i;
+		if (w <= 0 || h <= 0) {
+			break;
+		}
+		Video.DrawRectangleClip(color, x1 + i, y1 + i, w, h);
+	}
+}
+
 void DrawSelectionRectangle(IntColor color, int x1, int y1, int x2, int y2)
 {
-	Video.DrawRectangleClip(color, x1, y1, x2 - x1, y2 - y1);
+	DrawSelectionOutline(color, x1, y1, x2, y2);
 }
 
 /**
@@ -247,7 +265,7 @@ void DrawSelectionRectangle(IntColor color, int x1, int y1, int x2, int y2)
 */
 void DrawSelectionRectangleWithTrans(IntColor color, int x1, int y1, int x2, int y2)
 {
-	Video.DrawRectangleClip(color, x1, y1, x2 - x1, y2 - y1);
+	DrawSelectionOutline(color, x1, y1, x2, y2);
 	Video.FillTransRectangleClip(color, x1 + 1, y1 + 1,
 								 x2 - x1 - 2, y2 - y1 - 2, 75);
 }
@@ -629,6 +647,49 @@ void CDecoVarAnimatedSprite::Draw(int x, int y, const CUnitType &/*type*/, const
 **  @param type       Type of the unit.
 **  @param screenPos  Screen position of the unit.
 */
+/**
+**  The health bar over a unit, as the original draws it. Measured at tile 96 (k = 3) on
+**  work/agent-orig-scenes/captures i01 i02 k02 k06 k19 k20 k24 k31 k32 d05 h10 hc12
+**  (work/agent-fix-hudrest/tools/m9_bars.py), one classic pixel = tile / 32 = 3 px:
+**    width   = the selection rectangle's: 96 (1 x 1 units), 111 (box 37), 212 (box 71), 192 / 288 /
+**              384 (2 x 2, 3 x 3, 4 x 4 buildings and their sites)
+**    height  = 9 px = 3 classic px
+**    place   = top edge 45 px = 15 classic px above the rectangle's top (i02: bar 531, box 576;
+**              k24: 723 / 768; a 1 x 1 unit: 1107 / 1152), left edges equal
+**    colours = the filled part (52, 112, 4), (252, 252, 0) or (252, 0, 0); the rest black; no
+**              border. Red at 43.75 % and 28 %, yellow at 50 %..66 %, green from 80 %.
+**  It was BoxWidth un-zoomed wide, 8 px high with a 1-px border, on the footprint's top edge.
+**  Not in evidence: the 75 % step itself, and the bar's place under "Healthbar Location: Below"
+**  (mirrored here: the same 12 classic px between bar and rectangle).
+*/
+static void DrawHealthBarOnBox(const CUnit &unit)
+{
+	const CUnitType &type = *unit.Type;
+	const int max = unit.Variable[HP_INDEX].Max;
+	if (!CurrentViewport || max <= 0) {
+		return;
+	}
+	// the selection rectangle, exactly as DrawUnitSelection places it
+	const PixelPos centre = CurrentViewport->MapToScreenPixelPos(unit.GetMapPixelPosCenter());
+	const float z = GpuWorldDrawZoom;
+	const auto sc = [z](int v) { return (int) std::lround(v * z); };
+	const int x = centre.x - sc(type.BoxWidth) / 2
+	              - sc(type.Width - (type.Sprite ? type.Sprite->Width : 0)) / 2 + sc(type.BoxOffset.x);
+	const int y = centre.y - sc(type.BoxHeight) / 2
+	              - sc(type.Height - (type.Sprite ? type.Sprite->Height : 0)) / 2 + sc(type.BoxOffset.y);
+	const int w = sc(type.BoxWidth);
+	const double classicPx = PixelTileSize.y * z / 32.0;
+	const int h = std::max(1, (int) std::lround(3 * classicPx));
+	const int top = (Preference.HealthBarLocation == 1)
+	                ? y + sc(type.BoxHeight) + (int) std::lround(12 * classicPx)
+	                : y - (int) std::lround(15 * classicPx);
+	const int value = std::max(0, unit.Variable[HP_INDEX].Value);
+	const int f = value * 100 / max;
+	const IntColor color = f >= 75 ? ColorDarkGreen : (f >= 50 ? ColorYellow : ColorRed);
+	Video.FillRectangleClip(ColorBlack, x, top, w, h);
+	Video.FillRectangleClip(color, x, top, (int) ((long long) value * w / max), h);
+}
+
 static void DrawDecoration(const CUnit &unit, const CUnitType &type, const PixelPos &screenPos)
 {
 	int x = screenPos.x;
@@ -668,6 +729,12 @@ static void DrawDecoration(const CUnit &unit, const CUnitType &type, const Pixel
 			  || (ThisPlayer->IsAllied(unit) && (unit.Player != ThisPlayer) && var.HideAllied)
 			  || var.BoolFlagMatches(type)
 			  || max == 0)) {
+			// The health bar is drawn on the unit's selection box, not from the decoration's
+			// own offsets and sizes (see DrawHealthBarOnBox).
+			if (var.Index == HP_INDEX && dynamic_cast<const CDecoVarBar *>(&var) != nullptr) {
+				DrawHealthBarOnBox(unit);
+				continue;
+			}
 			// Health-bar location preference relocates only the HP bar to below the unit's box.
 			const int locationDy =
 				(var.Index == HP_INDEX && Preference.HealthBarLocation == 1) ? unit.Type->BoxHeight : 0;
@@ -712,8 +779,19 @@ static void DrawDecoration(const CUnit &unit, const CUnitType &type, const Pixel
 */
 void DrawShadow(const CUnitType &type, int frame, const PixelPos &screenPos, char zDisplacement)
 {
-	// Draw normal shadow sprite if available
-	if (!type.ShadowSprite) {
+	// NG82: the flying units' shadow has no sprite to draw. `ShadowDefinition` (units.lua) points
+	// at "missiles/unit_shadow.png", which vanilla Wargus EXTRACTS from shadow.grp -- an extractor
+	// WargusHD never runs, so the file does not exist, `ShadowSprite` is null, and this function
+	// used to return here for every unit. Ground units still looked right because their shadow is
+	// baked into the HD sprite art; the eight airborne types (the only ones that declare a shadow)
+	// simply had none. Measured: ground under a balloon read +11.6 BRIGHTER than plain terrain.
+	// The art ships: shadow_0/1/2 in every common atlas, three frames for the three scales those
+	// eight ask for, indexed by ShadowSpriteFrame exactly as the classic branch below indexes them.
+	// The candidate test is "declares a file-based shadow", NOT ShadowSpriteFrame != 0: the scale is
+	// stored verbatim in ShadowSpriteFrame, so eye-of-vision (scale 0) has 0 there and was skipped by
+	// the first attempt while still needing a shadow.
+	const bool hdShadowCandidate = !type.ShadowFile.empty();
+	if (!type.ShadowSprite && !hdShadowCandidate) {
 		return;
 	}
 	PixelPos pos = screenPos;
@@ -729,6 +807,66 @@ void DrawShadow(const CUnitType &type, int frame, const PixelPos &screenPos, cha
 	}
 	pos.x += offX;
 	pos.y += offY;
+
+	// NG82: HD branch, mirroring DrawUnitType's. Draw into the same rect the classic path would
+	// have used so the offsets above are reused, not re-derived. Falls through to the classic
+	// sprite when the atlas or the frame does not resolve, and says so once per key.
+	if (hdShadowCandidate) {
+		if (std::shared_ptr<CAtlasGraphic> atlas = GetHDShadowAtlas(type)) {
+			if (atlas->IsLoaded()) {
+				// AMEND B / INV-6: ONE frame for every flying unit. The original was captured with a
+				// Dragon, a Gryphon Rider and a Gnomish Flying Machine in one frame -- FWHM 45/46/45
+				// px, identical to 1-2 px despite wildly different sprite sizes. `shadow_<scale>`
+				// selection reproduced vanilla Wargus, not the original. shadow_2 is chosen among the
+				// three identically-shaped frames only because it is the highest resolution, so
+				// scaling it down never upscales; the choice is invisible in the output.
+				const char *const name = "shadow_2";
+				const int f = atlas->FrameByName(name);
+				if (f >= 0) {
+					// Size: a single measured world constant. Ours rendered 0.602 tiles FWHM against
+					// the original's 0.695 (EVIDENCE-NG82-010; the tile ruler is the engine's own
+					// 128 screen px per tile, cross-checked in both axes), so the footprint that
+					// reproduces the original is 80 * 0.695/0.602 = 92 classic px.
+					const int kShadowFootprint = 92;
+					// Neither offset comes from ShadowDefinition any more. INV-6 applies to the
+					// placement as much as to the size: the original draws ONE shadow, so it cannot
+					// be varying the offset per unit either, and measurement agrees -- its two
+					// unlike flyers sit at +1.44 and +1.51 tiles below their sprite ink centres,
+					// and +1 / +2 px horizontally.
+					//   x: no offset at all. The vanilla -3*(scale+1) displaced ours 0.29 tiles left.
+					//   y: one constant, 86 classic px. That is what the scale-2 term evaluated to
+					//      at this footprint (30 * 92/32), and it measured +1.483 tiles against the
+					//      original's +1.475 -- while the scale-1 term left the balloon 0.38 tiles
+					//      high, which is exactly the per-unit variation the original does not have.
+					// zDisplacement stays: it is engine-side, not from that table.
+					const int kShadowOffsetY = 86;
+					const float z = GpuWorldDrawZoom;
+					int hdX = -(kShadowFootprint - type.TileWidth * PixelTileSize.x) / 2
+					          + type.Offset.x;
+					int hdY = -(kShadowFootprint - type.TileHeight * PixelTileSize.y) / 2
+					          + type.Offset.y + kShadowOffsetY - 2 * zDisplacement;
+					if (z != 1.0f) {
+						hdX = (int) std::lround(hdX * z);
+						hdY = (int) std::lround(hdY * z);
+					}
+					const int d = (z == 1.0f) ? kShadowFootprint
+					                          : (int) std::lround(kShadowFootprint * z);
+					atlas->DrawAtlasFrameClipScaled(f, screenPos.x + hdX, screenPos.y + hdY,
+					                                d, d, false);
+					return;
+				}
+				static std::set<std::string> reportedShadowMiss;
+				if (reportedShadowMiss.insert(std::string(name) + "|" + type.File).second) {
+					ErrorPrint("HD shadow MISS: '%s' wanted '%s' -- no shadow drawn\n",
+					           type.File.c_str(), name);
+				}
+			}
+		}
+	}
+
+	if (!type.ShadowSprite) {
+		return;
+	}
 
 	if (!type.ShadowSpriteFrame) {
 		// the shadow is a full unit shadow
@@ -924,13 +1062,22 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 				const int absFrame = (frame < 0) ? (-frame - 1) : frame;
 				const int f = atlas->FrameByName((prefix + "_" + std::to_string(absFrame)).c_str());
 				if (f >= 0) {
-					atlas->DrawAtlasFrameClipScaled(f, topLeft.x, topLeft.y, dw, dh,
-													(frame < 0) && type.Flip);
+					// SPRITE-SCALE-TRUE R3: the scaffold family (build_1 / s_build1, canvas 554 =
+					// 64 * 6.75 + 122, EVIDENCE-SST-002) is drawn at the sheet density like every
+					// other family, centred on the footprint centre -- the same picture size on a
+					// 2x2, 3x3 and 4x4 site -- not stretched to the footprint. `screenPos` is the
+					// footprint centre on screen.
+					const float z = GpuWorldDrawZoom;
+					const float s = PixelTileSize.x * z / HdNativeTilePx;
+					atlas->DrawAtlasFrameCentred(f, screenPos.x + type.Offset.x * z,
+					                             screenPos.y + type.Offset.y * z, s,
+					                             (frame < 0) && type.Flip);
 					return;
 				}
 			}
 		} else {
 			// Main stage: hand it to the normal unit draw so it takes the building's HD path.
+			// It takes the footprint's top-left, as the finished building's draw passes it.
 			DrawUnitType(type, type.Sprite.get(), player, frame, topLeft);
 			return;
 		}
@@ -1121,7 +1268,10 @@ void CUnit::Draw(const CViewport &vp) const
 	//
 	if (state == 1) {
 		if (constructed && cframe) {
-			const PixelPos pos(screenPos + (type->GetPixelSize()) / 2);
+			// centre of the footprint on the screen (the footprint is drawn at the world zoom)
+			const PixelPos half(type->GetPixelSize() / 2);
+			const PixelPos pos(screenPos.x + (int) std::lround(half.x * GpuWorldDrawZoom),
+			                   screenPos.y + (int) std::lround(half.y * GpuWorldDrawZoom));
 			DrawConstruction(GameSettings.Presets[player].PlayerColor, *cframe, *type, frame, pos);
 		} else {
 			DrawUnitType(*type, sprite.get(), GameSettings.Presets[player].PlayerColor, frame, screenPos);

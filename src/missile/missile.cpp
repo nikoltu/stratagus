@@ -55,6 +55,8 @@
 #include "json.h"
 
 #include <cmath>
+#include <map>
+#include <set>
 #include <unordered_map>
 
 /*----------------------------------------------------------------------------
@@ -464,8 +466,16 @@ static bool MissileVisibleInViewport(const CViewport &vp, const Missile &missile
 */
 // WargusHD: missile/effect sprite path -> native Remastered effect-atlas frame prefix (e.g.
 // "missiles/green_cross.png" -> "blackx"). Baked into hd_missiles_map.json; all effects live in the
-// per-tileset units_common_<tileset> atlas, so only the prefix is stored. Loaded once, lazily.
-static std::unordered_map<std::string, std::string> g_hdMissileMap; // File -> prefix
+// per-tileset units_common_<tileset> atlas, so the prefix is what is stored. Loaded once, lazily.
+// Most families use the SAME prefix in every biome (arrow, axe, boom, ...). The catapult rock does
+// not: its frames are rock_0 in forest/wasteland but s_rock_0 in winter and x_rock_0 in swamp. So an
+// entry may carry optional per-tileset overrides keyed by the effect tileset name; when the current
+// tileset has no override the plain prefix is used, which leaves every other entry unchanged.
+struct HDMissileEntry {
+	std::string prefix;                                   /// default, used when no override matches
+	std::map<std::string, std::string> byTileset;         /// effect tileset name -> prefix
+};
+static std::unordered_map<std::string, HDMissileEntry> g_hdMissileMap; // File -> prefixes
 static bool g_hdMissileMapTried = false;
 
 static void LoadHDMissileMap()
@@ -474,46 +484,75 @@ static void LoadHDMissileMap()
 		return;
 	}
 	g_hdMissileMapTried = true;
+	// HD-MISS-MISSILES: every early return here used to be silent, so a map that failed to load
+	// looked exactly like one that loaded. Same treatment as the unit map (unittype.cpp).
+	// ErrorPrint, not DebugPrint: this must be visible without a runtime flag.
 	const fs::path resolved = LibraryFileName("hd_missiles_map.json");
 	if (resolved.empty()) {
+		ErrorPrint("hd_missiles_map.json NOT FOUND -- no effect will draw its HD sprite\n");
 		return;
 	}
 	std::error_code ec;
 	const uintmax_t sz = fs::file_size(resolved, ec);
 	if (ec || sz == 0 || sz > (uintmax_t) 4 * 1024 * 1024) {
+		ErrorPrint("hd_missiles_map.json unusable size (%s, %llu bytes) -- map not loaded\n",
+		           resolved.string().c_str(), (unsigned long long) sz);
 		return;
 	}
 	std::string text;
 	{
 		auto fp = std::make_unique<CFile>();
 		if (fp->open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+			ErrorPrint("hd_missiles_map.json could not be opened (%s) -- map not loaded\n",
+			           resolved.string().c_str());
 			return;
 		}
 		text.resize((size_t) sz);
 		const bool ok = (size_t) fp->read(&text[0], (size_t) sz) == (size_t) sz;
 		fp->close();
 		if (!ok) {
+			ErrorPrint("hd_missiles_map.json short read (expected %llu bytes) -- map not loaded\n",
+			           (unsigned long long) sz);
 			return;
 		}
 	}
 	content::JsonValue root;
 	std::string jerr;
 	if (!content::parseJson(text, root, jerr) || !root.isObject() || !root.object) {
+		ErrorPrint("hd_missiles_map.json did not parse as an object (%s) -- map not loaded\n",
+		           jerr.c_str());
 		return;
 	}
+	int skipped = 0;
+	static const char *const tilesetKeys[] = {"forest", "winter", "swamp", "xswamp"};
 	for (const auto &kv : *root.object) {
 		const content::JsonValue *p = kv.second.find("prefix");
-		if (p) {
-			g_hdMissileMap[kv.first] = p->asString();
+		if (!p) {
+			++skipped;
+			ErrorPrint("hd_missiles_map.json entry '%s' has no prefix -- skipped\n", kv.first.c_str());
+			continue;
 		}
+		HDMissileEntry e;
+		e.prefix = p->asString();
+		for (const char *ts : tilesetKeys) {
+			if (const content::JsonValue *o = kv.second.find(ts)) {
+				const std::string s = o->asString();
+				if (!s.empty()) {
+					e.byTileset[ts] = s;
+				}
+			}
+		}
+		g_hdMissileMap[kv.first] = std::move(e);
 	}
+	ErrorPrint("hd_missiles_map.json loaded: %d entries, %d skipped\n",
+	           (int) g_hdMissileMap.size(), skipped);
 }
 
 // Current map's tileset name in the UNIT/effect atlas namespace (summer->forest, winter->winter).
 // D5/NG-TERR1: classic "wasteland"->swamp and classic "swamp"->xswamp -- this was reversed here (it
 // disagreed with hd_units_map, where wasteland units live in units_*_swamp and swamp units in
 // units_*_xswamp), so effects on swamp/wasteland maps loaded the wrong-biome atlas. Empty when unknown.
-static std::string CurrentEffectTileset()
+std::string CurrentEffectTileset()
 {
 	const std::string &img = Map.Tileset.ImageFile;
 	if (img.find("summer") != std::string::npos) { return "forest"; }
@@ -523,27 +562,23 @@ static std::string CurrentEffectTileset()
 	return "";
 }
 
+// EFFECT-ATLAS-LOADED-TWICE: one cache for units and effects (GetSharedHDAtlas, unittype.cpp).
 static std::shared_ptr<CAtlasGraphic> GetSharedEffectAtlas(const std::string &stem)
 {
-	static std::unordered_map<std::string, std::shared_ptr<CAtlasGraphic>> cache;
-	auto it = cache.find(stem);
-	if (it != cache.end()) {
-		return it->second;
-	}
-	auto atlas = std::make_shared<CAtlasGraphic>();
-	if (!atlas->LoadTexturePacker("Data/Art/hd/unit/" + stem + ".json")) {
-		atlas.reset();
-	}
-	cache[stem] = atlas;
-	return atlas;
+	return GetSharedHDAtlas(stem);
 }
 
 static void EnsureHDMissileSprite(const MissileType &type)
 {
-	if (type.HDTried) {
+	// HD-ART-STALE-TILESET: the next mission of a campaign runs in the same process; an effect
+	// resolved for the biome of the mission before is resolved again for the present one.
+	if (type.HDTried && type.HDTileset == CurrentEffectTileset()) {
 		return;
 	}
 	type.HDTried = true;
+	type.HDTileset = CurrentEffectTileset();
+	type.HDG.reset();
+	type.HDPrefix.clear();
 	if (!type.G) {
 		return;
 	}
@@ -555,16 +590,26 @@ static void EnsureHDMissileSprite(const MissileType &type)
 	}
 	auto mit = g_hdMissileMap.find(key);
 	if (mit == g_hdMissileMap.end()) {
+		// HD-MISS-MISSILES: no map entry, so this effect never takes the HD path. Once per key.
+		static std::set<std::string> reportedNoEntry;
+		if (reportedNoEntry.insert(key).second) {
+			ErrorPrint("HD effect UNMAPPED: '%s' has no hd_missiles_map entry\n", key.c_str());
+		}
 		return;
 	}
 	const std::string ts = CurrentEffectTileset();
 	if (ts.empty()) {
+		// Deliberately silent (INV-3): the tileset is simply not known yet before a map loads.
+		// Logging it would emit on every launch and train the reader to ignore this channel.
 		return;
 	}
 	auto atlas = GetSharedEffectAtlas("units_common_" + ts + "_sprites");
 	if (atlas && atlas->IsLoaded()) {
 		type.HDG = atlas;
-		type.HDPrefix = mit->second;
+		// Per-tileset override when this family is biome-prefixed (catapult rock); plain prefix
+		// otherwise, which is every other entry.
+		auto oit = mit->second.byTileset.find(ts);
+		type.HDPrefix = (oit != mit->second.byTileset.end()) ? oit->second : mit->second.prefix;
 	}
 }
 
@@ -583,14 +628,40 @@ void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 	if (this->HDG && this->HDG->IsLoaded() && !this->HDPrefix.empty()) {
 		const int absFrame = (frame < 0) ? (-frame - 1) : frame;
 		const std::string name = this->HDPrefix + "_" + std::to_string(absFrame);
-		const int f = this->HDG->FrameByName(name.c_str());
+		int f = this->HDG->FrameByName(name.c_str());
+		// MISSILE-ROCK: a few native effect families number their frames "<prefix>_f<N>" rather than
+		// "<prefix>_<N>" -- the catapult rock ships as rock_0 plus rock_0_f0..f4, so with the prefix
+		// carrying the _0 only frame 0 could ever resolve and the projectile drew nothing. This is the
+		// same fallback the unit path has carried since NG29 (unittype.cpp), tried only when the
+		// primary name is absent so nothing that already resolves changes behaviour.
+		if (f < 0) {
+			f = this->HDG->FrameByName((this->HDPrefix + "_f" + std::to_string(absFrame)).c_str());
+		}
+		// HD-MISS-MISSILES: neither spelling resolved, so this falls through to the classic blit --
+		// which MISSILE-ROCK measured as producing nothing observable for the rock family. Report the
+		// two names actually tried; that is the question MISSILE-ROCK cost a cycle to answer. ONCE
+		// per prefix+frame, since this is the per-frame draw path.
+		if (f < 0) {
+			static std::set<std::string> reportedFrameMiss;
+			const std::string k = this->HDPrefix + "|" + std::to_string(absFrame);
+			if (reportedFrameMiss.insert(k).second) {
+				ErrorPrint("HD effect frame MISS: prefix '%s' frame %d -- tried '%s' and '%s'\n",
+				           this->HDPrefix.c_str(), absFrame, name.c_str(),
+				           (this->HDPrefix + "_f" + std::to_string(absFrame)).c_str());
+			}
+		}
 		if (f >= 0) {
+			// SPRITE-SCALE-TRUE R4: the effect sheets are at the same density as the terrain
+			// (canvas = classic cell * 6.75 + 120, EVIDENCE-SST-002), so the frame is drawn at
+			// PixelTileSize * zoom / HdNativeTilePx with its own canvas centred on the centre of
+			// the logical box. `pos` is the screen position of the box's top-left and the box is
+			// size * zoom on screen, hence the centre pos + size * zoom / 2. The Lua `Size` stays
+			// the logical box (start point, flight, visibility); it no longer sizes the picture.
 			const float z = GpuWorldDrawZoom;
-			const int dw = (int) std::lround(this->size.x * z);
-			const int dh = (int) std::lround(this->size.y * z);
-			const int dx = pos.x - (int) std::lround(this->size.x * (z - 1.0f) / 2.0f);
-			const int dy = pos.y - (int) std::lround(this->size.y * (z - 1.0f) / 2.0f);
-			this->HDG->DrawAtlasFrameClipScaled(f, dx, dy, dw, dh, frame < 0 && this->Flip);
+			const float s = PixelTileSize.x * z / HdNativeTilePx;
+			const float cx = pos.x + this->size.x * z / 2.0f;
+			const float cy = pos.y + this->size.y * z / 2.0f;
+			this->HDG->DrawAtlasFrameCentred(f, cx, cy, s, frame < 0 && this->Flip);
 			return;
 		}
 	}

@@ -36,7 +36,29 @@ public:
 	bool ResizeScreen(int width, int height);
 };
 
+// NG95/NG96: the in-game reference canvas, computed once in the engine (CVideo::ComputeHudCanvas).
+// The HUD scripts READ it; they must never recompute a fit of their own -- that is the whole lesson
+// of the NG87..NG93 family, where one transform had been copied nine times.
+$static int HudCanvasX() { return Video.HudCanvas.X; }
+$static int HudCanvasY() { return Video.HudCanvas.Y; }
+$static int HudCanvasW() { return Video.HudCanvas.W; }
+$static int HudCanvasH() { return Video.HudCanvas.H; }
+$// WORLD-ZOOM-RULE: the HUD scale is NOT HudCanvasH() / 2160 any more (the picture is as high as the
+$// framebuffer, the HUD art only 480 * step px). Scripts read the scale and the step from here.
+$static double HudCanvasScale() { return Video.HudCanvas.Scale; }
+$static int HudCanvasStep() { return Video.HudCanvas.Step; }
+int HudCanvasX(void);
+int HudCanvasY(void);
+int HudCanvasW(void);
+int HudCanvasH(void);
+double HudCanvasScale(void);
+int HudCanvasStep(void);
+
 tolua_readonly CVideo Video;
+
+// Classic view: presentation-only switch between the Remastered and the classic art.
+void SetClassicView(bool on);
+bool IsClassicView(void);
 void ToggleFullScreen(void);
 
 $using CGraphicPtr = std::shared_ptr<CGraphic>;
@@ -46,6 +68,8 @@ $void ResizeKeepRatio(CGraphicPtr* self, int w, int h) { (*self)->ResizeKeepRati
 $void SetPaletteColor(CGraphicPtr* self, int idx, int r, int g, int b) { (*self)->SetPaletteColor(idx, r, g, b); }
 $void OverlayGraphic(CGraphicPtr* self, CGraphicPtr g, bool mask) { (*self)->OverlayGraphic(g.get(), mask); }
 $void DrawNineSlice(CGraphicPtr* self, int x, int y, int w, int h, int left, int top, int right, int bottom) { SDL_Rect d = {x, y, w, h}; (*self)->DrawNineSlice(d, left, top, right, bottom); }
+$int GetOriginWidth(CGraphicPtr* self) { return (*self)->OriginWidth; }
+$int GetOriginHeight(CGraphicPtr* self) { return (*self)->OriginHeight; }
 
 $using CPlayerColorGraphicPtr = std::shared_ptr<CPlayerColorGraphic>;
 $void Load(CPlayerColorGraphicPtr* self, bool grayscale) { (*self)->Load(grayscale); }
@@ -61,6 +85,9 @@ struct CGraphicPtr // std::shared_ptr<CGraphic>
 	tolua_outside void SetPaletteColor(int idx, int r, int g, int b);
 	tolua_outside void OverlayGraphic(CGraphicPtr g, bool mask = false);
 	tolua_outside void DrawNineSlice(int x, int y, int w, int h, int left, int top, int right, int bottom);
+	// B3-2: the art's own pixel size, so a caller can preserve its aspect instead of stretching it.
+	tolua_outside int GetOriginWidth();
+	tolua_outside int GetOriginHeight();
 };
 
 struct CPlayerColorGraphicPtr // std::shared_ptr<CPlayerColorGraphic>
