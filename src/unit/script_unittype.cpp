@@ -694,6 +694,11 @@ static int CclDefineUnitType(lua_State *l)
 			}
 		} else if (value == "TileSize") {
 			CclGetPos(l, &type->TileWidth, &type->TileHeight);
+		} else if (value == "GridStep") {
+			type->GridStep = LuaToNumber(l, -1);
+			if (type->GridStep < 1) {
+				LuaError(l, "GridStep must be 1 or more");
+			}
 		} else if (value == "PersonalSpace") {
 			CclGetPos(l, &type->PersonalSpaceWidth, &type->PersonalSpaceHeight);
 		} else if (value == "NeutralMinimapColor") {
@@ -718,6 +723,8 @@ static int CclDefineUnitType(lua_State *l)
 			}
 		} else if (value == "MinAttackRange") {
 			type->MinAttackRange = LuaToNumber(l, -1);
+		} else if (value == "MinImpactRange") {
+			type->MinImpactRange = LuaToNumber(l, -1);
 		} else if (value == "MaxAttackRange") {
 			type->DefaultStat.Variables[ATTACKRANGE_INDEX].Value = LuaToNumber(l, -1);
 			type->DefaultStat.Variables[ATTACKRANGE_INDEX].Max = LuaToNumber(l, -1);
@@ -1271,6 +1278,7 @@ static int CclCopyUnitType(lua_State *l)
 	to->DefaultStat.Variables[SHIELD_INDEX].Enable = from.DefaultStat.Variables[SHIELD_INDEX].Enable;
 	to->TileWidth = from.TileWidth;
 	to->TileHeight = from.TileHeight;
+	to->GridStep = from.GridStep;
 	to->NeutralMinimapColorRGB = from.NeutralMinimapColorRGB;
 	to->Neutral = from.Neutral;
 	to->BoxWidth = from.BoxWidth;
@@ -1282,6 +1290,7 @@ static int CclCopyUnitType(lua_State *l)
 	to->Missile.Name = from.Missile.Name;
 	to->Missile.Missile = nullptr; // filled in later
 	to->MinAttackRange = from.MinAttackRange;
+	to->MinImpactRange = from.MinImpactRange;
 	to->DefaultStat.Variables[ATTACKRANGE_INDEX].Value = from.DefaultStat.Variables[ATTACKRANGE_INDEX].Value;
 	to->DefaultStat.Variables[ATTACKRANGE_INDEX].Max = from.DefaultStat.Variables[ATTACKRANGE_INDEX].Max;
 	to->DefaultStat.Variables[ATTACKRANGE_INDEX].Enable = from.DefaultStat.Variables[ATTACKRANGE_INDEX].Enable;
@@ -1517,10 +1526,9 @@ CUnitType *CclGetUnitType(lua_State *l)
 	// Be kind allow also strings or symbols
 	if (lua_isstring(l, -1)) {
 		const std::string_view str = LuaToString(l, -1);
-		// CREATEUNIT-BADIDENT: the fatal UnitTypeByIdent used to kill the process here, which made
-		// this function's own null contract unreachable -- CclCreateUnit's `if (unittype == nullptr)
-		// LuaError("Bad unittype")` was dead code, and a single script typo took the game down
-		// through a pcall. Raise the error the way the rest of this function already does.
+		// CREATEUNIT-BADIDENT: an unknown ident must reach this function's own null contract
+		// (CclCreateUnit's LuaError("Bad unittype")) instead of the fatal UnitTypeByIdent, so that a
+		// script typo raises a Lua error and does not end the process.
 		if (CUnitType *type = UnitTypeByIdentOrNull(str)) {
 			return type;
 		}
@@ -1726,6 +1734,12 @@ static int CclGetUnitTypeData(lua_State *l)
 		return 1;
 	} else if (data == "MinAttackRange") {
 		lua_pushnumber(l, type->MinAttackRange);
+		return 1;
+	} else if (data == "MinImpactRange") {
+		lua_pushnumber(l, type->MinImpactRange);
+		return 1;
+	} else if (data == "GridStep") {
+		lua_pushnumber(l, type->GridStep);
 		return 1;
 	} else if (data == "MaxAttackRange") {
 		if (!GameRunning && Editor.Running != EditorEditing) {

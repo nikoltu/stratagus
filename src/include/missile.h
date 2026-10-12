@@ -612,6 +612,8 @@ extern Missile *MakeLocalMissile(const MissileType &mtype, const PixelPos &start
 
 /// Calculates damage done to goal by attacker using formula
 extern int CalculateDamage(const CUnit &attacker, const CUnit &goal, const INumberDesc *formula);
+/// the map pixel a missile fired by the unit at the goal (or at the tile, without one) flies to
+extern PixelPos MissileImpactPoint(const CUnit &unit, const CUnit *goal, const Vec2i &goalPos, bool &overshot);
 /// fire a missile
 extern void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos);
 
@@ -643,10 +645,9 @@ extern void FreeBurningBuildingFrames();
 
 /// Current map's tileset name in the UNIT/effect atlas namespace (summer->forest, winter->winter,
 /// wasteland->swamp, swamp->xswamp). Empty before a map loads. Defined in missile.cpp, where the
-/// HD effect atlases already depend on it; shared -- NOT copied -- so a flying unit's ground shadow
-/// (unittype.cpp, GetHDShadowAtlas) resolves its per-tileset units_common_<tileset> atlas by the
-/// same rule. A second copy of this mapping is exactly the defect D5/NG-TERR1 recorded, where the
-/// swamp/wasteland pair was transposed in one copy only.
+/// HD effect atlases already depend on it; shared, not copied, so that a flying unit's ground
+/// shadow (unittype.cpp, GetHDShadowAtlas) resolves its per-tileset units_common_<tileset> atlas
+/// by the same rule (NG-TERR1).
 extern std::string CurrentEffectTileset();
 /// EFFECT-ATLAS-LOADED-TWICE: the one cache of native HD atlases (unittype.cpp), also for effects.
 extern std::shared_ptr<CAtlasGraphic> GetSharedHDAtlas(const std::string &stem);

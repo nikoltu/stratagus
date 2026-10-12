@@ -34,9 +34,9 @@
 **      `<Saved Games>/Warcraft2Remastered/GlobalSave.json` and contains exactly:
 **        {"missionsCompleted":{"todOrc":1,"todHuman":0,"bdpOrc":0,"bdpHuman":1}}
 **
-**  This is what CF8 asks for: campaign progress that lives OUTSIDE the save game, so
-**  deleting a save does not delete progress. We write the original's file, in the
-**  original's schema, under our user directory -- not a WargusHD-invented store.
+**  Campaign progress lives outside the save game (CF8), so deleting a save does not delete
+**  progress. The original's file is written, in the original's schema, under the user
+**  directory.
 **
 **  Keys are the original's: "todOrc", "todHuman", "bdpOrc", "bdpHuman".
 */

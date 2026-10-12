@@ -28,8 +28,8 @@ android {
         applicationId 'net.wargushd.game'
         minSdk 24
         targetSdk 34
-        versionCode 340000
-        versionName '3.4.0'
+        versionCode 340043
+        versionName '3.4.43'
         ndk {
             abiFilters 'arm64-v8a'
         }

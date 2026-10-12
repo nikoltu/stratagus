@@ -76,6 +76,13 @@ static int          MinimapTextureW{0};
 static int          MinimapTextureH{0};
 static SDL_Surface *MinimapTerrainSurface{nullptr}; /// generated minimap terrain
 static SDL_Surface *MinimapFogSurface{nullptr};     /// generated minimap fog of war
+// Classic view: the minimap is a picture of logical pixels (128 x 128), every one drawn as
+// step x step screen pixels (hdatlas::classicStep). The surfaces, the tables, the scale and the
+// offsets are in surface pixels; W / H / X / Y stay the place on the screen. 1 outside the
+// classic view: surface and screen pixels are the same.
+static int          MinimapStep{1};
+static int          SurfaceW{0};
+static int          SurfaceH{0};
 
 static std::vector<int> Minimap2MapX;      /// fast conversion table
 static std::vector<int> Minimap2MapY;      /// fast conversion table
@@ -104,15 +111,22 @@ int NumMinimapEvents;
 */
 void CMinimap::Create()
 {
+	MinimapStep = ClassicHudActive() ? hdatlas::classicStep(Video.Height) : 1;
+	if (W % MinimapStep != 0 || H % MinimapStep != 0) {
+		MinimapStep = 1;
+	}
+	SurfaceW = W / MinimapStep;
+	SurfaceH = H / MinimapStep;
+
 	// Scale to biggest value.
 	const int n = std::max({Map.Info.MapWidth, Map.Info.MapHeight, 32});
 
 	// One scale for both axes: the picture keeps the map's shape and is centred in the box.
-	MinimapScaleX = (std::min(W, H) * MINIMAP_FAC + n - 1) / n;
+	MinimapScaleX = (std::min(SurfaceW, SurfaceH) * MINIMAP_FAC + n - 1) / n;
 	MinimapScaleY = MinimapScaleX;
 
-	XOffset = (W - (Map.Info.MapWidth * MinimapScaleX) / MINIMAP_FAC + 1) / 2;
-	YOffset = (H - (Map.Info.MapHeight * MinimapScaleY) / MINIMAP_FAC + 1) / 2;
+	XOffset = (SurfaceW - (Map.Info.MapWidth * MinimapScaleX) / MINIMAP_FAC + 1) / 2;
+	YOffset = (SurfaceH - (Map.Info.MapHeight * MinimapScaleY) / MINIMAP_FAC + 1) / 2;
 
 	DebugPrint("MinimapScale %d %d (%d %d), X off %d, Y off %d\n",
 	           MinimapScaleX / MINIMAP_FAC,
@@ -125,12 +139,12 @@ void CMinimap::Create()
 	//
 	// Calculate minimap fast lookup tables.
 	//
-	Minimap2MapX.resize(W * H);
-	Minimap2MapY.resize(W * H);
-	for (int i = XOffset; i < W - XOffset; ++i) {
+	Minimap2MapX.resize(SurfaceW * SurfaceH);
+	Minimap2MapY.resize(SurfaceW * SurfaceH);
+	for (int i = XOffset; i < SurfaceW - XOffset; ++i) {
 		Minimap2MapX[i] = ((i - XOffset) * MINIMAP_FAC) / MinimapScaleX;
 	}
-	for (int i = YOffset; i < H - YOffset; ++i) {
+	for (int i = YOffset; i < SurfaceH - YOffset; ++i) {
 		Minimap2MapY[i] = (((i - YOffset) * MINIMAP_FAC) / MinimapScaleY) * Map.Info.MapWidth;
 	}
 	for (int i = 0; i < Map.Info.MapWidth; ++i) {
@@ -142,9 +156,9 @@ void CMinimap::Create()
 
 	// Palette updated from UpdateMinimapTerrain()
 	SDL_PixelFormat *f    = Map.TileGraphic->getSurface()->format;
-	MinimapTerrainSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, W, H, f->BitsPerPixel, f->Rmask, f->Gmask, f->Bmask, f->Amask);
-	MinimapSurface 		  = SDL_CreateRGBSurface(SDL_SWSURFACE, W, H, 32, RMASK, GMASK, BMASK, 0);
-	MinimapFogSurface 	  = SDL_CreateRGBSurface(SDL_SWSURFACE, W, H, 32, RMASK, GMASK, BMASK, AMASK);
+	MinimapTerrainSurface = SDL_CreateRGBSurface(SDL_SWSURFACE, SurfaceW, SurfaceH, f->BitsPerPixel, f->Rmask, f->Gmask, f->Bmask, f->Amask);
+	MinimapSurface 		  = SDL_CreateRGBSurface(SDL_SWSURFACE, SurfaceW, SurfaceH, 32, RMASK, GMASK, BMASK, 0);
+	MinimapFogSurface 	  = SDL_CreateRGBSurface(SDL_SWSURFACE, SurfaceW, SurfaceH, 32, RMASK, GMASK, BMASK, AMASK);
 
     SDL_SetSurfaceBlendMode(MinimapFogSurface, SDL_BLENDMODE_BLEND);
 
@@ -180,6 +194,7 @@ struct HDMinimapColors {
 	std::string era;
 	bool ok = false;
 	uint8_t pal[256][3] = {};
+	uint8_t classicPal[256][4] = {}; // classic view: the same palette x 4
 	int base = 16;
 	std::vector<std::array<uint8_t, 16>> tiles; // indexed by (megatile - base)
 };
@@ -251,6 +266,7 @@ static bool EnsureHDMinimapColors()
 			g_hdmm.pal[i][c] = (uint8_t) ((v6 * 255 + 31) / 63); // 6-bit -> 8-bit
 		}
 	}
+	hdatlas::expandPalette6((const uint8_t *) ppl.data(), false, g_hdmm.classicPal);
 	// Colours: Data/Art/hd/classic/<era>_mapColors.bin  (N*16 bytes, megatile base 16)
 	std::string bin;
 	if (!ReadNativeFile("Data/Art/hd/classic/" + era + "_mapColors.bin", bin) || bin.size() < 16) {
@@ -289,6 +305,26 @@ static bool HDTileRGB(int megatile, uint8_t &r, uint8_t &g, uint8_t &b)
 	return true;
 }
 
+// Classic view: the terrain layer was last filled by the classic rule.
+static bool g_minimapTerrainClassic = false;
+
+// Classic view: one sample of the megatile's 4x4 record, not the mean. Needs a true-colour layer.
+static bool ClassicMinimapReady()
+{
+	return IsClassicView() && MinimapTerrainSurface
+	       && MinimapTerrainSurface->format->BytesPerPixel > 1 && EnsureHDMinimapColors();
+}
+
+static Uint32 ClassicTilePixel(int megatile, int slotX, int slotY)
+{
+	const int idx = megatile - g_hdmm.base;
+	if (idx < 0 || idx >= (int) g_hdmm.tiles.size()) {
+		return 0;
+	}
+	const uint8_t *c = g_hdmm.classicPal[g_hdmm.tiles[idx][slotY * 4 + slotX]];
+	return SDL_MapRGB(MinimapTerrainSurface->format, c[0], c[1], c[2]);
+}
+
 // Write one mapped pixel into a surface (respects BytesPerPixel; Android minimap is 32bpp).
 static inline void PutMinimapPixel(SDL_Surface *s, int x, int y, Uint32 px)
 {
@@ -316,6 +352,22 @@ void CMinimap::UpdateTerrain()
 	if (!scaley) {
 		scaley = 1;
 	}
+	g_minimapTerrainClassic = IsClassicView();
+	if (g_minimapTerrainClassic && ClassicMinimapReady()) {
+		const int tiles = std::max({Map.Info.MapWidth, Map.Info.MapHeight, 32});
+		const int pixels = std::min(SurfaceW, SurfaceH);
+		SDL_LockSurface(MinimapTerrainSurface);
+		for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
+			const int slotY = hdatlas::classicMinimapSlot(my - YOffset, tiles, pixels);
+			for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
+				const int tile = Map.Fields[Minimap2MapX[mx] + Minimap2MapY[my]].getGraphicTile();
+				const int slotX = hdatlas::classicMinimapSlot(mx - XOffset, tiles, pixels);
+				PutMinimapPixel(MinimapTerrainSurface, mx, my, ClassicTilePixel(tile, slotX, slotY));
+			}
+		}
+		SDL_UnlockSurface(MinimapTerrainSurface);
+		return;
+	}
 	const int bpp = Map.TileGraphic->getSurface()->format->BytesPerPixel;
 
 	if (bpp == 1) {
@@ -337,8 +389,8 @@ void CMinimap::UpdateTerrain()
 		// Remastered <era>_mapColors.bin + .ppl palette instead of leaving the minimap black.
 		if (EnsureHDMinimapColors()) {
 			SDL_LockSurface(MinimapTerrainSurface);
-			for (int my = YOffset; my < H - YOffset; ++my) {
-				for (int mx = XOffset; mx < W - XOffset; ++mx) {
+			for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
+				for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
 					const int tile = Map.Fields[Minimap2MapX[mx] + Minimap2MapY[my]].getGraphicTile();
 					uint8_t r, g, b;
 					const Uint32 px = HDTileRGB(tile, r, g, b)
@@ -360,8 +412,8 @@ void CMinimap::UpdateTerrain()
 	//
 	//  Pixel 7,6 7,14, 15,6 15,14 are taken for the minimap picture.
 	//
-	for (int my = YOffset; my < H - YOffset; ++my) {
-		for (int mx = XOffset; mx < W - XOffset; ++mx) {
+	for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
+		for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
 			const int tile = Map.Fields[Minimap2MapX[mx] + Minimap2MapY[my]].getGraphicTile();
 			const int xofs = PixelTileSize.x * (tile % tilepitch);
 			const int yofs = PixelTileSize.y * (tile / tilepitch);
@@ -420,6 +472,32 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 		scaley = 1;
 	}
 
+	if (ClassicMinimapReady()) {
+		const int tiles = std::max({Map.Info.MapWidth, Map.Info.MapHeight, 32});
+		const int pixels = std::min(SurfaceW, SurfaceH);
+		const int cty = pos.y * Map.Info.MapWidth;
+		SDL_LockSurface(MinimapTerrainSurface);
+		for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
+			const int y = Minimap2MapY[my];
+			if (y < cty) continue;
+			if (y > cty) break;
+			const int slotY = hdatlas::classicMinimapSlot(my - YOffset, tiles, pixels);
+			for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
+				const int x = Minimap2MapX[mx];
+				if (x < pos.x) continue;
+				if (x > pos.x) break;
+				int tile = Map.Fields[x + y].playerInfo.SeenTile;
+				if (!tile) {
+					tile = Map.Fields[x + y].getGraphicTile();
+				}
+				const int slotX = hdatlas::classicMinimapSlot(mx - XOffset, tiles, pixels);
+				PutMinimapPixel(MinimapTerrainSurface, mx, my, ClassicTilePixel(tile, slotX, slotY));
+			}
+		}
+		SDL_UnlockSurface(MinimapTerrainSurface);
+		return;
+	}
+
 	// NG11: on the HD path the classic sheet is a placeholder; sampling it per-tile would read OOB.
 	// Refresh this tile's minimap pixels from the native mapColors instead.
 	if (Map.TileGraphic->NumFrames <= 1) {
@@ -429,11 +507,11 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 		const int hty = pos.y * Map.Info.MapWidth;
 		const int htx = pos.x;
 		SDL_LockSurface(MinimapTerrainSurface);
-		for (int my = YOffset; my < H - YOffset; ++my) {
+		for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
 			const int y = Minimap2MapY[my];
 			if (y < hty) continue;
 			if (y > hty) break;
-			for (int mx = XOffset; mx < W - XOffset; ++mx) {
+			for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
 				const int x = Minimap2MapX[mx];
 				if (x < htx) continue;
 				if (x > htx) break;
@@ -461,7 +539,7 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 
 	const int ty = pos.y * Map.Info.MapWidth;
 	const int tx = pos.x;
-	for (int my = YOffset; my < H - YOffset; ++my) {
+	for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
 		const int y = Minimap2MapY[my];
 		if (y < ty) {
 			continue;
@@ -470,7 +548,7 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 			break;
 		}
 
-		for (int mx = XOffset; mx < W - XOffset; ++mx) {
+		for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
 			const int x = Minimap2MapX[mx];
 
 			if (x < tx) {
@@ -508,7 +586,7 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 /**
 **  Draw a unit on the minimap.
 */
-static void DrawUnitOn(const CUnit &unit, int red_phase)
+static void DrawUnitOn(const CUnit &unit, int red_phase, int scaleX, int scaleY)
 {
 	const CUnitType *type;
 
@@ -541,13 +619,14 @@ static void DrawUnitOn(const CUnit &unit, int red_phase)
 
 	int mx = 1 + UI.Minimap.XOffset + Map2MinimapX[unit.tilePos.x];
 	int my = 1 + UI.Minimap.YOffset + Map2MinimapY[unit.tilePos.y];
-	int w = Map2MinimapX[type->TileWidth];
-	if (mx + w >= UI.Minimap.W) { // clip right side
-		w = UI.Minimap.W - mx;
+	// The loops below draw w + 1 by h0 + 1 pixels from the pixel of the unit's own tile.
+	int w = hdatlas::minimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC) - 1;
+	if (mx + w >= SurfaceW) { // clip right side
+		w = SurfaceW - mx;
 	}
-	int h0 = Map2MinimapY[type->TileHeight];
-	if (my + h0 >= UI.Minimap.H) { // clip bottom side
-		h0 = UI.Minimap.H - my;
+	int h0 = hdatlas::minimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC) - 1;
+	if (my + h0 >= SurfaceH) { // clip bottom side
+		h0 = SurfaceH - my;
 	}
 	int bpp = 0;
 	SDL_Color c;
@@ -578,6 +657,11 @@ void CMinimap::Update()
 		red_phase = !red_phase;
 	}
 
+	// Classic view switched: the terrain layer is redrawn whole, once.
+	if (MinimapTerrainSurface && g_minimapTerrainClassic != IsClassicView()) {
+		UpdateTerrain();
+	}
+
 	// Clear Minimap background if not transparent
 	if (!Transparent) {
 		SDL_FillRect(MinimapSurface, nullptr, SDL_MapRGB(MinimapSurface->format, 0, 0, 0));
@@ -593,8 +677,8 @@ void CMinimap::Update()
 	if (!ReplayRevealMap) {
 		uint32_t *const minimapFog = static_cast<uint32_t *>(MinimapFogSurface->pixels);
 		size_t index = 0;
-		for (uint16_t my = 0; my < H; ++my) {
-			for (uint16_t mx = 0; mx < W; ++mx) {
+		for (uint16_t my = 0; my < SurfaceH; ++my) {
+			for (uint16_t mx = 0; mx < SurfaceW; ++mx) {
 
 				const Vec2i tilePos(Minimap2MapX[mx], Minimap2MapY[my] / Map.Info.MapWidth);
 				const uint8_t vis = FogOfWar->GetVisibilityForTile(tilePos);
@@ -608,7 +692,7 @@ void CMinimap::Update()
 		}
 		/// Alpha blending the fog of war texture to minimap
 		/// TODO: switch to hardware rendering
-		const SDL_Rect fogRect {0, 0, W, H};
+		const SDL_Rect fogRect {0, 0, SurfaceW, SurfaceH};
 		BlitSurfaceAlphaBlending_32bpp(MinimapFogSurface, &fogRect, MinimapSurface, &fogRect);
 	}
 	//
@@ -616,7 +700,7 @@ void CMinimap::Update()
 	//
 	for (const CUnit *unit : UnitManager->GetUnits()) {
 		if (unit->IsVisibleOnMinimap() && !unit->Removed && !unit->Type->BoolFlag[REVEALER_INDEX].value) {
-			DrawUnitOn(*unit, red_phase);
+			DrawUnitOn(*unit, red_phase, MinimapScaleX, MinimapScaleY);
 		}
 	}
 }
@@ -669,7 +753,7 @@ void CMinimap::Draw() const
 		if (MinimapTexture) {
 			SDL_UpdateTexture(MinimapTexture, nullptr,
 				MinimapSurface->pixels, MinimapSurface->pitch);
-			SDL_Rect dst = {X, Y, MinimapSurface->w, MinimapSurface->h};
+			SDL_Rect dst = {X, Y, MinimapSurface->w * MinimapStep, MinimapSurface->h * MinimapStep};
 			SDL_RenderCopy(TheRenderer, MinimapTexture, nullptr, &dst);
 			DrawEvents();
 			return;
@@ -691,8 +775,8 @@ void CMinimap::Draw() const
 */
 Vec2i CMinimap::ScreenToTilePos(const PixelPos &screenPos) const
 {
-	Vec2i tilePos((((screenPos.x - X - XOffset) * MINIMAP_FAC) / MinimapScaleX),
-				  (((screenPos.y - Y - YOffset) * MINIMAP_FAC) / MinimapScaleY));
+	Vec2i tilePos(((((screenPos.x - X) / MinimapStep - XOffset) * MINIMAP_FAC) / MinimapScaleX),
+				  ((((screenPos.y - Y) / MinimapStep - YOffset) * MINIMAP_FAC) / MinimapScaleY));
 
 	Map.Clamp(tilePos);
 	return tilePos;
@@ -707,8 +791,8 @@ Vec2i CMinimap::ScreenToTilePos(const PixelPos &screenPos) const
 */
 PixelPos CMinimap::TilePosToScreenPos(const Vec2i &tilePos) const
 {
-	const PixelPos screenPos(X + XOffset + (tilePos.x * MinimapScaleX) / MINIMAP_FAC,
-							 Y + YOffset + (tilePos.y * MinimapScaleY) / MINIMAP_FAC);
+	const PixelPos screenPos(X + MinimapStep * (XOffset + (tilePos.x * MinimapScaleX) / MINIMAP_FAC),
+							 Y + MinimapStep * (YOffset + (tilePos.y * MinimapScaleY) / MINIMAP_FAC));
 	return screenPos;
 }
 
@@ -746,20 +830,16 @@ void CMinimap::Destroy()
 */
 void CMinimap::DrawViewportArea(const CViewport &viewport, int alpha) const
 {
-	// M666-7. Size, measured on the original as outer px (work/agent-fix-hudrest/tools/
-	// m7_viewrect.py), k = HUD step, view in tiles = view px / tile px:
+	// M666-7. Size, measured on the original as outer px, k = HUD step, view in tiles =
+	// view px / tile px:
 	//   k 3, view 25.33 x 19.25, 96-tile map  (4 px a tile): 102 x 78  (c_k, c25, b02, b03, b04)
 	//   k 3, view 25.33 x 19.25, 128-tile map (3 px a tile):  75 x 57  (e01, e02)
 	//   k 2, view 20.81 x 16.11, 32-tile map  (8 px a tile): 160 x 128 (o20, o41, o45)
 	// One rule gives all six numbers: whole tiles of the view (rounded down), times the minimap's
-	// base units per tile, rounded up to a whole unit, times k: ceil(25 * 4/3) = 34 -> 102,
-	// ceil(19 * 4/3) = 26 -> 78, 25 -> 75, 19 -> 57, 20 * 4 = 80 -> 160, 16 * 4 = 64 -> 128.
-	// It is a fit to three scenes, not a decoded rule. The size was the count of tiles the view
-	// TOUCHES (26 x 19 -> 312 x 228 px on a 32-tile map at k = 3; the rule gives 300 x 216).
-	// Line: k px (3 at k = 3, 2 at k = 2, same captures), drawn inwards.
-	// Place: the view's own top-left, pixel-true. The original's place rule is NOT in evidence
-	// (its captures are neither at a map edge nor tile-aligned); a tile-aligned origin would
-	// leave a 12-px gap under a view that shows the map's last row.
+	// base units per tile, rounded up to a whole unit, times k. It is a fit to three scenes, not
+	// a decoded rule.
+	// Line: k px, drawn inwards.
+	// Place: the view's own top-left, pixel-true. The original's place rule is not in evidence.
 	const int k = std::max(1, Video.HudCanvas.Step);
 	const int n = std::max(Map.Info.MapWidth, Map.Info.MapHeight);
 	const double unitsPerTile = (n > 0) ? (double) std::min(W, H) / k / n : 0.0;
@@ -769,8 +849,24 @@ void CMinimap::DrawViewportArea(const CViewport &viewport, int alpha) const
 	const int w = k * (int) std::ceil(tilesX * unitsPerTile - 1e-6);
 	const int h = k * (int) std::ceil(tilesY * unitsPerTile - 1e-6);
 	const PixelPos tilePos = TilePosToScreenPos(viewport.MapPos);
-	const int x = tilePos.x + (viewport.Offset.x * MinimapScaleX) / (MINIMAP_FAC * PixelTileSize.x);
-	const int y = tilePos.y + (viewport.Offset.y * MinimapScaleY) / (MINIMAP_FAC * PixelTileSize.y);
+	const int x = tilePos.x + MinimapStep * ((viewport.Offset.x * MinimapScaleX) / (MINIMAP_FAC * PixelTileSize.x));
+	const int y = tilePos.y + MinimapStep * ((viewport.Offset.y * MinimapScaleY) / (MINIMAP_FAC * PixelTileSize.y));
+
+	if (ClassicHudActive()) {
+		// Classic view: the size by the whole tiles of the logical view
+		// (hdatlas::classicMinimapViewPixels: 104 x 92 on a 32-tile map, 25 x 23 on a 96-tile one
+		// at 776 x 582), a line of one classic pixel = step.
+		const int line = hdatlas::classicStep(Video.Height);
+		const hdatlas::ClassicRect lv = hdatlas::classicView(hdatlas::classicScreen(Video.Width, Video.Height));
+		const int cw = MinimapStep * hdatlas::classicMinimapViewPixels(
+						   std::min(lv.w, Map.Info.MapWidth * hdatlas::ClassicTilePx), n);
+		const int ch = MinimapStep * hdatlas::classicMinimapViewPixels(
+						   std::min(lv.h, Map.Info.MapHeight * hdatlas::ClassicTilePx), n);
+		for (int i = 0; i < line && cw - 2 * i > 0 && ch - 2 * i > 0; ++i) {
+			Video.DrawTransRectangle(UI.ViewportCursorColor, x + i, y + i, cw - 2 * i, ch - 2 * i, alpha);
+		}
+		return;
+	}
 
 	// Draw cursor as rectangle (Note: unclipped, as it is always visible)
 	for (int i = 0; i < k && w - 2 * i > 0 && h - 2 * i > 0; ++i) {

@@ -255,7 +255,7 @@ final class ResultView extends View {
     private float ix() { return WIN_X + INSET; }
     private float iw() { return WIN_W - INSET * 2f; }
     /**
-     * The owner's choice of 2026-10-06 (option 2, "fitted"): the window keeps its 120 units
+     * Owner's rule ("fitted"): the window keeps its 120 units
      * above and below inside the view it is shown in, which is lower than the design's 2400
      * where the system's strips are not used; the room is taken from the empty part between
      * the table and the buttons, and from the table only when that is used up.
@@ -415,7 +415,7 @@ final class ResultView extends View {
         }
         // The table reaches down to the buttons (four rows on a tablet); with more players the
         // rows are dragged inside it, and then a count "shown / all" stands in the heading and
-        // the lower edge fades while rows wait below (owner decision 2026-10-10).
+        // the lower edge fades while rows wait below (owner's rule).
         final int whole = Math.max(1, (int) ((rowsBottom() - rowsTop() + 6f) / ROW_PITCH));
         if (rows.size() > whole) {
             kit.textTopRight(c, whole + " / " + rows.size(), ix + 24f + 600f, TABLE_Y + 36f,

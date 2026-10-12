@@ -108,6 +108,10 @@ extern bool LoadWC2Strings @ RM_LoadStrings(const std::string language);
 extern const std::string &GetWC2String @ RM_Str(const std::string key);
 extern int GetWC2StringCount @ RM_StrCount(void);
 extern int GetWC2Id @ RM_Id(const std::string family, const std::string displayName);
+// The id of an object by its ident ("unit-orc-shipyard", "upgrade-sword1", "spell-healing"):
+// RM_SetId fills the registry the command tooltip reads, RM_IdOf returns -1 for an unknown ident.
+extern void SetWC2IdForIdent @ RM_SetId(const std::string family, const std::string ident, int id);
+extern int GetWC2IdForIdent @ RM_IdOf(const std::string family, const std::string ident);
 extern int GetGlobalCampaignProgress(const std::string campaignKey);
 extern void SetGlobalCampaignProgress(const std::string campaignKey, int missionsCompleted);
 

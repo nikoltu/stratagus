@@ -20,17 +20,12 @@
 /**
 **  Warcraft II: Remastered ships its cinematics as **WebM** -- `Data/Movies` holds 26 files
 **  (`intro.webm`, `human_act_2/3/4.webm`, `human_finale.webm`, the orc set, ...), each with a
-**  sibling `.wav` carrying the audio. Stratagus's movie player is an OGG/Theora decoder, so
-**  before this file not one of those cinematics could be opened at all
-**  (audit AUDIT_ORIGINAL_VS_OURS_2026-08-21, item MV1).
+**  sibling `.wav` carrying the audio. Stratagus's movie player is an OGG/Theora decoder and
+**  cannot open them (MV1).
 **
 **  The Android path decodes with the platform's own hardware decoder through the NDK media API --
 **  AMediaExtractor demuxes, AMediaCodec decodes onto an AImageReader surface, and the normalized
-**  YUV_420_888 image is read back and converted to RGB for our existing present loop. That
-**  approach, and the AHardwareBuffer plane handling that makes the chroma planes readable, is
-**  taken from the owner's own openbw-android cinematic player (`android/app/src/main/cpp/
-**  cine_hw.cpp`, "Faze 4.7 Variant B"), with the data source changed from a staged temp file to
-**  the movie's real path and the presentation changed to ours.
+**  YUV_420_888 image is read back and converted to RGB for the existing present loop.
 **
 **  Audio comes from the sibling `.wav` through the normal music path, exactly as the Theora player
 **  streams the movie's own audio, so no audio codec work is needed.
@@ -443,10 +438,10 @@ bool PlayWebMMovie(const std::string &filename)
 	const unsigned int start = SDL_GetTicks();
 	int frame = 0;
 	while (!WebMStop && NextFrame(d, rgb)) {
-		// NG83: playback runs its own loop, so without this the main-loop watchdog sees the
-		// checkpoint frozen for the whole clip and reports a stall of the film's length (a 115 s
-		// cinematic logged as a 115 s freeze). Bumping it per presented frame keeps the watchdog
-		// meaningful DURING a movie: a real wedge stops the frames, and so stops the heartbeat.
+		// Playback runs its own loop, so without this the main-loop watchdog sees the checkpoint
+		// frozen for the whole clip and reports a stall of the film's length (NG83). Bumping it per
+		// presented frame keeps the watchdog meaningful during a movie: a real wedge stops the
+		// frames, and so stops the heartbeat.
 		DBG_CHECKPOINT("movie:webm");
 		SDL_UpdateTexture(tex, nullptr, rgb.data(), d->w * 3);
 		SDL_RenderClear(TheRenderer);

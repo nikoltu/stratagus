@@ -53,7 +53,7 @@ final class MapStore {
         }
         final String stem = name.substring(0, name.length() - 4);
         File target = new File(dir, stem + ".pud");
-        for (int n = 2; target.exists(); ++n) {
+        for (int n = 2; taken(target); ++n) {
             target = new File(dir, stem + " (" + n + ").pud");
         }
         try (InputStream in = c.getContentResolver().openInputStream(document);
@@ -76,5 +76,109 @@ final class MapStore {
             return null;
         }
         return target;
+    }
+
+    /** True for one of the player's own maps: a file of the store itself. */
+    static boolean isOwn(Context c, File map) {
+        return map != null && map.getParentFile() != null && map.getParentFile().equals(directory(c));
+    }
+
+    /** A map's name as a file can carry it: the rule for typed names, less what a file name cannot hold. */
+    static String cleanName(String wanted) {
+        final StringBuilder clean = new StringBuilder();
+        for (char ch : Profiles.clean(wanted).toCharArray()) {
+            if ("/\\:*?\"<>|".indexOf(ch) < 0) {
+                clean.append(ch);
+            }
+        }
+        return clean.toString().trim();
+    }
+
+    /**
+     * The file a new map of a name gets; a name already there - as a map or as a draft that was
+     * never saved - gets a number. Null when the store cannot be made.
+     */
+    static File free(Context c, String stem) {
+        final File dir = directory(c);
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return null;
+        }
+        File target = new File(dir, stem + ".pud");
+        for (int n = 2; taken(target); ++n) {
+            target = new File(dir, stem + " (" + n + ").pud");
+        }
+        return target;
+    }
+
+    private static boolean taken(File map) {
+        return map.exists() || net.wargushd.game.editor.WorkingCopy.journalOf(map).exists();
+    }
+
+    /** Copy one of the player's own maps, as it was last saved, under a free name. Null when it could not be done. */
+    static File duplicate(Context c, File map) {
+        if (!isOwn(c, map) || !map.isFile()) {
+            return null;
+        }
+        final String n = map.getName();
+        final File target = free(c, n.substring(0, n.length() - 4));
+        if (target == null) {
+            return null;
+        }
+        try (InputStream in = new java.io.FileInputStream(map);
+             OutputStream out = new FileOutputStream(target)) {
+            final byte[] buffer = new byte[65536];
+            for (int got; (got = in.read(buffer)) > 0; ) {
+                out.write(buffer, 0, got);
+            }
+        } catch (IOException | RuntimeException e) {
+            target.delete();
+            return null;
+        }
+        return target;
+    }
+
+    /**
+     * Give one of the player's own maps another file name; its working copy goes with it. A
+     * draft that was never saved is its working copy alone.
+     */
+    static boolean rename(Context c, File map, File target) {
+        final File journal = net.wargushd.game.editor.WorkingCopy.journalOf(map);
+        final File journalTo = net.wargushd.game.editor.WorkingCopy.journalOf(target);
+        if (!isOwn(c, map) || !isOwn(c, target) || taken(target)) {
+            return false;
+        }
+        if (!map.isFile()) {
+            return journal.isFile() && journal.renameTo(journalTo);
+        }
+        if (!map.renameTo(target)) {
+            return false;
+        }
+        if (journal.isFile()) {
+            journal.renameTo(journalTo);
+        }
+        return true;
+    }
+
+    /** Remove one of the player's own maps and its working copy. Nothing outside the store is ever removed. */
+    static boolean remove(Context c, File map) {
+        if (!isOwn(c, map)) {
+            return false;
+        }
+        final File journal = net.wargushd.game.editor.WorkingCopy.journalOf(map);
+        if (!map.isFile()) {
+            return journal.isFile() && journal.delete();
+        }
+        if (!map.delete()) {
+            return false;
+        }
+        if (journal.isFile()) {
+            journal.delete();
+        }
+        return true;
+    }
+
+    /** Where the editor writes the map of a test game: a folder no list of maps reads. */
+    static File testFile(Context c) {
+        return new File(Provision.dataDir(c), "maps/editor-test/test.pud");
     }
 }

@@ -228,6 +228,7 @@
 #include "actions.h"
 #include "commands.h"
 #include "interface.h"
+#include "launcher_bridge.h"
 #include "map.h"
 #include "net_lowlevel.h"
 #include "net_mesh_glue.h"
@@ -367,10 +368,12 @@ public:
 	void SendPacket(int hostSlot, int player, unsigned long cycle) override;
 	void InstallQuit(int player, unsigned long cycle, mesh::Reason reason) override;
 	void SetPaused(bool paused, int player) override;
+	void SendChat(int hostSlot, uint32_t number, const std::string &text) override;
+	void ShowChat(int player, const std::string &text) override;
 };
 
 static CNetworkMeshEngine NetworkMeshEngine;
-/// The model of the running mesh game, none in a star game and outside a game
+/// The model of the running game with other people, none outside one
 static std::unique_ptr<CMeshGlue> MeshGlue;
 
 /// A device which loads tells the others so at this interval (ms)
@@ -391,46 +394,22 @@ static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHo
 //----------------------------------------------------------------------------
 
 /**
-**  Send message to all clients.
+**  Send message to every other device.
 **
 **  @param packet       Packet to send.
 **  @param numcommands  Number of commands.
 */
-static void NetworkBroadcast(const CNetworkPacket &packet, int numcommands, int player = 255)
+static void NetworkBroadcast(const CNetworkPacket &packet, int numcommands)
 {
 	const unsigned int size = packet.Size(numcommands);
 	std::vector<unsigned char> buf(size);
 	packet.Serialize(buf.data(), numcommands);
 
-	// Send to all clients.
-	if (NetMesh) { // every device sends to every other device
-		for (int i = 0; i < PlayerMax; ++i) {
-			if (i == NetLocalHostsSlot) {
-				continue; // skip self
-			}
-			if (Hosts[i].IsValid()) {
-				const CHost host(Hosts[i].Host, Hosts[i].Port);
-				if (Hosts[i].PlyNr == player) {
-					continue;
-				}
-				NetworkFildes.Send(host, buf.data(), buf.size());
-			}
+	for (int i = 0; i < PlayerMax; ++i) {
+		if (i == NetLocalHostsSlot || !Hosts[i].IsValid()) {
+			continue;
 		}
-	} else if (NetConnectType == 1) { // server
-		for (int i = 0; i < NetPlayers; ++i) {
-			if (i == NetLocalHostsSlot) {
-				continue; // skip self
-			}
-			if (Hosts[i].IsValid()) {
-				const CHost host(Hosts[i].Host, Hosts[i].Port);
-				if (Hosts[i].PlyNr == player) {
-					continue;
-				}
-				NetworkFildes.Send(host, buf.data(), buf.size());
-			}
-		}
-	} else { // client
-		const CHost host(Hosts[0].Host, Hosts[0].Port);
+		const CHost host(Hosts[i].Host, Hosts[i].Port);
 		NetworkFildes.Send(host, buf.data(), buf.size());
 	}
 }
@@ -526,7 +505,7 @@ static void NetworkParseMeshEvent(const unsigned char *buf, int len, const CHost
 	int from = -1;
 
 	if (mesh::DeserializeProbe(buf, size, &ack, &from)) {
-		// Probes travel before the game, when the mesh is not on yet.
+		// Probes travel before the game, while the room still runs.
 		if (index == -1 || index != from || index == NetLocalHostsSlot || !Hosts[index].IsValid()) {
 			++NetworkMeshDropped;
 			return;
@@ -554,8 +533,20 @@ static void NetworkParseMeshEvent(const unsigned char *buf, int len, const CHost
 		NetworkParseInGameEvent(relayed, int(relayedSize), host, true);
 		return;
 	}
+	uint32_t chatNumber = 0;
+	const char *chatText = nullptr;
+	size_t chatSize = 0;
+	if (MeshGlue && mesh::DeserializeChat(buf, size, &from, &chatNumber, &chatText, &chatSize)) {
+		// A chat line: no part of the game, taken also while the game stands.
+		if (index == -1 || index != from || index == NetLocalHostsSlot || !Hosts[index].IsValid()) {
+			++NetworkMeshDropped;
+			return;
+		}
+		MeshGlue->OnChatMessage(index, chatNumber, std::string(chatText, chatSize), NetworkTicks());
+		return;
+	}
 	mesh::Msg message;
-	if (!NetMesh || !mesh::Deserialize(buf, size, &message, &from)
+	if (!mesh::Deserialize(buf, size, &message, &from)
 		|| index == -1 || index != from || index == NetLocalHostsSlot || !Hosts[index].IsValid()) {
 #ifdef DEBUG
 		const std::string hostStr = host.toString();
@@ -729,6 +720,165 @@ void CNetworkMeshEngine::SetPaused(bool paused, int player)
 	           paused ? "paused" : "resumed", player, name, GameCycle);
 }
 
+/// The host was told that there is a chat
+static bool NetworkChatOffered = false;
+
+/// "~" begins a colour change in a drawn text; "~~" is the character itself
+static std::string ChatNoMarkup(const std::string &text)
+{
+	std::string out;
+
+	for (const char c : text) {
+		out += c;
+		if (c == '~') {
+			out += '~';
+		}
+	}
+	return out;
+}
+
+/**
+**  A chat line is shown: in the message line of the game as "<name>: <text>" (that line
+**  has one ink, the one of the game), and kept for the host with the colour of the player.
+**
+**  @param player  Player number of the one who said it.
+**  @param text    The line.
+*/
+static void NetworkChatShow(int player, const std::string &text)
+{
+	const bool known = player >= 0 && player < PlayerMax;
+	const std::string name = known ? Players[player].Name : std::string();
+	int rgb = -1;
+
+	if (known) {
+		const int index = GameSettings.Presets[player].PlayerColor;
+		if (index >= 0 && index < int(PlayerColorsRGB.size()) && !PlayerColorsRGB[index].empty()) {
+			const CColor &colour = PlayerColorsRGB[index][0];
+			rgb = (colour.R << 16) | (colour.G << 8) | colour.B;
+		} else {
+			rgb = 0xE8E2D4;
+		}
+	}
+	if (GameRunning) { // the message line belongs to a game on the screen
+		SetMessage("%s: %s", ChatNoMarkup(name).c_str(), ChatNoMarkup(text).c_str());
+		PlayGameSound(GameSounds.ChatMessage.Sound.get(), MaxSampleVolume);
+	}
+	LauncherChatAdd(rgb, name, text);
+	ErrorPrint("NETCHAT player %d (%s): %s\n", player, name.c_str(), text.c_str());
+}
+
+void CNetworkMeshEngine::SendChat(int hostSlot, uint32_t number, const std::string &text)
+{
+	if (hostSlot < 0 || hostSlot >= PlayerMax || hostSlot == NetLocalHostsSlot || !Hosts[hostSlot].IsValid()) {
+		return;
+	}
+	unsigned char buf[mesh::kWireChatMaxSize];
+	const size_t size = mesh::SerializeChat(number, text.data(), text.size(), NetLocalHostsSlot, buf, sizeof(buf));
+	if (size == 0) {
+		return;
+	}
+	const CHost host(Hosts[hostSlot].Host, Hosts[hostSlot].Port);
+	NetworkFildes.Send(host, buf, size);
+}
+
+void CNetworkMeshEngine::ShowChat(int player, const std::string &text)
+{
+	NetworkChatShow(player, text);
+}
+
+/**
+**  A chat line as it may travel and be shown: every control character is a space, no
+**  spaces at its ends, at most 120 characters and the bytes of the wire (UTF-8, cut
+**  between two characters).
+**
+**  @return  The line; empty if nothing is left.
+*/
+std::string NetworkChatText(const std::string &raw)
+{
+	std::string text;
+	size_t characters = 0;
+
+	for (const char c : raw) {
+		const unsigned char byte = static_cast<unsigned char>(c);
+		const bool first = (byte & 0xC0) != 0x80; // not a following byte of a character
+		const bool blank = byte <= 0x20 || byte == 0x7F;
+		if (text.empty() && (blank || !first)) {
+			continue; // nothing in front
+		}
+		const size_t bytes = byte < 0x80 ? 1 : byte < 0xE0 ? 2 : byte < 0xF0 ? 3 : 4; // of the character it begins
+		if (first && (characters == 120 || text.size() + bytes > mesh::kWireChatMaxText)) {
+			break;
+		}
+		if (first) {
+			++characters;
+		}
+		text += blank ? ' ' : c;
+	}
+	while (!text.empty() && text.back() == ' ') {
+		text.pop_back();
+	}
+	return text;
+}
+
+bool NetworkChatIsDirect()
+{
+	return MeshGlue != nullptr;
+}
+
+/**
+**  The local player says a chat line to everybody.
+**
+**  Mesh game: the line goes to every device beside the command stream, at once and also
+**  while the game is paused, and is shown here at once. Any other network game: it is a
+**  command of the stream, as ever.
+**
+**  @param raw  What was typed.
+**
+**  @return  False if nothing was sent: no line, no network game, the game has not begun,
+**           this device is out of it, or too many lines wait for an answer.
+*/
+bool NetworkChat(const std::string &raw)
+{
+	const std::string text = NetworkChatText(raw);
+
+	if (text.empty() || !IsNetworkGame() || !ThisPlayer) {
+		return false;
+	}
+	if (!MeshGlue) {
+		NetworkSendChatMessage(ChatNoMarkup(ThisPlayer->Name + ": " + text));
+		return true;
+	}
+	if (MeshGlue->Held() || !MeshGlue->OnChat(text, NetworkTicks())) {
+		return false;
+	}
+	NetworkChatShow(ThisPlayer->Index, text);
+	return true;
+}
+
+/**
+**  Once per drawn frame of a game: the host is told when a game with other people can
+**  be talked in and when no longer, and the lines its player typed are said.
+*/
+void NetworkChatFrame()
+{
+	const bool offer = IsNetworkGame() && GameRunning && ThisPlayer
+		&& (!MeshGlue || (!MeshGlue->Held() && !MeshGlue->Lingering() && !MeshGlue->Model().IsOut()));
+
+	if (offer != NetworkChatOffered) {
+		NetworkChatOffered = offer;
+		if (offer) {
+			LauncherChatReset();
+		}
+		LauncherPost(LauncherMsgChat, offer ? 1 : 0);
+	}
+	std::string typed;
+	while (LauncherChatTakeTyped(typed)) {
+		if (offer) {
+			NetworkChat(typed);
+		}
+	}
+}
+
 /**
 **  The pause command of a player is executed. The model is told when the cycle is
 **  done: the pause begins after it, on every device.
@@ -776,7 +926,7 @@ bool NetworkIsPaused()
 static void NetworkMeshStart(const mesh::Params &params)
 {
 	MeshGlue.reset();
-	if (!NetMesh || !IsNetworkGame() || !ThisPlayer) {
+	if (!IsNetworkGame() || !ThisPlayer) {
 		return;
 	}
 	if (NetPlayers < 2 || NetPlayers > mesh::kMaxPlayers || NetLocalHostsSlot < 0 || NetLocalHostsSlot >= NetPlayers
@@ -876,6 +1026,36 @@ bool NetworkIsHeld()
 	return MeshGlue && MeshGlue->Held();
 }
 
+/// This device only watches the game: its player is defeated, the others play on.
+static bool NetWatching;
+
+/**
+**  This device only watches the game from now on, or no longer.
+**
+**  A watching device takes part in the game as before: it runs every cycle and sends its
+**  packet for every cycle, so the others never wait for it. What changes is on this device
+**  alone and is nothing the game computes with: no order, no diplomacy and no selection
+**  leaves it (the pause for everybody and the chat still do), the screen takes no order
+**  (GameObserve) and the map is drawn whole, as in a replay with the map revealed
+**  (ReplayRevealMap). The sight of the players, which the game does compute with, is not touched.
+**
+**  @param on  Watch, or play again (the end of a game).
+*/
+void NetworkSetWatching(bool on)
+{
+	if (on == NetWatching) {
+		return;
+	}
+	NetWatching = on;
+	GameObserve = on;
+	ReplayRevealMap = on;
+}
+
+bool NetworkIsWatching()
+{
+	return NetWatching;
+}
+
 /**
 **  The own load of the game is done and the game loop begins. Mesh game: from now
 **  on the others are told so, and the wait for them has its bounds.
@@ -896,7 +1076,7 @@ void NetworkLoadingPing()
 {
 	static unsigned long lastPing;
 
-	if (!NetMesh || !IsNetworkGame() || NetConnectRunning || GameRunning
+	if (!IsNetworkGame() || NetConnectRunning || GameRunning
 		|| (MeshGlue && MeshGlue->Loaded())) {
 		return;
 	}
@@ -973,6 +1153,10 @@ void ExitNetwork1()
 #endif
 
 	MeshGlue.reset();
+	if (NetworkChatOffered) {
+		NetworkChatOffered = false;
+		LauncherPost(LauncherMsgChat, 0);
+	}
 	NetworkFildes.Close();
 	NetExit(); // machine dependent setup
 
@@ -1086,6 +1270,9 @@ void NetworkSendCommand(int command,
 	if (NetworkIsHeld()) {
 		return; // the game has not begun: nobody gives an order ahead of the others
 	}
+	if (NetWatching) {
+		return; // a device which only watches gives no order
+	}
 	CNetworkCommandQueue ncq;
 
 	ncq.Time = GameCycle;
@@ -1132,6 +1319,9 @@ void NetworkSendExtendedCommand(int command, int arg1, int arg2, int arg3,
 	if (NetworkIsHeld()) {
 		return; // the game has not begun
 	}
+	if (NetWatching && command != ExtendedMessagePause) {
+		return; // a device which only watches changes nothing but the pause for everybody
+	}
 	CNetworkCommandQueue ncq;
 
 	ncq.Time = GameCycle;
@@ -1163,7 +1353,7 @@ void NetworkSendSelection(CUnit **units, int count)
 		return ThisPlayer->Index != host.PlyNr && host.IsValid()
 		    && Players[host.PlyNr].Team == ThisPlayer->Team;
 	});
-	if (!hasteammates || NetworkIsHeld()) {
+	if (!hasteammates || NetworkIsHeld() || NetWatching) {
 		return;
 	}
 	// Build and send packets to cover all units.
@@ -1282,28 +1472,6 @@ static void ParseResendCommand(const CNetworkPacket &packet, const CHost &host)
 	CNetworkPacket own;
 	const int numcommands = NetworkBuildPacket(NetworkIn[gameNetCycle & 0xFF][ThisPlayer->Index], own);
 	NetworkSendTo(host, own, numcommands);
-	// Check if a player quit this cycle
-	for (int j = 0; j < NetPlayers; ++j) {
-		if (!Hosts[j].IsValid()) {
-			continue;
-		}
-		for (int c = 0; c < MaxNetworkCommands; ++c) {
-			const CNetworkCommandQueue *ncq;
-			ncq = &NetworkIn[gameNetCycle & 0xFF][Hosts[j].PlyNr][c];
-			if (ncq->Time && ncq->Type == MessageQuit) {
-				CNetworkPacket np;
-				np.Header.Cycle = ncq->Time & 0xFF;
-				np.Header.OrigPlayer = Hosts[j].PlyNr; // the player who quit, not the sender
-				np.Header.Type[0] = MessageQuit;
-				np.Command[0] = ncq->Data;
-				for (int k = 1; k < MaxNetworkCommands; ++k) {
-					np.Header.Type[k] = MessageNone;
-				}
-				NetworkSendTo(host, np, 1);
-				break;
-			}
-		}
-	}
 }
 
 static bool IsAValidCommand_Command(const CNetworkPacket &packet, int index, const int player)
@@ -1385,16 +1553,10 @@ static void NetworkParseInGameEvent(const unsigned char *buf, int len, const CHo
 		}
 	} else if (player == 255) {
 		player = Hosts[index].PlyNr;
-	} else if (player != Hosts[index].PlyNr
-			   && (NetMesh || NetConnectType == 1 || index != 0 || player >= PlayerMax)) {
-		// Only the server passes on the packets of other players, and in a mesh nobody does.
+	} else if (player != Hosts[index].PlyNr) {
+		// Nobody sends the packets of another player as his own.
 		DebugPrint("Player %d sent a packet of player %d\n", Hosts[index].PlyNr, player);
 		return;
-	}
-	if (NetConnectType == 1 && !NetMesh) {
-		if (player != 255) {
-			NetworkBroadcast(packet, commands, player);
-		}
 	}
 	if (commands < 0) {
 		DebugPrint("Bad packet read\n");
@@ -1689,6 +1851,7 @@ static void NetworkExecCommand_Chat(const CNetworkCommandQueue &ncq)
 
 	SetMessage("%s", nc.Text.c_str());
 	PlayGameSound(GameSounds.ChatMessage.Sound.get(), MaxSampleVolume);
+	LauncherChatAdd(-1, std::string(), nc.Text);
 	CommandLog("chat", nullptr, EFlushMode::On, -1, -1, nullptr, nc.Text.c_str(), -1);
 }
 
@@ -1862,7 +2025,7 @@ void NetworkCommands()
 }
 
 /**
-**  A player timed out: place his quit in the next cycle and tell the others.
+**  A player timed out: place his quit in the next cycle.
 **
 **  @param playerIndex  Player number
 */
@@ -1877,16 +2040,6 @@ static void NetworkTimeOutPlayer(int playerIndex)
 	ncq->Data.resize(nc.Size());
 	nc.Serialize(&ncq->Data[0]);
 	PlayerQuit[playerIndex] = 1;
-
-	// The packet names the player it is about and carries his quit.
-	CNetworkPacket np;
-	np.Header.Cycle = ncq->Time & 0xFF;
-	np.Header.OrigPlayer = playerIndex;
-	np.Header.Type[0] = ncq->Type;
-	np.Header.Type[1] = MessageNone;
-	np.Command[0] = ncq->Data;
-
-	NetworkBroadcast(np, 1, playerIndex);
 }
 
 static void CheckPlayerThatTimeOut(int hostIndex)
@@ -2098,7 +2251,7 @@ unsigned int NetworkTestMeshDropped()
 }
 
 /**
-**  Start the model of a mesh game with the given time bounds (NetMesh must be on).
+**  Start the model of a mesh game with the given time bounds.
 **
 **  @return  false if the game is none the model counts with.
 */

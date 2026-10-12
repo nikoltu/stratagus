@@ -949,8 +949,10 @@ void UpdateUnitSightRange(CUnit &unit)
 	Assert(!SaveGameLoading);
 #endif
 	// FIXME : these values must be configurable.
-	if (unit.Constructed) { // Units under construction have no sight range.
-		unit.CurrentSightRange = 1;
+	if (unit.Constructed) {
+		// A building under construction lights with range 3 whatever the finished building's
+		// sight (EVIDENCE-SIGHT-002, work/agent-orig-12/ORIG12.md: o12_19, o12_27, o12_31, o12_34).
+		unit.CurrentSightRange = 3;
 	} else if (!unit.Container) { // proper value.
 		unit.CurrentSightRange = unit.Stats->Variables[SIGHTRANGE_INDEX].Max;
 	} else { // value of it container.
@@ -1182,6 +1184,13 @@ CUnit *MakeUnitAndPlace(const Vec2i &pos, const CUnitType &type, CPlayer *player
 **  @param resPos   Holds the nearest point.
 **  @param heading  preferense side to drop out of.
 */
+/// The outward search of a drop tile has passed every tile of the map.
+static bool DropSearchExhausted(int addx, int addy)
+{
+	const int limit = 2 * (Map.Info.MapWidth + Map.Info.MapHeight);
+	return addx > limit && addy > limit;
+}
+
 void FindNearestDrop(const CUnitType &type, const Vec2i &goalPos, Vec2i &resPos, int heading)
 {
 	int addx = 0;
@@ -1228,6 +1237,12 @@ startn:
 			}
 		}
 		++addy;
+		if (DropSearchExhausted(addx, addy)) {
+			// No tile of the map can take this type: answer the asked tile rather than search for ever.
+			pos = goalPos;
+			ErrorPrint("FindNearestDrop: no free tile for '%s'\n", type.Ident.c_str());
+			goto found;
+		}
 	}
 
 found:
@@ -1728,7 +1743,11 @@ bool CUnit::IsVisibleInViewport(const CViewport &vp) const
 	// Check if the graphic is inside the viewport.
 	int x = tilePos.x * PixelTileSize.x + IX - (Type->Width - Type->TileWidth * PixelTileSize.x) / 2 + Type->Offset.x;
 	int y = tilePos.y * PixelTileSize.y + IY - (Type->Height - Type->TileHeight * PixelTileSize.y) / 2 + Type->Offset.y;
-	const PixelSize vpSize = vp.GetPixelSize();
+	// ZOOM-OUT-CULL: the view's size in MAP pixels. A view zoomed out (Zoom < 1: 0.5 on a screen
+	// under 960 rows) covers size / Zoom map pixels; its screen size alone dropped every unit
+	// outside the top-left Zoom x Zoom part of the view, so a base lower or further right drew
+	// nothing. A view zoomed in keeps the screen size: larger than what it covers, never too small.
+	const PixelSize vpSize = (vp.Zoom < 1.0f) ? vp.GetRenderPixelSize() : vp.GetPixelSize();
 	const PixelPos vpTopLeftMapPos = Map.TilePosToMapPixelPos_TopLeft(vp.MapPos) + vp.Offset;
 	const PixelPos vpBottomRightMapPos = vpTopLeftMapPos + vpSize;
 
@@ -1925,7 +1944,22 @@ void RescueUnits()
 				if (unit->Removed) {
 					continue;
 				}
-				std::vector<CUnit *> around = SelectAroundUnit(*unit, 1);
+				// A unit that rests on the step grid (a ship, a flyer) holds one tile of its grid
+				// cell but fills the whole cell on screen, and two such units are never on
+				// neighbouring tiles: the rescuer is near when the two cells touch.
+				const int cell = std::max<int>(1, unit->Type->GridStep) - 1;
+				const Vec2i unitEnd = unit->tilePos + Vec2i(unit->Type->TileWidth - 1 + cell, unit->Type->TileHeight - 1 + cell);
+				std::vector<CUnit *> around = Select(unit->tilePos - Vec2i(3, 3), unitEnd + Vec2i(1, 1),
+					[&](const CUnit *other) {
+						if (other == unit) {
+							return false;
+						}
+						const int otherCell = std::max<int>(1, other->Type->GridStep) - 1;
+						const Vec2i otherEnd = other->tilePos
+							+ Vec2i(other->Type->TileWidth - 1 + otherCell, other->Type->TileHeight - 1 + otherCell);
+						return other->tilePos.x <= unitEnd.x + 1 && otherEnd.x >= unit->tilePos.x - 1
+							&& other->tilePos.y <= unitEnd.y + 1 && otherEnd.y >= unit->tilePos.y - 1;
+					});
 				//  Look if ally near the unit.
 				for (size_t i = 0; i != around.size(); ++i) {
 					if (around[i]->Type->CanAttack && unit->IsAllied(*around[i]) && around[i]->Player->Type != PlayerTypes::PlayerRescuePassive && around[i]->Player->Type != PlayerTypes::PlayerRescueActive) {
@@ -2162,6 +2196,12 @@ startn:
 			}
 		}
 		++addy;
+		if (DropSearchExhausted(addx, addy)) {
+			// No tile of the map can take the unit: put it where the search began rather than hang.
+			pos = container ? container->tilePos : unit.tilePos;
+			ErrorPrint("DropOutOnSide: no free tile for '%s'\n", unit.Type->Ident.c_str());
+			goto found;
+		}
 	}
 
 found:
@@ -2246,7 +2286,66 @@ void DropOutNearest(CUnit &unit, const Vec2i &goalPos, const CUnit *container)
 			return;
 		}
 		++addy;
+		if (DropSearchExhausted(addx, addy)) {
+			// No tile of the map can take the unit: put it where the search began rather than hang.
+			ErrorPrint("DropOutNearest: no free tile for '%s'\n", unit.Type->Ident.c_str());
+			unit.Place(container ? container->tilePos : unit.tilePos);
+			return;
+		}
 	}
+}
+
+/**
+**  The tile on which a unit that moves on a grid comes out of a 3x3 building.
+**
+**  The tiles are fixed places beside the building, whatever side the unit went in from:
+**  with its load out of a resource, west of the middle row; out of a shore depot, above the
+**  top-left tile, else above the top-right tile; a new unit out of a shore building, above the
+**  top-right tile, else above the top-left tile. A depot that refines is not covered.
+**
+**  @param unit       Unit inside the building.
+**  @param container  The building.
+**  @param kind       How the unit leaves.
+**
+**  @return           The first of those tiles the unit can be at; none: search as for any unit.
+*/
+std::optional<Vec2i> FindGridExitTile(const CUnit &unit, const CUnit &container, EGridExit kind)
+{
+	const CUnitType &type = *container.Type;
+
+	if (unit.Type->GridStep <= 1 || type.TileWidth != 3 || type.TileHeight != 3) {
+		return std::nullopt;
+	}
+	const Vec2i west(container.tilePos.x - 1, container.tilePos.y + 1);
+	const Vec2i aboveLeft(container.tilePos.x, container.tilePos.y - 1);
+	const Vec2i aboveRight(container.tilePos.x + 2, container.tilePos.y - 1);
+	const bool shore = type.BoolFlag[SHOREBUILDING_INDEX].value;
+	std::vector<Vec2i> tiles;
+
+	switch (kind) {
+		case EGridExit::Resource:
+			if (type.GivesResource) {
+				tiles = {west};
+			}
+			break;
+		case EGridExit::Depot:
+			if (shore && std::none_of(std::begin(type.DefaultStat.ImproveIncomes), std::end(type.DefaultStat.ImproveIncomes),
+			                          [](int income) { return income != 0; })) {
+				tiles = {aboveLeft, aboveRight};
+			}
+			break;
+		case EGridExit::Trained:
+			if (shore) {
+				tiles = {aboveRight, aboveLeft};
+			}
+			break;
+	}
+	for (const Vec2i &pos : tiles) {
+		if (UnitCanBeAt(unit, pos)) {
+			return pos;
+		}
+	}
+	return std::nullopt;
 }
 
 /**
@@ -2511,7 +2610,7 @@ int ThreatCalculate(const CUnit &unit, const CUnit &dest)
 
 	const int d = unit.MapDistanceTo(dest);
 
-	if (d <= unit.Stats->Variables[ATTACKRANGE_INDEX].Max && d >= type.MinAttackRange) {
+	if (unit.AttackDistanceTo(dest) <= unit.Stats->Variables[ATTACKRANGE_INDEX].Max && d >= type.MinAttackRange) {
 		cost += d * INRANGE_FACTOR;
 		cost -= INRANGE_BONUS;
 	} else {
@@ -2556,7 +2655,7 @@ int TargetPriorityCalculate(const CUnit &attacker, const CUnit &dest)
 
 	const int attackRange 	 = attacker.Stats->Variables[ATTACKRANGE_INDEX].Max;
 	const int minAttackRange = attacker.Type->MinAttackRange;
-	const int pathLength 	 = CalcPathLengthToUnit(attacker, dest, minAttackRange, attackRange);
+	const int pathLength 	 = CalcPathLengthToUnit(attacker, dest, minAttackRange, attackRange, true);
 	int distance		 	 = attacker.MapDistanceTo(dest);
 
 	const int reactionRange  = (player.Type == PlayerTypes::PlayerPerson) ? type.ReactRangePerson : type.ReactRangeComputer;
@@ -2653,10 +2752,10 @@ bool InAttackRange(const CUnit &unit, const CUnit &target)
 {
 	const int range 	= unit.Stats->Variables[ATTACKRANGE_INDEX].Max;
 	const int minRange 	= unit.Type->MinAttackRange;
-	const int distance 	= unit.Container ? unit.Container->MapDistanceTo(target)
-										 : unit.MapDistanceTo(target);
+	const CUnit &from 	= unit.Container ? *unit.Container : unit;
 
-	return (minRange <= distance && distance <= range)
+	// the range reaches as far as the larger axis gap; the minimal range keeps the map distance
+	return (minRange <= from.MapDistanceTo(target) && from.AttackDistanceTo(target) <= range)
 		   && (!GameSettings.Inside
 			   || CheckObstaclesBetweenTiles(unit.tilePos, target.tilePos, MapFieldRocks | MapFieldForest));
 }
@@ -2758,9 +2857,8 @@ static void HitUnit_LastAttack(const CUnit *attacker, CUnit &target)
 			}
 		}
 	}
-	// No text: the original prints no line for this event (time series of work/agent-orig-scenes2,
-	// SCENES2.md Q1: trainings, buildings and raids covered, none of message_training_complete,
-	// message_work_complete, message_under_attack seen). The minimap mark stays.
+	// No text: the original prints no line for this event (none of message_training_complete,
+	// message_work_complete, message_under_attack seen on it). The minimap mark stays.
 	target.Player->Notify(ColorRed, target.tilePos, "%s", "");
 
 	if (attacker && !target.Type->Building) {
@@ -2925,7 +3023,7 @@ static void HitUnit_AttackBack(CUnit &attacker, CUnit &target)
 			COrder_Attack &order = dynamic_cast<COrder_Attack &>(*target.CurrentOrder());
 			if (order.IsAutoTargeting() || target.Player->AiEnabled) {
 				if (attacker.IsVisibleAsGoal(*target.Player)) {
-					if (UnitReachable(target, attacker, target.Stats->Variables[ATTACKRANGE_INDEX].Max, false)) {
+					if (UnitReachable(target, attacker, target.Stats->Variables[ATTACKRANGE_INDEX].Max, false, true)) {
 						target.UnderAttack = underAttack; /// allow target to ignore non aggressive targets while searching attacker
 						order.OfferNewTarget(target, attacker);
 					}
@@ -3206,6 +3304,25 @@ int MapDistanceBetweenTypes(const CUnitType &src, const Vec2i &pos1, const CUnit
 		dy = std::max<int>(0, pos1.y - pos2.y - dst.TileHeight + 1);
 	}
 	return isqrt(dy * dy + dx * dx);
+}
+
+/**
+**  Returns the attack-range distance between two points with unit type:
+**  the larger axis gap between the nearest tiles of the two footprints.
+**
+**  @param src  src unittype
+**  @param pos1 map tile position of src (upper-left).
+**  @param dst  Unit type to take into account.
+**  @param pos2 map tile position of dst.
+**
+**  @return     The distance an attack range is compared with.
+*/
+int AttackDistanceBetweenTypes(const CUnitType &src, const Vec2i &pos1, const CUnitType &dst, const Vec2i &pos2)
+{
+	const Vec2i size1(src.TileWidth, src.TileHeight);
+	const Vec2i size2(dst.TileWidth, dst.TileHeight);
+
+	return ChebyshevEdgeDistance(pos1, size1, pos2, size2);
 }
 
 /**

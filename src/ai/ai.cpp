@@ -856,8 +856,8 @@ static void AiMoveUnitInTheWay(CUnit &unit)
 		if (&unit == &blocker) {
 			continue;
 		}
-		// Check for collision
-		if (unit.MapDistanceTo(blocker) >= unit.Type->TileWidth + 1) {
+		// Check for collision: a unit on a grid is stopped by one that rests a whole step away
+		if (unit.MapDistanceTo(blocker) >= unit.Type->TileWidth + unit.Type->GridStep) {
 			continue;
 		}
 
@@ -868,7 +868,8 @@ static void AiMoveUnitInTheWay(CUnit &unit)
 			r = (r + 1) & 7;
 			--trycount;
 
-			const Vec2i pos = blocker.tilePos + blocker.Type->TileWidth * dirs[r];
+			// one step of the blocker: a tile nearer than that is no move for a unit on a grid
+			const Vec2i pos = blocker.tilePos + blocker.Type->TileWidth * blocker.Type->GridStep * dirs[r];
 
 			// Out of the map => no !
 			if (!Map.Info.IsPointOnMap(pos)) {

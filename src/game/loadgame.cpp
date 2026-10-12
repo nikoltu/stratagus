@@ -177,11 +177,38 @@ void LoadModules()
 
 static void PlaceUnits()
 {
+	std::vector<CUnit *> offGrid;
+
 	for (CUnit *unit : UnitManager->GetUnits()) {
 		if (!unit->Removed) {
+			const int step = unit->Type->GridStep;
+			if (step > 1 && (unit->tilePos.x % step || unit->tilePos.y % step)
+			    && !(unit->Type->CanTransport() && Map.Field(unit->tilePos)->CoastOnMap())) {
+				offGrid.push_back(unit);
+				continue;
+			}
 			unit->Removed = 1;
 			unit->Place(unit->tilePos);
 		}
+	}
+	// A game saved before such a type moved on a grid can hold it between grid tiles. It goes to the
+	// nearest free grid tile, after everything else stands, and starts its order from there.
+	for (CUnit *unit : offGrid) {
+		Vec2i pos;
+		FindNearestDrop(*unit->Type, unit->tilePos, pos, LookingW);
+		unit->IX = 0;
+		unit->IY = 0;
+		unit->Moving = 0;
+		if (unit->pathFinderData) {
+			unit->pathFinderData->output.Length = 0;
+			unit->pathFinderData->output.OverflowLength = 0;
+		}
+		unit->Removed = 1;
+		unit->Place(pos);
+	}
+	if (!offGrid.empty()) {
+		ErrorPrint("Saved game: %d unit(s) stood off their movement grid and were moved to the nearest free grid tile\n",
+		           static_cast<int>(offGrid.size()));
 	}
 }
 
@@ -205,10 +232,8 @@ void LoadGame(const fs::path &filename)
 
 	LuaGarbageCollect();
 	InitUnitTypes(1);
-	// NG55: a save file that fails to parse used to take the whole process down -- LuaLoadFile
-	// defaults to exitOnError, so one bad line in a .sav.gz meant ::exit(1) with no message to the
-	// player. (NG53 fixed the writer that was producing such files; this is the reading side.)
-	// Report the failure and let the caller return to the menu instead.
+	// NG55: a save file that fails to parse must not end the process (LuaLoadFile defaults to
+	// exitOnError). Report the failure and let the caller return to the menu instead.
 	if (LuaLoadFile(filename, "", /*exitOnError=*/false) != 0) {
 		ErrorPrint("Can't load the saved game '%s' -- the file is not valid.\n",
 		           filename.u8string().c_str());

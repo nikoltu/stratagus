@@ -120,7 +120,6 @@ void FillCustomValue(CInitMessage_Config *obj)
 	for (int i = 0; i != PlayerMax; ++i) {
 		FillCustomValue(&obj->hosts[i]);
 	}
-	obj->mesh = 1;
 }
 
 void FillCustomValue(CInitMessage_EngineMismatch *obj)
@@ -427,32 +426,6 @@ TEST_CASE("CInitMessage_Hello")
 TEST_CASE("CInitMessage_Config")
 {
 	CHECK(CheckSerialization_return<CInitMessage_Config>());
-}
-
-TEST_CASE("CInitMessage_Config carries the mesh byte after the hosts")
-{
-	const size_t sizeWithoutMesh = CInitMessage_Header::Size() + 1 + PlayerMax * CNetworkHost::Size();
-	CHECK(CInitMessage_Config::Size() == sizeWithoutMesh + 1);
-
-	CInitMessage_Config message;
-	CHECK(message.mesh == 0);
-	FillCustomValue(&message);
-	std::vector<unsigned char> buffer = message.Serialize();
-	CHECK(buffer.size() == CInitMessage_Config::Size());
-	CHECK(buffer[sizeWithoutMesh] == 1);
-
-	CInitMessage_Config read;
-	read.Deserialize(buffer.data());
-	CHECK(read.mesh == 1);
-	CHECK(read.clientIndex == 3);
-	CHECK(read.hosts[PlayerMax - 1].Port == message.hosts[PlayerMax - 1].Port);
-
-	// off is the default and stays off on the wire
-	message.mesh = 0;
-	buffer = message.Serialize();
-	CHECK(buffer[sizeWithoutMesh] == 0);
-	read.Deserialize(buffer.data());
-	CHECK(read.mesh == 0);
 }
 
 TEST_CASE("CInitMessage_EngineMismatch")

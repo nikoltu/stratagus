@@ -428,7 +428,6 @@ std::vector<unsigned char> CInitMessage_Config::Serialize() const
 	for (const auto &host : this->hosts) {
 		p += host.Serialize(p);
 	}
-	p += serialize8(p, mesh);
 	return buf;
 }
 
@@ -439,7 +438,6 @@ void CInitMessage_Config::Deserialize(const unsigned char *p)
 	for (auto &host : this->hosts) {
 		p += host.Deserialize(p);
 	}
-	p += deserialize8(p, &mesh);
 }
 
 //
@@ -655,7 +653,6 @@ std::vector<unsigned char> CInitMessage_State::Serialize() const
 
 	p += header.Serialize(p);
 	p += this->State.Serialize(p);
-	p += serialize8(p, mesh);
 	return buf;
 }
 
@@ -663,7 +660,6 @@ void CInitMessage_State::Deserialize(const unsigned char *p)
 {
 	p += header.Deserialize(p);
 	p += this->State.Deserialize(p);
-	p += deserialize8(p, &mesh);
 }
 
 //

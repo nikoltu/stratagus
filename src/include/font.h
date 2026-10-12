@@ -115,9 +115,8 @@ public:
 	/// WORLD-ZOOM-RULE: a face of the in-game HUD. Its sheet is baked for the HUD's art space
 	/// `height` units high (2160) and is scaled by the HUD's own step scale,
 	/// CVideo::HudCanvas.Scale * 2160 / height -- not by the 16:9 fit above, which stays the rule of
-	/// the menus and in-game windows. Evidence: digit "0" of the resource row is 25 px high at a
-	/// 2960x1848 client (work/agent-zoom-rule/captures/c_k_2960x1848.png, rows 11..35) = 38.25 units
-	/// at 0.6667; the fit would give 29.5.
+	/// the menus and in-game windows (measured: c_k_2960x1848.png, digit "0" of the resource row
+	/// 25 px high = 38.25 units).
 	void SetAuthoredHud(int height) { AuthoredWidth = 0; AuthoredHeight = height; AuthoredHud = true; }
 
 	/// NG84: declare the SPACE advance in the same authored units as the sheet. The engine's default
@@ -125,22 +124,18 @@ public:
 	/// what the original client shows between words. Scaled by the same factor as the sheet.
 	void SetSpaceAdvance(int authoredPx) { SpaceAdvance = authoredPx; }
 
-	/// NG101: declare the LINE ADVANCE in the same authored units as the sheet. It belongs on the
-	/// FONT rather than on a label because the original's leading is a property of the typeface, not
-	/// of one widget: measured pitch/ink is 1.90 on the menu face (tips-menu, 82.5/43.5) and 1.92 on
-	/// the small face (NG84's objectives, 72/37.5), while ours -- taking the pitch from the sheet's
-	/// CELL -- is 2.26. Scaled by the same factor as the sheet; 0 keeps the cell height, which is
-	/// what every classic fixed-pixel font uses.
+	/// NG101: declare the line advance in the same authored units as the sheet. It belongs on the
+	/// font rather than on a label: the original's leading is a property of the typeface
+	/// (measured pitch / ink 1.90 on the menu face, 1.92 on the small face). Scaled by the same
+	/// factor as the sheet; 0 keeps the cell height, which is what every classic fixed-pixel
+	/// font uses.
 	void SetLineHeight(int authoredPx) { LineHeightAuthored = authoredPx; }
 	int LineHeight() const;
 
 	/// HUD-TEXT-SHADOW: the drop shadow of the original's HUD text, `units` of the classic 640x480
 	/// HUD down and right of every glyph (k px at the HUD step k), black, opaque. 0 = none.
 	/// Data/skins/skins.json, skin `hud_widget_text`: "drop_text_color": [0, 0, 0],
-	/// "drop_text_offset": [1, 1]. Measured: every ink pixel moved by (3, 3) is black (mean 1.2 of
-	/// 255) under the captions "Menu" / "Pause" at a 2960x1848 client (k = 3,
-	/// work/agent-zoom-rule/captures/c_k_2960x1848.png); (2, 2) at k = 2 under the info-panel rows
-	/// and the hit-point figure (work/agent-hud/captures/o41_o1_peon.png).
+	/// "drop_text_offset": [1, 1] (measured: c_k_2960x1848.png at k = 3, o41_o1_peon.png at k = 2).
 	void SetHudShadow(int units) { ShadowUnits = units; }
 	/// The shadow's offset in pixels on this screen; 0 when the face has none.
 	int ShadowOffset() const;

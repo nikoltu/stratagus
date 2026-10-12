@@ -142,6 +142,97 @@ void COrder_Unload::UpdatePathFinderData(PathFinderInput &input) /* override */
 }
 
 
+/// A transporter that moves on a grid stands on a coast tile to load and unload.
+static bool DocksOnCoast(const CUnitType &type)
+{
+	return type.GridStep > 1 && type.CanTransport();
+}
+
+/**
+**  The coast tile a transporter on a grid docks on when sent toward a tile.
+**
+**  It walks tile by tile on the straight line from where it stands toward the tile (with a the
+**  longer and b the shorter distance, each tile adds b to an error term; the tile is diagonal
+**  when twice the error reaches a, and a is then taken off) and stops on the first coast tile.
+**  Standing on a coast tile it stays.
+**
+**  @return  the coast tile, std::nullopt when the line meets none or cannot be sailed.
+*/
+std::optional<Vec2i> FindDockTile(const CUnit &transporter, const Vec2i &toward)
+{
+	Vec2i pos = transporter.tilePos;
+
+	if (Map.Field(pos)->CoastOnMap()) {
+		return pos;
+	}
+	const Vec2i diff = toward - pos;
+	const Vec2i dir((diff.x > 0) - (diff.x < 0), (diff.y > 0) - (diff.y < 0));
+	const int a = std::max(std::abs(diff.x), std::abs(diff.y));
+	const int b = std::min(std::abs(diff.x), std::abs(diff.y));
+	const bool alongX = std::abs(diff.x) >= std::abs(diff.y);
+
+	int e = 0;
+	for (int i = 0; i < a; ++i) {
+		e += b;
+		if (2 * e >= a) {
+			e -= a;
+			pos += dir;
+		} else if (alongX) {
+			pos.x += dir.x;
+		} else {
+			pos.y += dir.y;
+		}
+		if (!Map.Info.IsPointOnMap(pos) || Map.Field(pos)->CheckMask(transporter.Type->MovementMask)) {
+			return std::nullopt;
+		}
+		if (Map.Field(pos)->CoastOnMap()) {
+			return pos;
+		}
+	}
+	return std::nullopt;
+}
+
+/**
+**  The tile a unit leaving a transporter on a grid appears on.
+**
+**  The tiles touching the transporter's tile first, then the ring around those; each ring from
+**  its north-west corner down the west side, east along the south side, up the east side and
+**  west along the north side. The first tile the unit can be at is taken (for a land unit:
+**  free plain ground, never a coast tile).
+*/
+std::optional<Vec2i> FindUnloadTile(const CUnit &unit, const Vec2i &transporterPos)
+{
+	for (int ring = 1; ring <= 2; ++ring) {
+		const int left = transporterPos.x - ring - (unit.Type->TileWidth - 1);
+		const int top = transporterPos.y - ring - (unit.Type->TileHeight - 1);
+		const int right = transporterPos.x + ring;
+		const int bottom = transporterPos.y + ring;
+		Vec2i pos(left, top);
+
+		for (; pos.y < bottom; ++pos.y) {
+			if (UnitCanBeAt(unit, pos)) {
+				return pos;
+			}
+		}
+		for (; pos.x < right; ++pos.x) {
+			if (UnitCanBeAt(unit, pos)) {
+				return pos;
+			}
+		}
+		for (; pos.y > top; --pos.y) {
+			if (UnitCanBeAt(unit, pos)) {
+				return pos;
+			}
+		}
+		for (; pos.x > left; --pos.x) {
+			if (UnitCanBeAt(unit, pos)) {
+				return pos;
+			}
+		}
+	}
+	return std::nullopt;
+}
+
 /**
 **  Find a free position close to startPos
 **
@@ -157,6 +248,13 @@ void COrder_Unload::UpdatePathFinderData(PathFinderInput &input) /* override */
 static std::optional<Vec2i>
 FindUnloadPosition(const CUnit &transporter, const CUnit &unit, const Vec2i startPos, int maxRange)
 {
+	if (DocksOnCoast(*transporter.Type)) {
+		// it lets its passengers out only from a coast tile
+		if (maxRange <= 0 || !Map.Info.IsPointOnMap(startPos) || !Map.Field(startPos)->CoastOnMap()) {
+			return std::nullopt;
+		}
+		return FindUnloadTile(unit, startPos);
+	}
 	Vec2i pos = startPos;
 
 	pos.x -= unit.Type->TileWidth - 1;
@@ -387,6 +485,22 @@ void COrder_Unload::Execute(CUnit &unit) /* override */
 		Assert(!unit.Moving && !unit.Anim.Unbreakable);
 		this->Finished = true;
 		return;
+	}
+
+	// The computer's order names the place its force attacks, not a shore to dock on: its
+	// transporter stands on its home coast with the force aboard when the order comes, and takes
+	// the drop zone nearest to that place.
+	if (this->State == FIND_DROPZONE_STATE && this->Retries == 0 && DocksOnCoast(*unit.Type)
+		&& !unit.Player->AiEnabled) {
+		if (const auto dock = FindDockTile(unit, this->goalPos)) {
+			if (*dock == unit.tilePos) {
+				// on a coast tile it unloads where it stands, wherever the order points
+				this->State = UNLOAD_STATE;
+			} else {
+				this->goalPos = *dock;
+				this->State = MOVE_TO_DROPZONE_STATE;
+			}
+		}
 	}
 
 	switch (this->State) {

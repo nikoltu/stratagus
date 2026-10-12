@@ -511,13 +511,9 @@ ImageRadioButton::ImageRadioButton(const std::string &caption,
 **  Draw the image radio button (not the caption)
 */
 /**
-**  NG59: draw a check/radio box sprite SCALED to the widget's box instead of at its native pixel
-**  size. The art on disk is 56x56 (the checkbox and radio sprites), and it used to be blitted at
-**  exactly that size, so the control was 56 device px on every screen -- it did not scale with the
-**  UI at all. That is
-**  near-enough right only at one resolution; the original's box is 67.5 logical, which is 56 device
-**  px only when Video.Height/2160 happens to be ~0.81. Scaling to the widget's own square box makes
-**  the Lua side able to ask for the measured logical size at any resolution.
+**  Draw a check/radio box sprite scaled to the widget's own square box instead of at its native
+**  pixel size (56x56 on disk), so that the Lua side can ask for the measured logical size at any
+**  resolution (NG59).
 **  The sprite is restored to its original size afterwards, as the list-row art is, because the same
 **  CGraphic is shared by every check box on screen.
 */
@@ -809,8 +805,7 @@ void ImageSlider::draw(gcn::Graphics *graphics) /* override */
 
 	if (!img && trackThickness > 0 && getOrientation() == Orientation::Horizontal) {
 		// Remastered two-tone track (skins.json widget_slider_*): everything left of the marker
-		// is drawn in `color`, the remainder in `secondary_color`. There is no track SPRITE in
-		// the skin data at all, which is why a single-tone bar was all we had before.
+		// is drawn in `color`, the remainder in `secondary_color`. The skin data has no track sprite.
 		const int h = trackThickness;
 		const int y = (getHeight() - h) / 2;
 		const int split =
@@ -1923,10 +1918,8 @@ void ImageListBox::mousePressed(gcn::MouseEvent &event) /* override */
 	}
 }
 
-// CF5(b): which row the pointer is on. The original is a desktop build and this is its hover state;
-// our synthetic pointer stays where the finger lifted, so a touched row keeps the plate afterwards --
-// the same platform question NG99 already records for the campaign card, inherited here rather than
-// resolved by inventing a touch model the original does not have.
+// Which row the pointer is on (CF5): the original's hover state. The synthetic touch pointer
+// stays where the finger lifted, so a touched row keeps the plate afterwards (see NG99).
 void ImageListBox::setHoverFromY(int y)
 {
 	const int rowH = rowHeight();
@@ -1994,12 +1987,8 @@ void ImageListBox::mouseReleased(gcn::MouseEvent &event) /* override */
 --  TouchScrollArea
 ----------------------------------------------------------------------------*/
 
-// NG115: draw a scrollbar part SCALED to the rect it was given, instead of at the art's own pixel
-// size clipped to that rect. drawVBar already did this -- which is why the track width matched the
-// original while the arrows did not -- and the arrows, the pressed arrows and the markers did not,
-// so their on-screen size was the baked art's native size and ignored setScrollbarWidth entirely.
-// That is why the visible bar measured 149.6 logical against the original's 61.5, and why narrowing
-// the parameter only clipped the art rather than sizing it.
+// Draw a scrollbar part scaled to the rect it was given, as drawVBar does, instead of at the
+// art's own pixel size clipped to that rect: setScrollbarWidth then sizes the visible bar (NG115).
 static void DrawScrollPartScaled(gcn::Graphics *graphics, CGraphic *img, const gcn::Rectangle &dim)
 {
 	if (img == nullptr || dim.width <= 0 || dim.height <= 0) {
@@ -2278,11 +2267,8 @@ void ImageListBoxWidget::setItemImage(std::shared_ptr<CGraphic> image)
 	// derives the row height from this image), and the scrollbar policy is derived from that height --
 	// so re-check it here, or the bar is judged unnecessary on the first frames and is not drawn.
 	checkPolicies();
-	// Scroll-arrow step. guisan defaults it to a flat 10 px, which suits its own ~10 px text rows;
-	// nothing in this project ever set it. Our rows carry the Remastered button art and are ~96 px, so
-	// an arrow tap moved the list a tenth of a row -- ten taps to advance ONE entry (measured on the
-	// mission list: first row 396 -> 406 -> 436 px over four taps). Step by the list's OWN row height,
-	// which comes from the row art rather than from a chosen constant.
+	// Scroll-arrow step. guisan defaults it to a flat 10 px, which suits its own ~10 px text rows.
+	// These rows carry the Remastered button art (~96 px): step by the list's own row height.
 	const int rh = listbox.rowHeight();
 	if (rh > 0) {
 		setUpButtonScrollAmount(rh);
@@ -2486,12 +2472,9 @@ void ImageListBoxWidget::draw(gcn::Graphics *graphics) /* override */
 	gcn::Rectangle rect = getChildrenArea();
 	CGraphic *img = itemImage.get();
 	img->Resize(rect.width, img->getHeight());
-	// NG91: this underlay used to tile the row sprite over the WHOLE viewport, so a list with two
-	// saves in a ten-row-tall frame drew two captioned rows and eight empty ones. That is the classic
-	// Stratagus "save slot" look, and the Remastered does not have it: in
-	// load-menu-3440x1440.png the one save draws one row strip and the rest of the content frame is
-	// bare parchment. Stop at the number of elements the list actually has -- the listbox draws its
-	// own per-element row art on top of this, so nothing that was visible before disappears.
+	// The underlay draws one row strip per element, not over the whole viewport: in the
+	// Remastered the rest of the content frame is bare parchment (NG91; load-menu-3440x1440.png).
+	// The listbox draws its own per-element row art on top of this.
 	const int rows = getNumberOfElements();
 	const int rowH = listbox.rowHeight();         // NG94: same height the listbox draws its rows at
 	int y = 0;
@@ -2805,17 +2788,13 @@ void ImageDropDownWidget::setList(lua_State *lua, lua_Object *lo)
 {
 	mListModel->setList(lua, lo);
 	setListModel(mListModel.get());
-	// NG51: `gcn::ListBox::adjustSize` is NOT virtual, so the base `setListModel` above sizes the
-	// open list from the FONT height while our rows are as tall as the row sprite. The list then
-	// ends mid-way through its last row and that row's text is never drawn (seen on the Music
-	// Version dropdown: two plates, only the first one's caption). Re-run OUR adjustSize, then let
-	// the dropdown recompute its dropped-down height from it. Same root cause family as NG41.
+	// `gcn::ListBox::adjustSize` is not virtual, so the base `setListModel` above sizes the open
+	// list from the font height while the rows are as tall as the row sprite. Re-run this class's
+	// adjustSize, then let the dropdown recompute its dropped-down height from it (NG51).
 	mImageListBox->adjustSize();
 	adjustHeight();
-	// NG51, actual cause: the open list's rows were drawn but their TEXT was invisible -- the row
-	// PLATE appeared and the caption did not. The inner list keeps its own foreground colour and
-	// never inherited the dropdown's, so an unselected row drew dark-on-dark. (The selected row is
-	// drawn through the "~<...~>" highlight path, which is why exactly one caption was readable.)
+	// The inner list keeps its own foreground colour and does not inherit the dropdown's: without
+	// this an unselected row draws dark on dark (NG51).
 	mImageListBox->setForegroundColor(getForegroundColor());
 	mImageListBox->setBaseColor(getBaseColor());
 }
@@ -2827,10 +2806,7 @@ void ImageDropDownWidget::setSize(int width, int height)
 {
 	mFieldHeight = height;   // remember the intended closed-field height (see adjustHeight)
 	DropDown::setSize(width, height);
-	// NG51 -- THE cause of the clipped open list: this used to force the LIST BOX to the closed
-	// field's height, i.e. exactly one row, so a two-entry dropdown drew its second row plate cut
-	// in half and never drew that row's caption at all (Music Version: "Remastered" readable,
-	// "Classic" absent). The open list must be as tall as its CONTENT.
+	// The open list is as tall as its content: only the width follows the closed field (NG51).
 	this->mListBox->setWidth(width);
 	// NG51: the original left-aligns the open list's rows, at the same inset as the closed field.
 	this->mImageListBox->setTextLeftPad(20);
@@ -3013,12 +2989,9 @@ void ImageDropDownWidget::adjustHeight()
 	}
 
 	mScrollArea->setWidth(getWidth());
-	// NG51 -- THE cause of the clipped open list. DropDown::getChildrenArea() ALREADY offsets the
-	// children by mFoldedUpHeight + 1 and clips them to getHeight() - mFoldedUpHeight - 2, so a
-	// scroll area positioned at (0, h2 + 2) is offset a SECOND time: the list drew 74 px too low
-	// (measured: first row plate at container y 490 where the geometry says 414) and lost the same
-	// 74 px off the bottom, which is why a three-row list showed two rows and a sliver. The base
-	// class positions it at (0, 0) for exactly this reason; so do we.
+	// DropDown::getChildrenArea() already offsets the children by mFoldedUpHeight + 1 and clips
+	// them to getHeight() - mFoldedUpHeight - 2, so the scroll area stands at (0, 0), as in the
+	// base class; any other position offsets it a second time (NG51).
 	mScrollArea->setPosition(0, 0);
 }
 

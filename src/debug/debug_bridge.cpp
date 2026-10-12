@@ -40,6 +40,7 @@
 #include "settings.h"
 #include "tile.h"
 #include "ui.h"
+#include "ui/popup.h"
 #include "unit.h"
 #include "unit_manager.h"
 #include "unittype.h"
@@ -166,7 +167,7 @@ struct Json {
 				default:
 					if ((unsigned char)c < 0x20) {
 						char buf[8];
-						std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+						snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
 						s += buf;
 					} else {
 						s += c;
@@ -176,8 +177,8 @@ struct Json {
 		s += '"';
 	}
 	// "key":<literal>   (caller supplies formatted number/bool/object)
-	void num(const char *key, long v) { key_(key); char b[32]; std::snprintf(b, sizeof(b), "%ld", v); s += b; }
-	void dbl(const char *key, double v) { key_(key); char b[48]; std::snprintf(b, sizeof(b), "%g", v); s += b; }
+	void num(const char *key, long v) { key_(key); char b[32]; snprintf(b, sizeof(b), "%ld", v); s += b; }
+	void dbl(const char *key, double v) { key_(key); char b[48]; snprintf(b, sizeof(b), "%g", v); s += b; }
 	void boolean(const char *key, bool v) { key_(key); s += v ? "true" : "false"; }
 	void str(const char *key, const std::string &v) { key_(key); esc(v); }
 	void null(const char *key) { key_(key); s += "null"; }
@@ -246,7 +247,7 @@ void EmitUnitFields(Json &j, const CUnit &unit)
 		if (cidx >= 0 && cidx < (int)PlayerColorsRGB.size() && !PlayerColorsRGB[cidx].empty()) {
 			char cbuf[32];
 			const CColor &c = PlayerColorsRGB[cidx][0];
-			std::snprintf(cbuf, sizeof(cbuf), "%d,%d,%d", c.R, c.G, c.B);
+			snprintf(cbuf, sizeof(cbuf), "%d,%d,%d", c.R, c.G, c.B);
 			j.comma(); j.str("colorRGB", cbuf);
 		}
 	}
@@ -357,7 +358,7 @@ void EmitWidgetTree(Json &j, gcn::Widget *w, int depth)
 		}
 		const gcn::Color &fg = w->getForegroundColor();
 		char cbuf[48];
-		std::snprintf(cbuf, sizeof(cbuf), "%d,%d,%d,%d", fg.r, fg.g, fg.b, fg.a);
+		snprintf(cbuf, sizeof(cbuf), "%d,%d,%d,%d", fg.r, fg.g, fg.b, fg.a);
 		j.comma(); j.str("fg", cbuf);
 
 		// Recurse into direct children of containers (one level of nesting cap via depth).
@@ -679,6 +680,32 @@ int CclDebugNetQuitPlayer(lua_State *l)
 	return 1;
 }
 
+// Lua DebugNetForceWatchChoice(): in a running network game, show this device the defeat
+// banner with its two buttons, "Watch" and "Leave Game", whatever the number of players left
+// and although its player is not defeated. For a look at the banner and at the watching state
+// with two devices, where a real defeat ends the game and leaves nothing to watch. The scripts'
+// own ActionDefeat is called with the global LanWatchForced set; nothing is sent to the others.
+// It exists only with the debug bridge. Returns true if the banner was asked for.
+int CclDebugNetForceWatchChoice(lua_State *l)
+{
+	LuaCheckArgs(l, 0);
+	if (!IsNetworkGame() || !InjectorGameReady() || NetworkIsWatching()) {
+		lua_pushboolean(l, 0);
+		return 1;
+	}
+	lua_pushboolean(l, 1);
+	lua_setglobal(l, "LanWatchForced");
+	lua_getglobal(l, "ActionDefeat");
+	const bool shown = lua_isfunction(l, -1) && lua_pcall(l, 0, 0, 0) == 0;
+	if (!shown) {
+		lua_pop(l, 1); // what is not a function, or the error
+		lua_pushnil(l);
+		lua_setglobal(l, "LanWatchForced");
+	}
+	lua_pushboolean(l, shown);
+	return 1;
+}
+
 // Lua DebugNetFakeWait(table or nil): make NetWaitState() tell a made-up wait until it is
 // cleared, to look at the waiting plate and at the held loading line on one device. Only what
 // the scripts are told is made up; nothing of the network code is touched and no cycle stops.
@@ -856,7 +883,7 @@ std::string CmdPColor(const std::vector<std::string> &tok)
 	j.comma(); j.num("colorIdx", c);
 	char cbuf[32];
 	const CColor &col = PlayerColorsRGB[c][0];
-	std::snprintf(cbuf, sizeof(cbuf), "%d,%d,%d", col.R, col.G, col.B);
+	snprintf(cbuf, sizeof(cbuf), "%d,%d,%d", col.R, col.G, col.B);
 	j.comma(); j.str("colorRGB", cbuf); j.ch('}');
 	return j.s;
 }
@@ -879,6 +906,57 @@ std::string CmdUnitTypes(const std::vector<std::string> &tok)
 		j.comma(); j.boolean("building", t->Building);
 		j.ch('}');
 		++n;
+	}
+	j.ch(']');
+	j.comma(); j.num("count", n);
+	j.ch('}');
+	return j.s;
+}
+
+/*----------------------------------------------------------------------------
+--  Command tooltips
+----------------------------------------------------------------------------*/
+
+// The texts the tooltip panel draws for every shown command button of the selection: the same
+// call DrawRemasteredTooltip makes, so a tooltip can be read without pointing at its button.
+std::string CmdTips()
+{
+	Json j;
+	j.ch('{');
+	j.num("selected", (long)Selected.size());
+	j.comma(); j.num("level", CurrentButtonLevel);
+	j.comma(); j.key_("buttons"); j.ch('[');
+	int n = 0;
+	if (!Selected.empty()) {
+		for (const ButtonAction &button : CurrentButtons) {
+			if (button.Pos == -1) {
+				continue;
+			}
+			bool allowed = true;
+			for (const CUnit *unit : Selected) {
+				if (!IsButtonAllowed(*unit, button)) {
+					allowed = false;
+					break;
+				}
+			}
+			std::string title;
+			std::string body;
+			std::string requirement;
+			const int id = GetRemasteredTooltipTexts(button, allowed, title, body, requirement);
+			if (n) j.comma();
+			j.ch('{');
+			j.num("pos", button.Pos);
+			j.comma(); j.num("action", (long)button.Action);
+			j.comma(); j.str("value", button.ValueStr);
+			j.comma(); j.boolean("allowed", allowed);
+			j.comma(); j.num("id", id);
+			j.comma(); j.str("title", title);
+			j.comma(); j.str("body", body);
+			j.comma(); j.str("requirement", requirement);
+			j.comma(); j.str("hint", button.Hint);
+			j.ch('}');
+			++n;
+		}
 	}
 	j.ch(']');
 	j.comma(); j.num("count", n);
@@ -1166,6 +1244,8 @@ std::string Dispatch(const std::string &cmdline)
 	if (verb == "pcolor")    return CmdPColor(Tokenize(line));
 	// --- HUD layout dump ---
 	if (verb == "hud")       return CmdHud();
+	// --- command tooltip texts of the selection ---
+	if (verb == "tips")      return CmdTips();
 	// --- touch routes: play a gesture, read what it did ---
 	if (verb == "touch")     return CmdTouch((sp != std::string::npos) ? line.substr(sp + 1) : "");
 	if (verb == "touchinfo") return CmdTouchInfo();
@@ -1503,6 +1583,7 @@ void DebugBridge_Init()
 	if (Lua && DbgCommands) {
 		lua_register(Lua, "DebugNetQuitPlayer", CclDebugNetQuitPlayer);
 		lua_register(Lua, "DebugNetFakeWait", CclDebugNetFakeWait);
+		lua_register(Lua, "DebugNetForceWatchChoice", CclDebugNetForceWatchChoice);
 	}
 
 	WriteStatus();

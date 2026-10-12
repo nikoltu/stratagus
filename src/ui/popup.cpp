@@ -52,13 +52,15 @@
 **  IG-T1: the Remastered's own tooltip text for whatever this button targets.
 **
 **  The original keys its tooltips off a numeric id (`unit_N_tooltip_advice`, `upgrade_N_tooltip`,
-**  `spell_N_tooltip`), and our objects now carry the original's display NAMES (TX1), so the id is
-**  a straight reverse lookup. Empty when the button targets nothing with a Remastered counterpart,
-**  in which case the caller keeps Wargus's own Description.
+**  `spell_N_tooltip`). The id is the one the scripts registered for the target's ident; the
+**  table repeats a display name for the human / orc pair and for the levels of an upgrade, so
+**  only the ident selects the target's own record. A target without a registered id is looked up
+**  by the display name it carries (TX1). -1 when the button targets nothing with a Remastered
+**  counterpart; `family` is then left as it was set by the action.
 */
-static std::string RemasteredButtonText(const ButtonAction &button, const char *suffix)
+static int RemasteredButtonId(const ButtonAction &button, std::string &family)
 {
-	std::string family;
+	std::string ident;
 	std::string name;
 	switch (button.Action) {
 		case ButtonCmd::Build:
@@ -66,28 +68,37 @@ static std::string RemasteredButtonText(const ButtonAction &button, const char *
 		case ButtonCmd::UpgradeTo:
 			family = "unit";
 			if (button.Value >= 0 && button.Value < (int) getUnitTypes().size()) {
+				ident = getUnitTypes()[button.Value]->Ident;
 				name = getUnitTypes()[button.Value]->Name;
 			}
 			break;
 		case ButtonCmd::Research:
 			family = "upgrade";
 			if (button.Value >= 0 && button.Value < (int) AllUpgrades.size() && AllUpgrades[button.Value]) {
+				ident = AllUpgrades[button.Value]->Ident;
 				name = AllUpgrades[button.Value]->Name;
 			}
 			break;
 		case ButtonCmd::SpellCast:
 			family = "spell";
 			if (button.Value >= 0 && button.Value < (int) SpellTypeTable.size() && SpellTypeTable[button.Value]) {
+				ident = SpellTypeTable[button.Value]->Ident;
 				name = SpellTypeTable[button.Value]->Name;
 			}
 			break;
 		default:
-			return std::string();
+			return -1;
 	}
-	if (name.empty()) {
-		return std::string();
-	}
-	const int id = GetWC2Id(family, name);
+	// A target without a name has nothing to look up by (the upgrades carry none).
+	return name.empty() ? GetWC2IdForIdent(family, ident) : ResolveWC2Id(family, ident, name);
+}
+
+/// The Remastered's text `<family>_<id><suffix>` for whatever this button targets; empty when
+/// there is none, in which case the caller keeps Wargus's own text.
+static std::string RemasteredButtonText(const ButtonAction &button, const char *suffix)
+{
+	std::string family;
+	const int id = RemasteredButtonId(button, family);
 	if (id < 0) {
 		return std::string();
 	}
@@ -98,8 +109,8 @@ static std::string RemasteredButtonText(const ButtonAction &button, const char *
 **  IG-T1: the plain COMMAND buttons have their own names in the original, in the classic
 **  `stat_txt_*` block -- "Move", "Stop", "Attack", "Repair", "Patrol", "Stand Ground",
 **  "Build Basic Structure", "Build Advanced Structure", "Cancel". Wargus spells the same commands
-**  in shouting caps with a hotkey marker ("~!MOVE"); the original's tooltip shows the proper-case
-**  name, and puts the hotkey letter in the icon corner instead (which we already draw).
+**  in capitals with a hotkey marker ("~!MOVE"); the original's tooltip shows the proper-case
+**  name, and puts the hotkey letter in the icon corner instead.
 */
 static std::string RemasteredCommandName(const ButtonAction &button)
 {
@@ -110,7 +121,10 @@ static std::string RemasteredCommandName(const ButtonAction &button)
 		case ButtonCmd::Attack: id = 394; break;
 		case ButtonCmd::Repair: id = 395; break;
 		// HUD-020: 396 is the worker's harvest command (capture o46_o1_peon_hover_harvest).
-		case ButtonCmd::Harvest: id = 396; break;
+		// 397 is the tanker's own harvest command (run 20, rows 83 / 199).
+		case ButtonCmd::Harvest:
+			id = button.UnitMask.find("oil-tanker") != std::string::npos ? 397 : 396;
+			break;
 		// HUD-020: 398 / 399 name the two build PAGES, not a building (capture o09_h_hover_build
 		// shows 398 on the page button; o11_h_build_hover1 shows unit_58_build on the Farm button).
 		// A Build button therefore falls through to unit_<id>_build in GetDraw().
@@ -119,16 +133,28 @@ static std::string RemasteredCommandName(const ButtonAction &button)
 				id = 398;
 			} else if (button.Value == 2) {
 				id = 399;
+			} else if (button.Value == 0) {
+				id = 407; // the build pages' way back
 			} else {
 				return std::string();
 			}
 			break;
+		// Run 20 (work/agent-orig-20/ORIG20.md): each of these has a one-line tooltip of its own.
+		case ButtonCmd::Return: id = 401; break;
+		case ButtonCmd::AttackGround: id = 402; break;
 		case ButtonCmd::StandGround: id = 403; break;
 		case ButtonCmd::Patrol: id = 404; break;
-		case ButtonCmd::Cancel:
-		case ButtonCmd::CancelUpgrade:
-		case ButtonCmd::CancelTrain:
-		case ButtonCmd::CancelBuild: id = 407; break;
+		case ButtonCmd::Unload: id = 405; break;
+		case ButtonCmd::SpellCast:
+			if (button.ValueStr != "spell-suicide-bomber") {
+				return std::string();
+			}
+			id = 406;
+			break;
+		case ButtonCmd::Cancel: id = 407; break;
+		case ButtonCmd::CancelBuild: id = 408; break;
+		case ButtonCmd::CancelTrain: id = 409; break;
+		case ButtonCmd::CancelUpgrade: id = 410; break;
 		default: return std::string();
 	}
 	return GetWC2String("stat_txt_" + std::to_string(id));
@@ -176,7 +202,7 @@ namespace
 {
 // Oracle table `tooltip_layout_contract` (EXE builder 0x516AF0, HUD call 0x518C48), in the
 // original's logical UI units: 480 rows, so one unit is 4.5 units of the 2160-row HUD space.
-// Each value was also read off the captures o08 / o11 / o26 / o48 (SPEC_TOOLTIP_PANEL.md par. 1).
+// Each value was also read off the captures o08 / o11 / o26 / o48.
 constexpr double TipUnit = 2160.0 / 480.0;
 constexpr int TipX = 184;          // fixed_x
 constexpr int TipInset = 20;       // horizontal_content_inset, vertical_content_inset
@@ -196,11 +222,8 @@ constexpr int TipAmountX = 17;
 // Where the capitals of the tooltip's face sit in its glyph cell: the baked faces stand every
 // glyph on one baseline placed so that a capital is centred in the cell's height (FontBaker), so
 // the middle of the capitals is half the cell below the text position, whatever the face and its
-// scale. Measured: face remaster_small, cell 68 px on a 2960x1746 surface, capitals on rows
-// y + 20 .. y + 48, middle y + 34 (device capture e21_h1_peasant); face remaster_hud, cell 59 px
-// at the HUD step 3, capitals on rows y + 17 .. y + 41, middle y + 29 (capture work/c666_c.png,
-// "Peon" drawn at y 535, ink rows 552..576). The original centres the capitals in a row: capital
-// top = row top + 4 units of 16, capital height 8 to 8.5 units (captures o08, o26).
+// scale. The original centres the capitals in a row: capital top = row top + 4 units of 16,
+// capital height 8 to 8.5 units (captures o08, o26).
 int TipCapMid(const CFont &font)
 {
 	return font.Height() / 2;
@@ -233,6 +256,19 @@ std::string TipBody(const ButtonAction &button)
 }
 } // namespace
 
+int GetRemasteredTooltipTexts(const ButtonAction &button, bool allowed, std::string &title,
+							  std::string &body, std::string &requirement)
+{
+	title = GetDraw(EPopupButtonInfo::Hint, button);
+	body = TipBody(button);
+	// The requirement line is absent on an available command (capture o11_h_build_hover1: the Farm
+	// has unit_58_requirement and shows no such line). Shown on a greyed command: STRONGLY_SUPPORTED
+	// by the builder's content order only -- no capture of a greyed button yet.
+	requirement = allowed ? std::string() : RemasteredButtonText(button, "_requirement");
+	std::string family;
+	return RemasteredButtonId(button, family);
+}
+
 void DrawRemasteredTooltip(const CPopup &popup, const ButtonAction &button, const int *costs,
 						   bool allowed)
 {
@@ -240,12 +276,10 @@ void DrawRemasteredTooltip(const CPopup &popup, const ButtonAction &button, cons
 	const double scale = Video.HudCanvas.Scale * TipUnit;
 	const auto px = [scale](int units) { return (int) (units * scale + 0.5); };
 
-	const std::string title = GetDraw(EPopupButtonInfo::Hint, button);
-	const std::string body = TipBody(button);
-	// The requirement line is absent on an available command (capture o11_h_build_hover1: the Farm
-	// has unit_58_requirement and shows no such line). Shown on a greyed command: STRONGLY_SUPPORTED
-	// by the builder's content order only -- no capture of a greyed button yet.
-	const std::string requirement = allowed ? std::string() : RemasteredButtonText(button, "_requirement");
+	std::string title;
+	std::string body;
+	std::string requirement;
+	GetRemasteredTooltipTexts(button, allowed, title, body, requirement);
 
 	// Cost row: gold, lumber, oil (Oracle: "three costs"); mana for a spell.
 	int costIndex[TipCostColumns];

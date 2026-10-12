@@ -128,8 +128,7 @@ public:
 	void setDisabledImage(std::shared_ptr<gcn::Image> image) { disabledImage = image; }
 	// Remastered widgets are three-state: Data/skins/skins.json gives every button family a
 	// *_hover entry next to its normal and active ones (e.g. fe_campaign button/button_hover/
-	// button_active). The hover image was the missing third state -- draw() carried a disabled
-	// "FIXME: add mouse-over image" branch -- so hover always fell back to the normal art.
+	// button_active). Without a hover image, hover falls back to the normal art.
 	void setHoverImage(std::shared_ptr<gcn::Image> image) { hoverImage = image; }
 
 	std::shared_ptr<gcn::Image> normalImage;
@@ -420,10 +419,9 @@ public:
 	// Campaign locking: rows with index >= unlockedCount get the grayed row image + padlock icon.
 	void setLockedIcon(std::shared_ptr<CGraphic> image) { lockedIcon = image; }
 	void setLockedItemImage(std::shared_ptr<CGraphic> image) { lockedItemImage = image; }
-	// Selection: the original marks the picked row by drawing every OTHER row dimmed (measured on
-	// mission-select-tod-human -- selected rgb(103,76,70) vs unselected rgb(52,39,36), same hue and
-	// saturation, brightness ratio 0.51). Our art already matches the selected level, so this is the
-	// dimmed variant of the SAME sprite; when it is not set, rows render exactly as before.
+	// Selection: the original marks the picked row by drawing every other row dimmed (measured:
+	// mission-select-tod-human, brightness ratio 0.51). This is the dimmed variant of the same
+	// sprite; when it is not set, rows are not dimmed.
 	void setUnselectedItemImage(std::shared_ptr<CGraphic> image) { unselectedItemImage = image; }
 	// NG91: the enclosing ImageListBoxWidget tiles the row sprite over its whole viewport, which
 	// paints an empty slot for every row the list does NOT have. It needs the real element count to
@@ -441,11 +439,9 @@ public:
 	void setSelected(int selected);
 	// Public so the owning ImageListBoxWidget can size its scroll-arrow step from the real row art.
 	int rowHeight() const;
-	// NG94: the row height used to come only from the item sprite's ORIGINAL pixel size, so it did
-	// NOT scale with the display while the list rect around it did -- the rows-per-frame ratio drifted
-	// with the resolution. Setting it explicitly makes row height a LAYOUT quantity (logical px through
-	// the caller's own scale) and the sprite stretches to it, exactly as the row width already does.
-	// 0 keeps the old sprite-derived behaviour.
+	// NG94: an explicit row height makes it a layout quantity (logical px through the caller's
+	// own scale), and the sprite stretches to it, as the row width does. 0 keeps the height of
+	// the item sprite's own pixel size, which does not scale with the display.
 	void setRowHeight(int h) { forcedRowHeight = h; adjustSize(); }
 
 private:

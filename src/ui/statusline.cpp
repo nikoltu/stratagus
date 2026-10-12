@@ -64,12 +64,9 @@ void CStatusLine::Draw()
 void CStatusLine::Set(const std::string &status)
 {
 	if (KeyState != EKeyState::Input) {
-		// NG37: the text and the cost icons are ONE message, and the costs used to outlive the text
-		// that owned them -- DrawCosts() paints at a fixed TextX + 268 whatever the current text is,
-		// so a transient notice ("Autosave") appeared beside, or on top of, the resource icons left
-		// over from the last button hint. Whoever sets the text owns the costs: clear them here and
-		// let the one caller that has costs (UpdateStatusLineForButton) re-set them immediately
-		// afterwards, which is exactly what it already does.
+		// NG37: the text and the cost icons are one message. DrawCosts() paints at a fixed place
+		// whatever the current text is, so whoever sets the text owns the costs: clear them here;
+		// the one caller that has costs (UpdateStatusLineForButton) sets them again right after.
 		this->ClearCosts();
 		this->StatusLine = status;
 	}
@@ -111,24 +108,16 @@ void CStatusLine::ClearCosts()
 */
 void CStatusLine::DrawCosts()
 {
-	// NG81: 268 and the 20 px icon advance below were both sized for the classic small-font
-	// layout. Used unscaled in the HD HUD they overprint: remaster_small measures "BUILD FARM"
-	// at 226 so it clears, but "BUILD BARRACKS" at 315 and "BUILD BASIC STRUCTURE" at 454 run
-	// under their own icons, and a resource icon measures 87 px against the 20 the amount was
-	// offset by, so each amount was drawn inside its own icon.
-	//
-	// Keep 268 as a MINIMUM so every hint that already fits is placed exactly as before, and
-	// advance past an icon by its real width the way the maintained copy of this same routine
-	// does (CPopupContentTypeCosts::Draw, ui/popup.cpp) -- IconWidth when the UI declares one,
-	// the graphic's own width otherwise, plus this function's existing 5 px gap.
+	// NG81: 268 and a 20 px icon advance are the classic small-font layout; unscaled in the HD
+	// HUD a long hint runs under its own icons.
+	// 268 stays as a minimum, so that every hint that fits keeps its place, and an icon is
+	// passed by its real width, as in CPopupContentTypeCosts::Draw (ui/popup.cpp) -- IconWidth
+	// when the UI declares one, the graphic's own width otherwise, plus a 5 px gap.
 	const int textWidth = this->Font ? this->Font->Width(this->StatusLine) : 0;
 	int x = UI.StatusLine.TextX + std::max(268, textWidth + 5);
-	// COSTFONT: the amounts belong to the hint beside them, so they take its face. They used to
-	// draw in the classic bitmap game font, which renders them visibly smaller than the text they
-	// annotate. The original cannot be doing that: the Oracle's `fonts` table (E1) has exactly ONE
-	// enUS typeface, Data/font/BLQ55.ttf, at three sizes -- there is no second face for it to use.
-	// Our own resource bar already draws the equivalent numbers in remaster_small
-	// (human/ui_pandora.lua). Fall back to the game font if the UI never set one.
+	// COSTFONT: the amounts belong to the hint beside them, so they take its face: the original
+	// has one typeface (Data/font/BLQ55.ttf, at three sizes). Falls back to the game font if
+	// the UI never set one.
 	CLabel label(this->Font ? *this->Font : GetGameFont());
 	if (this->Costs[ManaResCost]) {
 		const CGraphic *manaG = UI.Resources[ManaResCost].G.get();

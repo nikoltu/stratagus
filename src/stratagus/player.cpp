@@ -1039,10 +1039,8 @@ ECheckLimit CPlayer::CheckLimits(const CUnitType &type) const
 	if (this->Demand + type.Stats[this->Index].Variables[DEMAND_INDEX].Value > this->Supply
 	    && type.Stats[this->Index].Variables[DEMAND_INDEX].Value) {
 		// NG48: the Remastered's own wording. `Data/Strings/enUS.json` ships
-		// stat_txt_438 = "Not enough food...build more farms." and the sibling resource
-		// messages stat_txt_439/440/441 ("Not enough gold...mine more gold." etc.), which
-		// CPlayer::CheckCosts already composes byte-for-byte. The supply line was the one
-		// that still used Stratagus wording ("Insufficient Supply, increase Supply.").
+		// stat_txt_438 = "Not enough food...build more farms." beside the resource
+		// messages stat_txt_439/440/441, which CPlayer::CheckCosts composes.
 		Notify("%s", _("Not enough food...build more farms."));
 		return ECheckLimit::InsufficientSupply;
 	}

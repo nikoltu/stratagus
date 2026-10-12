@@ -270,9 +270,8 @@ static std::optional<std::pair<CUnit*, Vec2i>> SelectTargetUnitsOfAutoCast(CUnit
 	if (minRange == 0)
 		table.push_back(&caster); // Allow self as target (we check conditions later)
 
-	// AUTOCAST-CORPSE-CRASH: a unit without any order reached the filters below, which read
-	// CurrentAction() (crash at cycle 5201 of BDP Human I, register cycle 700). Such a unit is
-	// named in the log and left out, so that the game goes on and the log tells which unit it is.
+	// AUTOCAST-CORPSE-CRASH: a unit without any order must not reach the filters below, which read
+	// CurrentAction(). Such a unit is named in the log and left out, so that the game goes on.
 	ranges::erase_if(table, [&](const CUnit *unit) {
 		if (!unit->Orders.empty() && unit->Orders[0] != nullptr) {
 			return false;

@@ -229,7 +229,9 @@ class BestDepotFinder
 				}
 
 				// calc real travel distance
-				const int travel_distance = UnitReachable(*worker, *dest, 1, worker->Container != nullptr);
+				// with the range the worker's own way to a depot uses (COrder_Resource::UpdatePathFinderData)
+				const int travel_distance = UnitReachable(*worker, *dest, std::max<int>(1, worker->Type->GridStep),
+				                                          worker->Container != nullptr);
 				//
 				// Take this depot?
 				//
@@ -721,7 +723,8 @@ private:
 		// Unit in range ?
 		const int d = attacker->MapDistanceTo(*dest);
 
-		if (d > attackrange && !UnitReachable(*attacker, *dest, attackrange, false)) {
+		if (attacker->AttackDistanceTo(*dest) > attackrange
+			&& !UnitReachable(*attacker, *dest, attackrange, false, true)) {
 			return INT_MAX;
 		}
 
@@ -907,15 +910,18 @@ public:
 
 				// Removed Unit's are in bunkers
 				int d;
+				int attackDistance;
 				if (attacker->Removed) {
 					d = attacker->Container->MapDistanceTo(dest);
+					attackDistance = attacker->Container->AttackDistanceTo(dest);
 				} else {
 					d = attacker->MapDistanceTo(dest);
+					attackDistance = attacker->AttackDistanceTo(dest);
 				}
 
 				int attackrange = attacker->Stats->Variables[ATTACKRANGE_INDEX].Max;
-				if (d <= attackrange ||
-					(d <= range && UnitReachable(*attacker, dest, attackrange, false))) {
+				if (attackDistance <= attackrange ||
+					(d <= range && UnitReachable(*attacker, dest, attackrange, false, true))) {
 					++enemy_count;
 				} else {
 					dest.CacheLock = 1;

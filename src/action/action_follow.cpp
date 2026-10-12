@@ -37,6 +37,8 @@
 
 #include "action/action_follow.h"
 
+#include "action/action_unload.h"
+
 #include "animation.h"
 #include "iolib.h"
 #include "luacallback.h"
@@ -198,6 +200,20 @@ void COrder_Follow::Execute(CUnit &unit) /* override */
 		this->State = State_Init;
 	}
 	if (this->State == State_Init) { // first entry
+		if (goal && unit.Type->GridStep > 1 && CanTransport(unit, *goal)) {
+			// A transporter on a grid takes its passenger from a coast tile: the one on its line
+			// toward the passenger, or the one it stands on. The passenger walks to it.
+			if (const auto dock = FindDockTile(unit, goal->tilePos)) {
+				this->ClearGoal();
+				goal = nullptr;
+				this->goalPos = *dock;
+				this->Range = 0;
+				if (*dock == unit.tilePos) {
+					this->Finished = true;
+					return;
+				}
+			}
+		}
 		this->State = State_Initialized;
 	}
 	switch (DoActionMove(unit)) { // reached end-point?

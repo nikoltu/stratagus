@@ -148,14 +148,18 @@ extern void SdlUnlockScreen();      /// Do SDL hardware unlock
 ----------------------------------------------------------------------------*/
 
 // WORLD-ZOOM-RULE: the in-game picture and the HUD step, by the original's rule
-// (work/agent-zoom-rule/SPEC_WORLD_ZOOM_RULE.md R1, R2; see the contract in video.h).
+// (R1, R2; see the contract in video.h).
 //   R1  k  = max(1, floor(Height / 480))            thresholds 960 / 1440 / 1920 probed both sides
 //   R2  Pw = min(Width,  round(Height * 16 / 9))     1366x768 -> 1365, 2560x1439 -> 2558
 //       Ph = min(Height, round(Width  *  3 / 4))     1000x776 -> 750, 500x400 -> 375
 //       centred. An odd remainder puts the extra black column / row on the right / bottom here;
-//       the original's side for it was read with +-1 px only (33 | 34 at 1400x750, 13 | 12 at
-//       500x400), so that single pixel is UNVERIFIED.
-// One scale for both axes by construction (rule 34: no squish, ever).
+//       the original's side for that single pixel is unverified.
+// One scale for both axes by construction: never a squish.
+// WIDE-MAP-VIEW: an owner's deviation for screens wider than 16:9. The original
+// keeps a centred 16:9 picture there (1720x720 -> 1280x720 at x 220); here the picture is the
+// whole width: the side bar at x 0, the map view to the screen's right edge, no black columns.
+// The step and every HUD size stay the original's. A screen not wider than 16:9 takes the other
+// branch and gets exactly the numbers of the rule above.
 void CVideo::ComputeHudCanvas()
 {
 	const int k = std::max(1, Height / 480);
@@ -163,9 +167,14 @@ void CVideo::ComputeHudCanvas()
 	const int ph = std::min(Height, (Width * 6 + 4) / 8);     // round(Width * 3 / 4)
 	HudCanvas.Step = k;
 	HudCanvas.Scale = k * 480.0 / 2160.0;
-	HudCanvas.W = pw;
+	if (Width > pw) {
+		HudCanvas.W = Width;
+		HudCanvas.X = 0;
+	} else {
+		HudCanvas.W = pw;
+		HudCanvas.X = (Width - pw) / 2;
+	}
 	HudCanvas.H = ph;
-	HudCanvas.X = (Width - pw) / 2;
 	HudCanvas.Y = (Height - ph) / 2;
 }
 
@@ -440,6 +449,9 @@ void BlitSurfaceAlphaBlending_32bpp(const SDL_Surface *srcSurface, const SDL_Rec
 				const uint32_t srcPixel = src[srcIndex + x];
 
 				const uint8_t alpha = 0xFF & (srcPixel >> ASHIFT);
+				if (alpha == 0) {
+					continue; // the >> 8 below would take 1 off every channel of an untouched pixel
+				}
 				const uint8_t srcR  = 0xFF & (srcPixel >> RSHIFT);
 				const uint8_t srcG  = 0xFF & (srcPixel >> GSHIFT);
 				const uint8_t srcB  = 0xFF & (srcPixel >> BSHIFT);

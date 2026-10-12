@@ -55,6 +55,7 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "video.h"
+#include "../video/hd_classic_hud.h"
 
 #include <cctype>
 #include <guisan/key.hpp>
@@ -597,25 +598,22 @@ void DrawPopup(const ButtonAction &button, const CUIButton &uibutton, int x, int
 
 	if (popup.FixedX >= 0 && popup.FixedY >= 0) {
 		// IG-T1: the Remastered's tooltip does not follow the button -- it sits at the bottom left
-		// of the map area (measured on the live original client: box x 188..419, y 703..750 in a
-		// 1296x779 client, i.e. 48 px tall = the 240 px sprite at its declared scale 5).
-		// The fields are LOGICAL (3840x2160) units: Video.Height is still 0 while the scripts are
+		// of the map area (measured on the original).
+		// The fields are logical (3840x2160) units: Video.Height is still 0 while the scripts are
 		// being loaded, so a value scaled in Lua at definition time would be zero.
 		//
 		// NG81: read the canvas, never recompute it. Height/2160 is only the right scale when the
-		// framebuffer is itself 16:9; on a letterboxed surface it is too large and carries no
-		// origin, so the box was placed 124 px right of its sidebar anchor and its bottom edge
-		// landed 59 px below the canvas, on top of the status line's own hint and cost icons.
+		// framebuffer is itself 16:9, and it carries no origin.
 		const double s = Video.HudCanvas.Scale;
 		x = Video.HudCanvas.X + (int) (popup.FixedX * s + 0.5);
 		if (popup.FixedHeight > 0) {
 			popupHeight = (int) (popup.FixedHeight * s + 0.5);
 		}
-		// FixedY is the BOTTOM edge of the box: the original anchors its tooltip to the bottom of
-		// the map area and grows it upwards as the text needs, rather than forcing a height.
-		// WORLD-ZOOM-RULE: FixedY was authored against a 2160-unit-high canvas, i.e. it says
-		// "2160 - FixedY units above the bottom". The picture is no longer 2160 units high
-		// (2772 units at 2960x1848), so the distance is taken from the picture's bottom edge.
+		// FixedY is the bottom edge of the box: the original anchors its tooltip to the bottom of
+		// the map area and grows it upwards as the text needs.
+		// WORLD-ZOOM-RULE: FixedY is authored against a 2160-unit-high canvas, i.e. it says
+		// "2160 - FixedY units above the bottom"; the distance is taken from the picture's bottom
+		// edge, whatever the picture's height.
 		y = Video.HudCanvas.Y + Video.HudCanvas.H - (int) ((2160 - popup.FixedY) * s + 0.5) - popupHeight;
 		clamp<int>(&y, 0, Video.Height - 1);
 	} else {
@@ -839,13 +837,9 @@ void CButtonPanel::Draw()
 														maxCooldown * 100 / SpellTypeTable[buttons[i].Value]->CoolDown);
 		} else if (gray && !Preference.GrayscaleIcons) {
 			// PANEL-D: a button that is shown but not allowed is the whole button -- frame,
-			// picture and letter -- at half brightness, colours kept: dim = 0.499 x lit
-			// (residual 0.25 of 255) for the Catapult and Ogre buttons of the orc Barracks,
-			// captures b03 (lit) and b04 (dim) of work/agent-orig-scenes; the ring's mean
-			// 167.6 -> 83.6, the letter's brightest pixel 255 -> 127; the same in b05, b06,
-			// hb11 (work/agent-prep-panels/tools/dim.py, vbtn.py). Black at 128 of 255 over
-			// the cell gives 127 / 255 = 0.498. No hover or pressed state: the button does
-			// nothing (CButtonPanel::DoClicked).
+			// picture and letter -- at half brightness, colours kept: black at 128 of 255 over
+			// the cell (measured: captures b03 lit, b04 dim; the same in b05, b06, hb11).
+			// No hover or pressed state: the button does nothing (CButtonPanel::DoClicked).
 			int player = -1;
 			if (Selected.empty() == false && Selected[0]->IsAlive()) {
 				player = Selected[0]->RescuedFrom ? Selected[0]->RescuedFrom->Index : Selected[0]->Player->Index;
@@ -872,12 +866,9 @@ void CButtonPanel::Draw()
 	for (int i = 0; i < (int) UI.ButtonPanel.Buttons.size(); ++i) {
 		if (ButtonAreaUnderCursor == ButtonArea::Button &&
 			ButtonUnderCursor == i && KeyState != EKeyState::Input) {
-				// NG13 said the original shows hints only in the bottom status bar. Running the
-				// original client and hovering a command button DISPROVED half of that: it draws a
-				// tooltip panel as well, at the bottom left of the map area (cycle 87). Do both --
-				// the status line, and the popup at the position its definition carries (IG-T1).
-				// HUD-003 / HUD-020: the original prints no hint at the bottom edge; the panel
-				// carries the name and the costs (captures o08, o11, o26).
+				// The original draws a tooltip panel at the bottom left of the map area (IG-T1) and
+				// prints no hint at the bottom edge; the panel carries the name and the costs
+				// (HUD-003, HUD-020; captures o08, o11, o26).
 				if (!Preference.NoStatusLineTooltips) {
 					UpdateStatusLineForButton(buttons[i]);
 				}
@@ -887,6 +878,37 @@ void CButtonPanel::Draw()
 				}
 		}
 	}
+}
+
+/**
+**  Classic view: what the command card shows in a cell. The buttons, their order, the ones
+**  the selected units may not use and the marked one are those of CButtonPanel::Draw.
+**
+**  @param index    cell, 0..8
+**  @param allowed  out: the selected units may use the button
+**  @param marked   out: the button of the order the units carry out (never with !allowed)
+**
+**  @return         true when the cell holds a button with a picture
+*/
+bool ClassicCommandButtonShown(int index, bool &allowed, bool &marked)
+{
+	allowed = false;
+	marked = false;
+	if (index < 0 || index >= (int) CurrentButtons.size() || Selected.empty()) {
+		return false;
+	}
+	const ButtonAction &button = CurrentButtons[index];
+	if (button.Pos == -1 || !button.Icon.Icon) {
+		return false;
+	}
+	for (const CUnit *unit : Selected) {
+		if (!IsButtonAllowed(*unit, button)) {
+			return true;
+		}
+	}
+	allowed = true;
+	marked = (GetButtonStatus(button, -1) & IconSelected) != 0;
+	return true;
 }
 
 /**
@@ -1126,8 +1148,8 @@ static void UpdateButtonPanelSingleUnit(const CUnit &unit, std::vector<ButtonAct
 			researchCheck = false;
 		}
 
-		// PANEL-D: a building that trains shows Cancel and nothing else (captures t01, ht20 of
-		// work/agent-orig-scenes), also no dim button.
+		// PANEL-D: a building that trains shows Cancel and nothing else (captures t01, ht20),
+		// also no dim button.
 		const bool onlyCancel = !EnableTrainingQueue && unit.CurrentAction() == UnitAction::Train;
 
 		// is button allowed after all?

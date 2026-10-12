@@ -62,6 +62,7 @@
 #include "unittype.h"
 #include "video.h"
 #include "widgets.h"
+#include "../video/hd_classic_hud.h"
 
 #include <algorithm>
 #include <cctype>
@@ -750,6 +751,54 @@ static void HandleMouseOn(const PixelPos screenPos)
 		return;
 	}
 
+	// Classic view: in the box only the Menu button, the minimap and the map view take the pointer;
+	// outside the box nothing does. The Menu button is user button 0 (the Game Menu), at the
+	// classic button's place.
+	if (ClassicHudActive()) {
+		if (!UI.UserButtons.empty() && UI.UserButtons[0].Button.X != -1
+			&& ClassicMenuButtonContains(screenPos)) {
+			ButtonAreaUnderCursor = ButtonArea::User;
+			ButtonUnderCursor = 0;
+			CursorOn = ECursorOn::Button;
+			return;
+		}
+		// User button 1 is "Pause", at the classic Pause button's place.
+		if (UI.UserButtons.size() > 1 && UI.UserButtons[1].Button.X != -1
+			&& ClassicPauseButtonContains(screenPos.x, screenPos.y)) {
+			ButtonAreaUnderCursor = ButtonArea::User;
+			ButtonUnderCursor = 1;
+			CursorOn = ECursorOn::Button;
+			return;
+		}
+		// The command card: the engine's buttons in the classic cells.
+		const int commandCell = ClassicCommandCellAt(screenPos.x, screenPos.y);
+		if (commandCell >= 0) {
+			bool allowed = false;
+			bool marked = false;
+			if (ClassicCommandButtonShown(commandCell, allowed, marked) && allowed) {
+				ButtonAreaUnderCursor = ButtonArea::Button;
+				ButtonUnderCursor = commandCell;
+				CursorOn = ECursorOn::Button;
+			} else {
+				CursorOn = ECursorOn::Unknown;
+			}
+			return;
+		}
+		if (UI.Minimap.Contains(screenPos)) {
+			CursorOn = ECursorOn::Minimap;
+			return;
+		}
+		CViewport *vp = UI.MapArea.Contains(screenPos) ? GetViewport(screenPos) : nullptr;
+		if (vp == nullptr) {
+			CursorOn = ECursorOn::Unknown;
+			return;
+		}
+		UI.MouseViewport = vp;
+		CursorOn = ECursorOn::Map;
+		HandleMouseScrollArea(screenPos);
+		return;
+	}
+
 	//  Handle buttons
 	if (!IsNetworkGame()) {
 		if (UI.MenuButton.X != -1) {
@@ -1007,7 +1056,7 @@ void RestrictCursorToMinimap()
 }
 
 //.............................................................................
-//  Touch routes (owner decision 2026-10-08). The original has no touch input.
+//  Touch routes (owner's rule). The original has no touch input.
 
 /**
 **  TOUCH-R2: a hold on the map has given (or is about to give) an order. May the same finger
@@ -1088,9 +1137,9 @@ static PixelPos TouchPlaceGrab(0, 0);    /// finger minus the preview's top-left
 
 /**
 **  TOUCH-R7: top-left tile of the preview for a finger at a screen point that holds the
-**  building at TouchPlaceGrab. Owner decision 2026-10-08, Q4 = B: the finger marks the
-**  middle of the building, and a drag keeps the grabbed point. The corner is rounded to the
-**  nearest tile; the footprint is kept inside the map.
+**  building at TouchPlaceGrab. Owner's rule: the finger marks the middle of the building,
+**  and a drag keeps the grabbed point. The corner is rounded to the nearest tile; the
+**  footprint is kept inside the map.
 **
 **  @param vp         viewport the finger is on.
 **  @param screenPos  the finger.
@@ -2385,10 +2434,7 @@ void UIHandleButtonUp(unsigned button)
 				num = 0;
 				if (!Selected.empty()) {
 					// A left click on ground with no unit under it clears the selection: the
-					// original's own behaviour (its captures u0x of work/agent-orig-scenes, taken
-					// at a 2960x1848 client). The owner first chose a double tap for touch while
-					// this was unknown and changed it to the original's single click on
-					// 2026-10-08 (as UiUnselectAll).
+					// original's own behaviour (as UiUnselectAll).
 					TouchRememberClearedSelection();
 					UnSelectAll();
 					NetworkSendSelection((CUnit **)nullptr, 0);
@@ -2422,9 +2468,7 @@ void UIHandleButtonUp(unsigned button)
 					PlayGameSound(GameSounds.Click.Sound.get(), MaxSampleVolume);
 				}
 				// M666-4: the original prints nothing at the bottom of the map view when a unit is
-				// selected -- no bright ink in rows 1640..1847 of ten 2960x1848 captures with one
-				// or more units selected (work/agent-orig-scenes/captures s01 i03 u02 u05 hs00 k24
-				// c25 b02 b03 t11; work/agent-fix-hudrest/tools, section M666-4 of HUDREST_READY).
+				// selected (captures s01 i03 u02 u05 hs00 k24 c25 b02 b03 t11).
 				// Preference.NoStatusLineTooltips is the HUD's existing "no hint line" switch
 				// (scripts/ui.lua, HUD-003); the classic line stays for a UI that keeps hints.
 				if (Selected[0]->Player == ThisPlayer && !Preference.NoStatusLineTooltips) {

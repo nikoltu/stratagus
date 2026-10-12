@@ -32,7 +32,14 @@
 
 #include "actions.h"
 
+#include <optional>
+
 //@{
+
+/// Coast tile a transporter that moves on a grid goes to stand on when sent toward a tile
+extern std::optional<Vec2i> FindDockTile(const CUnit &transporter, const Vec2i &toward);
+/// Tile a unit leaving such a transporter, which stands on transporterPos, appears on
+extern std::optional<Vec2i> FindUnloadTile(const CUnit &unit, const Vec2i &transporterPos);
 
 class COrder_Unload : public COrder
 {

@@ -134,8 +134,7 @@ final class OptionsPage {
         tab = Math.max(0, Math.min(TABS.length - 1, which));
     }
 
-    // The Languages tab (owner's choice of 2026-10-06, option A): one row to a language, the one
-    // in use marked.
+    // The Languages tab (owner's rule): one row to a language, the one in use marked.
     private static final int LANGUAGE_TAB = 4;
     private static final float LANG_PITCH = 138f, LANG_H = 120f;
     private static final int ROW_SELECTED = 0x36F0D250, ROW_FAINT = 0x10FFFFFF;

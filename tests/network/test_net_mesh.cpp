@@ -42,7 +42,7 @@
 namespace mesh {
 namespace wire_test {
 
-static const Kind AllKinds[] = {Kind::Cmd, Kind::Loading, Kind::Loaded, Kind::Need, Kind::Status, Kind::Commit, Kind::Cancel, Kind::Pause};
+static const Kind AllKinds[] = {Kind::Cmd, Kind::Loading, Kind::Loaded, Kind::Need, Kind::Status, Kind::Commit, Kind::Cancel, Kind::Pause, Kind::ChatAck};
 
 static bool Same(const Msg &a, const Msg &b)
 {
@@ -104,6 +104,11 @@ static Msg Highest(Kind kind)
 		m.flags = 1;
 		m.cycle = kWireMaxCycle;
 		break;
+	case Kind::Chat: // has its own two functions
+		break;
+	case Kind::ChatAck:
+		m.data = 0xFFFFFFFFu;
+		break;
 	}
 	return m;
 }
@@ -113,7 +118,7 @@ template <typename Rng>
 static Msg Random(Rng &rng)
 {
 	Msg m;
-	m.kind = AllKinds[rng() % 8];
+	m.kind = AllKinds[rng() % 9];
 	const auto cycle = [&]() { return int32_t(rng() % (uint32_t(kWireMaxCycle) + 1)); };
 	switch (m.kind) {
 	case Kind::Cmd:
@@ -158,6 +163,11 @@ static Msg Random(Rng &rng)
 		m.player = uint8_t(rng() % kMaxPlayers);
 		m.flags = uint8_t(rng() % 2);
 		m.cycle = cycle();
+		break;
+	case Kind::Chat:
+		break;
+	case Kind::ChatAck:
+		m.data = uint32_t(rng()) | 1u;
 		break;
 	}
 	return m;
@@ -244,6 +254,83 @@ TEST_CASE("mesh wire: the bytes of a pause")
 	// flags above 1, a player that is none
 	CHECK(RefusedWith(Kind::Pause, 5, 2));
 	CHECK(RefusedWith(Kind::Pause, 4, kMaxPlayers));
+}
+
+TEST_CASE("mesh wire: the bytes of a chat line and of its answer")
+{
+	const char text[] = "to the north";
+	unsigned char buf[kWireChatMaxSize];
+	REQUIRE(SerializeChat(0x01020304, text, 12, 5, buf, sizeof buf) == 21);
+	const unsigned char head[9] = {MessageMesh, kWireVersion, 11, 5, 0x01, 0x02, 0x03, 0x04, 12};
+	CHECK(std::memcmp(buf, head, sizeof head) == 0);
+	CHECK(std::memcmp(buf + 9, text, 12) == 0);
+	int from = -1;
+	uint32_t number = 0;
+	const char *got = nullptr;
+	size_t size = 0;
+	REQUIRE(DeserializeChat(buf, 21, &from, &number, &got, &size));
+	CHECK(from == 5);
+	CHECK(number == 0x01020304);
+	CHECK(size == 12);
+	CHECK(got == reinterpret_cast<const char *>(buf) + 9);
+	// it is no message of one length, no probe and no relay
+	Msg m;
+	bool ack = false;
+	const unsigned char *packet = nullptr;
+	CHECK_FALSE(Deserialize(buf, 21, &m, &from));
+	CHECK_FALSE(DeserializeProbe(buf, 21, &ack, &from));
+	CHECK_FALSE(DeserializeRelay(buf, 21, &from, &packet, &size));
+	m.kind = Kind::Chat;
+	m.data = 7;
+	CHECK(Serialize(m, 0, buf, sizeof buf) == 0);
+	CHECK(WireSize(Kind::Chat) == 0);
+
+	// the answer
+	m.kind = Kind::ChatAck;
+	m.data = 0x0A0B0C0D;
+	REQUIRE(Serialize(m, 3, buf, sizeof buf) == 8);
+	const unsigned char expected[8] = {MessageMesh, kWireVersion, 12, 3, 0x0A, 0x0B, 0x0C, 0x0D};
+	CHECK(std::memcmp(buf, expected, sizeof expected) == 0);
+}
+
+TEST_CASE("mesh wire: a chat line that is not whole and valid is refused")
+{
+	std::string longest(kWireChatMaxText, 'x');
+	unsigned char buf[kWireChatMaxSize + 8];
+	int from = -1;
+	uint32_t number = 0;
+	const char *got = nullptr;
+	size_t size = 0;
+
+	REQUIRE(SerializeChat(1, longest.data(), longest.size(), 7, buf, sizeof buf) == kWireChatMaxSize);
+	REQUIRE(DeserializeChat(buf, kWireChatMaxSize, &from, &number, &got, &size));
+	CHECK(size == kWireChatMaxText);
+	// every other length of the same datagram
+	for (size_t len = 0; len < kWireChatMaxSize + 8; ++len) {
+		if (len != kWireChatMaxSize) CHECK_FALSE(DeserializeChat(buf, len, &from, &number, &got, &size));
+	}
+	// nothing is written: no text, too long a text, a control, the number 0, no slot, no room
+	CHECK(SerializeChat(1, "", 0, 0, buf, sizeof buf) == 0);
+	longest += 'x';
+	CHECK(SerializeChat(1, longest.data(), longest.size(), 0, buf, sizeof buf) == 0);
+	CHECK(SerializeChat(1, "a\nb", 3, 0, buf, sizeof buf) == 0);
+	CHECK(SerializeChat(0, "ab", 2, 0, buf, sizeof buf) == 0);
+	CHECK(SerializeChat(1, "ab", 2, kMaxPlayers, buf, sizeof buf) == 0);
+	CHECK(SerializeChat(1, "ab", 2, 0, buf, 10) == 0);
+	// a changed byte: type, version, kind, sender, number 0, length, a control in the text
+	REQUIRE(SerializeChat(1, "ab", 2, 0, buf, sizeof buf) == 11);
+	const struct { int at; unsigned char value; } bad[] = {
+		{0, 0}, {1, kWireVersion + 1}, {2, 10}, {2, 12}, {3, kMaxPlayers}, {7, 0}, {8, 1}, {8, 3}, {8, 0}, {10, 0x1F}, {9, 0}
+	};
+	for (const auto &b : bad) {
+		CAPTURE(b.at);
+		unsigned char copy[11];
+		std::memcpy(copy, buf, 11);
+		copy[b.at] = b.value;
+		CHECK_FALSE(DeserializeChat(copy, 11, &from, &number, &got, &size));
+	}
+	CHECK(number == 1); // left as they were by every refusal
+	CHECK(from == 7);
 }
 
 TEST_CASE("mesh wire: the type byte is none of the consecutive message types")
@@ -385,7 +472,7 @@ TEST_CASE("mesh wire: another version, type or kind is refused")
 		}
 		// a kind byte that is no kind, or a kind of another length
 		for (int k = 0; k < 256; ++k) {
-			if (k > int(Kind::Pause) || WireSize(Kind(k)) != WireSize(kind)) {
+			if (k > int(Kind::ChatAck) || WireSize(Kind(k)) != WireSize(kind)) {
 				CHECK(RefusedWith(kind, 2, uint8_t(k)));
 			}
 		}
@@ -1349,6 +1436,156 @@ TEST_CASE("mesh pause: a leave during a pause ends no pause")
 	rig.Run(1000);
 	CHECK(rig.dev[1]->Executed() > P + 80);
 	CHECK(rig.dev[2]->Executed() > P + 80);
+}
+
+// ------------------------------------------------------------------------------------------------
+// The chat of the model alone (LAN_CHAT_NOTE.md).
+
+// The numbers of the lines of `from` that device i was told, in the order of the telling.
+static std::vector<int32_t> ChatTold(const PauseRig &rig, int i, int from)
+{
+	std::vector<int32_t> told;
+	for (const Event &e : rig.seen[i]) {
+		if (e.type == Event::ChatLine && e.player == from) told.push_back(e.cycle);
+	}
+	return told;
+}
+
+TEST_CASE("mesh chat: a line reaches every device once, and is answered")
+{
+	PauseRig rig(3);
+	const uint32_t number = rig.dev[1]->Chat(rig.now);
+	CHECK(number == 1);
+	rig.Deliver();
+	CHECK(ChatTold(rig, 0, 1) == std::vector<int32_t>{1});
+	CHECK(ChatTold(rig, 2, 1) == std::vector<int32_t>{1});
+	CHECK(rig.Count(1, Event::ChatLine) == 0); // the sender is not told its own line
+	// answered by both: nothing is sent again
+	int again = 0;
+	rig.drop = [&](int, const Out &o) { again += o.msg.kind == Kind::Chat ? 1 : 0; return false; };
+	rig.Run(2000);
+	CHECK(again == 0);
+	CHECK(rig.dev[1]->Chat(rig.now) == 2);
+	rig.Deliver();
+	CHECK(ChatTold(rig, 0, 1) == std::vector<int32_t>{1, 2});
+}
+
+TEST_CASE("mesh chat: a line said while the game is paused arrives while it is paused")
+{
+	PauseRig rig(3);
+	rig.PauseAll(0);
+	rig.Run(1000);
+	const int32_t P = rig.dev[0]->Executed();
+	REQUIRE(rig.dev[2]->IsPaused());
+	REQUIRE(rig.dev[2]->Chat(rig.now) == 1);
+	rig.Deliver();
+	for (int i = 0; i < 2; ++i) {
+		CAPTURE(i);
+		CHECK(ChatTold(rig, i, 2) == std::vector<int32_t>{1});
+		CHECK(rig.dev[i]->IsPaused());
+		CHECK(rig.dev[i]->Executed() == P);
+	}
+	rig.Run(5000);
+	for (int i = 0; i < 3; ++i) {
+		CHECK(rig.dev[i]->IsPaused()); // a line lets no game go on
+		CHECK(rig.Count(i, Event::ChatLine) == (i == 2 ? 0 : 1));
+	}
+}
+
+TEST_CASE("mesh chat: a lost line is sent again; a lost answer brings no second telling")
+{
+	PauseRig rig(3);
+	rig.PauseAll(1);
+	// the first two sendings of the line to device 2 are lost, and the first answer of device 0
+	int toTwo = 0, fromZero = 0;
+	rig.drop = [&](int from, const Out &o) {
+		if (o.msg.kind == Kind::Chat && o.to == 2) return ++toTwo <= 2;
+		if (o.msg.kind == Kind::ChatAck && from == 0) return ++fromZero <= 1;
+		return false;
+	};
+	REQUIRE(rig.dev[1]->Chat(rig.now) == 1);
+	rig.Deliver();
+	CHECK(ChatTold(rig, 0, 1) == std::vector<int32_t>{1});
+	CHECK(ChatTold(rig, 2, 1).empty());
+	rig.Run(2000);
+	CHECK(ChatTold(rig, 0, 1) == std::vector<int32_t>{1}); // sent again to 0, told once
+	CHECK(ChatTold(rig, 2, 1) == std::vector<int32_t>{1});
+	CHECK(toTwo == 3);
+	CHECK(fromZero == 2);
+	rig.drop = nullptr;
+	int again = 0;
+	rig.drop = [&](int, const Out &o) { again += o.msg.kind == Kind::Chat ? 1 : 0; return false; };
+	rig.Run(2000);
+	CHECK(again == 0);
+}
+
+TEST_CASE("mesh chat: lines that arrive in another order are each told once")
+{
+	PauseRig rig(2);
+	Msg m;
+	m.kind = Kind::Chat;
+	m.player = 1;
+	const uint32_t order[] = {3, 1, 3, 2, 1, 40, 39, 2, 8, 40, 8};
+	for (const uint32_t number : order) {
+		m.data = number;
+		rig.dev[0]->OnMessage(1, m, rig.now);
+	}
+	rig.Deliver();
+	CHECK(ChatTold(rig, 0, 1) == std::vector<int32_t>{3, 1, 2, 40, 39, 8});
+	// a line of another player than the sender, and the number 0, are nothing
+	m.player = 0;
+	m.data = 50;
+	rig.dev[0]->OnMessage(1, m, rig.now);
+	m.player = 1;
+	m.data = 0;
+	rig.dev[0]->OnMessage(1, m, rig.now);
+	rig.Deliver();
+	CHECK(rig.Count(0, Event::ChatLine) == 6);
+}
+
+TEST_CASE("mesh chat: no new line while the oldest unanswered one is a window back")
+{
+	PauseRig rig(2);
+	rig.mute[1] = true; // device 1 hears nothing and says nothing
+	for (uint32_t i = 1; i <= kChatWindow; ++i) {
+		CHECK(rig.dev[0]->Chat(rig.now) == i);
+	}
+	CHECK(rig.dev[0]->Chat(rig.now) == 0);
+	rig.Run(1000);
+	CHECK(rig.dev[0]->Chat(rig.now) == 0);
+	rig.mute[1] = false;
+	rig.Run(1000);
+	std::vector<int32_t> all;
+	for (uint32_t i = 1; i <= kChatWindow; ++i) all.push_back(int32_t(i));
+	std::vector<int32_t> told = ChatTold(rig, 1, 0);
+	std::sort(told.begin(), told.end());
+	CHECK(told == all);
+	CHECK(rig.dev[0]->Chat(rig.now) == kChatWindow + 1);
+}
+
+TEST_CASE("mesh chat: a removed player is not waited for; a device that left says nothing")
+{
+	PauseRig rig(3);
+	rig.dev[2]->Quit(rig.now);
+	rig.Run(3000);
+	REQUIRE(rig.dev[0]->RemovedAt(2) != kNever);
+	CHECK(rig.dev[2]->Chat(rig.now) == 0);
+	int toTwo = 0;
+	rig.drop = [&](int, const Out &o) { toTwo += (o.msg.kind == Kind::Chat && o.to == 2) ? 1 : 0; return false; };
+	REQUIRE(rig.dev[0]->Chat(rig.now) == 1);
+	rig.Run(2000);
+	CHECK(toTwo == 0);
+	CHECK(ChatTold(rig, 1, 0) == std::vector<int32_t>{1});
+	// a player who is removed while a line waits for his answer is waited for no longer
+	PauseRig lost(3);
+	lost.mute[2] = true;
+	REQUIRE(lost.dev[0]->Chat(lost.now) == 1);
+	lost.Run(70000);
+	REQUIRE(lost.dev[0]->RemovedAt(2) != kNever);
+	int again = 0;
+	lost.drop = [&](int, const Out &o) { again += o.msg.kind == Kind::Chat ? 1 : 0; return false; };
+	lost.Run(2000);
+	CHECK(again == 0);
 }
 
 } // namespace wire_test

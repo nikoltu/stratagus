@@ -31,6 +31,8 @@
 static std::map<std::string, std::string> WC2Strings;
 /// family ("unit"/"spell"/"upgrade"/...) -> lowercased display name -> numeric id
 static std::map<std::string, std::map<std::string, int>> WC2IdByName;
+/// family -> object ident -> numeric id, filled by the scripts (SetWC2IdForIdent)
+static std::map<std::string, std::map<std::string, int>> WC2IdByIdent;
 static const std::string EmptyString;
 static std::string LoadedLanguage;
 
@@ -63,6 +65,46 @@ static bool SplitNumberedKey(const std::string &key, std::string &family, int &i
 	return true;
 }
 
+/// Replace the table and the name index by the content of `text`. `err` is set when the text is
+/// not a JSON object; a well-formed object without a single string gives false with no error.
+static bool ParseWC2Strings(const std::string &text, std::string &err)
+{
+	content::JsonValue root;
+	if (!content::parseJson(text, root, err) || !root.isObject()) {
+		if (err.empty()) {
+			err = "not an object";
+		}
+		return false;
+	}
+
+	WC2Strings.clear();
+	WC2IdByName.clear();
+	LoadedLanguage.clear();
+	for (const auto &[key, value] : *root.object) {
+		if (!value.isString()) {
+			continue;   // the file is flat; anything else is not usable text
+		}
+		WC2Strings[key] = value.string;
+
+		// Index the plain "<family>_<id>" entries by their display name so a Wargus unit/spell/
+		// upgrade can find its Remastered id from the name it already carries.
+		std::string family;
+		int id = 0;
+		if (SplitNumberedKey(key, family, id)) {
+			const std::string norm = Normalise(value.string);
+			if (!norm.empty()) {
+				auto &byName = WC2IdByName[family];
+				// First key wins: the families repeat a name for the human/orc pair (e.g. two
+				// "Oil Tanker" entries). The keys arrive in text order ("unit_16" before
+				// "unit_2"), so an object that has to reach its own record of such a pair is
+				// registered by its ident instead (SetWC2IdForIdent).
+				byName.emplace(norm, id);
+			}
+		}
+	}
+	return !WC2Strings.empty();
+}
+
 bool LoadWC2Strings(const std::string &language)
 {
 	const std::string lang = language.empty() ? std::string("enUS") : language;
@@ -88,37 +130,21 @@ bool LoadWC2Strings(const std::string &language)
 		f.close();
 	}
 
-	content::JsonValue root;
 	std::string err;
-	if (!content::parseJson(text, root, err) || !root.isObject()) {
-		ErrorPrint("Remastered strings '%s' are malformed: %s\n", path.u8string().c_str(), err.c_str());
+	if (!ParseWC2Strings(text, err)) {
+		if (!err.empty()) {
+			ErrorPrint("Remastered strings '%s' are malformed: %s\n", path.u8string().c_str(), err.c_str());
+		}
 		return false;
 	}
-
-	WC2Strings.clear();
-	WC2IdByName.clear();
-	for (const auto &[key, value] : *root.object) {
-		if (!value.isString()) {
-			continue;   // the file is flat; anything else is not text we can use
-		}
-		WC2Strings[key] = value.string;
-
-		// Index the plain "<family>_<id>" entries by their display name so a Wargus unit/spell/
-		// upgrade can find its Remastered id from the name it already carries.
-		std::string family;
-		int id = 0;
-		if (SplitNumberedKey(key, family, id)) {
-			const std::string norm = Normalise(value.string);
-			if (!norm.empty()) {
-				auto &byName = WC2IdByName[family];
-				// First key wins: the families repeat a name for the human/orc pair (e.g. two
-				// "Oil Tanker" entries), and taking the lower id keeps the mapping stable.
-				byName.emplace(norm, id);
-			}
-		}
-	}
 	LoadedLanguage = lang;
-	return !WC2Strings.empty();
+	return true;
+}
+
+bool LoadWC2StringsFromText(const std::string &jsonText)
+{
+	std::string err;
+	return ParseWC2Strings(jsonText, err);
 }
 
 const std::string &GetWC2String(const std::string &key)
@@ -146,4 +172,36 @@ int GetWC2Id(const std::string &family, const std::string &displayName)
 	}
 	auto it = fam->second.find(Normalise(displayName));
 	return it == fam->second.end() ? -1 : it->second;
+}
+
+void SetWC2IdForIdent(const std::string &family, const std::string &ident, int id)
+{
+	if (family.empty() || ident.empty()) {
+		return;
+	}
+	if (id < 0) {
+		auto fam = WC2IdByIdent.find(family);
+		if (fam != WC2IdByIdent.end()) {
+			fam->second.erase(ident);
+		}
+		return;
+	}
+	WC2IdByIdent[family][ident] = id;
+}
+
+int GetWC2IdForIdent(const std::string &family, const std::string &ident)
+{
+	auto fam = WC2IdByIdent.find(family);
+	if (fam == WC2IdByIdent.end()) {
+		return -1;
+	}
+	auto it = fam->second.find(ident);
+	return it == fam->second.end() ? -1 : it->second;
+}
+
+int ResolveWC2Id(const std::string &family, const std::string &ident,
+				 const std::string &displayName)
+{
+	const int id = GetWC2IdForIdent(family, ident);
+	return id >= 0 ? id : GetWC2Id(family, displayName);
 }

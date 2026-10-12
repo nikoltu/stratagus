@@ -597,6 +597,7 @@ set(stratagus_tests_SRCS
 	tests/network/test_network.cpp
 	tests/network/test_udpsocket.cpp
 	tests/video/test_hd_atlas.cpp
+	tests/video/test_hudcanvas.cpp
 	tests/video/test_nineslice.cpp
 	tests/video/test_uianchor.cpp
 	tests/video/test_uiscale.cpp
@@ -761,6 +762,18 @@ include(CheckTypeSize)
 include(CheckFunctionExists)
 include(CheckSymbolExists)
 
+# The dropdown of the menus overrides guisan's adjustHeight (src/include/widgets.h), which the
+# vendored guisan declares non-virtual. The submodule is upstream's and is not changed in git:
+# its header is patched in the working tree here, once, for every platform that builds it.
+set(_guisan_dropdown "${CMAKE_CURRENT_SOURCE_DIR}/third-party/guisan/include/guisan/widgets/dropdown.hpp")
+if(EXISTS "${_guisan_dropdown}")
+	file(READ "${_guisan_dropdown}" _guisan_dropdown_text)
+	if(NOT _guisan_dropdown_text MATCHES "virtual void adjustHeight")
+		string(REPLACE "void adjustHeight();" "virtual void adjustHeight();" _guisan_dropdown_text "${_guisan_dropdown_text}")
+		file(WRITE "${_guisan_dropdown}" "${_guisan_dropdown_text}")
+		message(STATUS "guisan: dropdown.hpp patched (virtual adjustHeight)")
+	endif()
+endif()
 vendored_guisan()
 
 # Windows RC compiler definitions

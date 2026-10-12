@@ -35,6 +35,7 @@
 #include "actions.h"
 #include "commands.h"
 #include "interface.h"
+#include "launcher_bridge.h"
 #include "map.h"
 #include "net_lowlevel.h"
 #include "net_mesh_glue.h"
@@ -49,7 +50,9 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
+#include <tuple>
 
 void FillCustomValue(CNetworkCommand *obj)
 {
@@ -211,6 +214,7 @@ public:
 		ThisPlayer = &Players[LocalPlayer];
 		GameCycle = 0;
 		NetworkOnStartGame(); // cycles 0..lag are filled for the three players
+		NetworkTestMeshStop(); // the queue alone; MeshGame starts the model with its own bounds
 		GameCycle = 20;
 	}
 
@@ -225,7 +229,6 @@ public:
 		NetPlayers = 0;
 		NetConnectType = 0;
 		NetLocalHostsSlot = 0;
-		NetMesh = false;
 		NumPlayers = savedNumPlayers;
 		ThisPlayer = savedThisPlayer;
 		GameCycle = 0;
@@ -340,87 +343,43 @@ bool HasStored(unsigned long cycle, int player)
 
 TEST_CASE_FIXTURE(InGameNetwork, "in-game packet: the first packet of a player for a cycle wins")
 {
-	// forwarded by the server
-	Parse(SyncPacket(OtherPlayer, 25, 0x1111), serverHost);
+	// his own packet
+	Parse(SyncPacket(OtherPlayer, 25, 0x1111), otherHost);
 	CHECK(StoredSeed(25, OtherPlayer) == 0x1111);
 
 	// the same packet again, and another one for the same player and cycle
-	Parse(SyncPacket(OtherPlayer, 25, 0x1111), serverHost);
-	Parse(SyncPacket(OtherPlayer, 25, 0x2222), serverHost);
-	Parse(QuitPacket(OtherPlayer, 25, OtherPlayer), serverHost);
+	Parse(SyncPacket(OtherPlayer, 25, 0x1111), otherHost);
+	Parse(SyncPacket(OtherPlayer, 25, 0x2222), otherHost);
+	Parse(QuitPacket(OtherPlayer, 25, OtherPlayer), otherHost);
 	CHECK(StoredSeed(25, OtherPlayer) == 0x1111);
 	CHECK(NetworkTestPlayerQuit(OtherPlayer) == false);
 
 	// other cycles and other players are not touched
 	CHECK(HasStored(25, ServerPlayer) == false);
-	Parse(SyncPacket(OtherPlayer, 26, 0x3333), serverHost);
+	Parse(SyncPacket(OtherPlayer, 26, 0x3333), otherHost);
 	CHECK(StoredSeed(26, OtherPlayer) == 0x3333);
-}
-
-TEST_CASE_FIXTURE(InGameNetwork, "in-game packet: taken only from the address of the player or from the server")
-{
-	// an address nobody plays at
-	Parse(SyncPacket(OtherPlayer, 25, 0x1111), unknownHost);
-	Parse(SyncPacket(255, 25, 0x1111), unknownHost);
-	CHECK(HasStored(25, OtherPlayer) == false);
-	CHECK(HasStored(25, ServerPlayer) == false);
-
-	// a client names the server or the local player
-	Parse(SyncPacket(ServerPlayer, 25, 0x2222), otherHost);
-	Parse(SyncPacket(LocalPlayer, 25, 0x2222), otherHost);
-	CHECK(HasStored(25, ServerPlayer) == false);
-	CHECK(HasStored(25, LocalPlayer) == false);
-
-	// a player number outside the table
-	Parse(SyncPacket(200, 25, 0x2222), serverHost);
-
-	// the player itself, with and without its number in the header
-	Parse(SyncPacket(OtherPlayer, 25, 0x3333), otherHost);
-	CHECK(StoredSeed(25, OtherPlayer) == 0x3333);
-	Parse(SyncPacket(255, 26, 0x4444), otherHost);
-	CHECK(StoredSeed(26, OtherPlayer) == 0x4444);
-
-	// the server for itself and for another player
-	Parse(SyncPacket(ServerPlayer, 25, 0x5555), serverHost);
-	CHECK(StoredSeed(25, ServerPlayer) == 0x5555);
-	Parse(SyncPacket(OtherPlayer, 27, 0x6666), serverHost);
-	CHECK(StoredSeed(27, OtherPlayer) == 0x6666);
-}
-
-TEST_CASE_FIXTURE(InGameNetwork, "in-game packet: on the server nobody sends for another player")
-{
-	NetConnectType = 1;
-	NetLocalHostsSlot = 0;
-	ThisPlayer = &Players[ServerPlayer];
-
-	// the client of player 2 names player 1: not stored, not passed on
-	Parse(SyncPacket(LocalPlayer, 25, 0x1111), otherHost);
-	CHECK(HasStored(25, LocalPlayer) == false);
-	Parse(QuitPacket(LocalPlayer, 25, LocalPlayer), otherHost);
-	CHECK(HasStored(25, LocalPlayer) == false);
-	CHECK(NetworkTestPlayerQuit(LocalPlayer) == false);
 }
 
 TEST_CASE_FIXTURE(InGameNetwork, "in-game packet: a cycle already executed is dropped")
 {
 	// GameCycle is 20: it has been executed
-	Parse(SyncPacket(OtherPlayer, 15, 0x1111), serverHost);
-	Parse(SyncPacket(OtherPlayer, 20, 0x2222), serverHost);
+	Parse(SyncPacket(OtherPlayer, 15, 0x1111), otherHost);
+	Parse(SyncPacket(OtherPlayer, 20, 0x2222), otherHost);
 	CHECK(HasStored(15, OtherPlayer) == false);
 	CHECK(HasStored(20, OtherPlayer) == false);
 
-	Parse(QuitPacket(OtherPlayer, 19, OtherPlayer), serverHost);
+	Parse(QuitPacket(OtherPlayer, 19, OtherPlayer), otherHost);
 	CHECK(HasStored(19, OtherPlayer) == false);
 	CHECK(NetworkTestPlayerQuit(OtherPlayer) == false);
 
-	Parse(SyncPacket(OtherPlayer, 21, 0x3333), serverHost);
+	Parse(SyncPacket(OtherPlayer, 21, 0x3333), otherHost);
 	CHECK(StoredSeed(21, OtherPlayer) == 0x3333);
 }
 
 TEST_CASE_FIXTURE(InGameNetwork, "in-game packet: a quit goes to the player it names")
 {
-	// the server tells that player 2 has quit (time-out, or the answer to a resend request)
-	Parse(QuitPacket(OtherPlayer, 21, OtherPlayer), serverHost);
+	// player 2 quits
+	Parse(QuitPacket(OtherPlayer, 21, OtherPlayer), otherHost);
 
 	unsigned char type = MessageNone;
 	std::vector<unsigned char> data;
@@ -461,67 +420,13 @@ TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: a resend request is
 	CHECK(serverSocket.HasDataToRead(200) == false);
 }
 
-TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: the server answers a resend request with the quit under the name of the player who quit")
-{
-	REQUIRE(NetworkFildes.IsValid());
-	REQUIRE(serverSocket.IsValid());
-	REQUIRE(otherSocket.IsValid());
-
-	// we are the server here; the two sockets are the clients of player 1 and player 2
-	NetConnectType = 1;
-	NetLocalHostsSlot = 0;
-	ThisPlayer = &Players[ServerPlayer];
-	SetHost(0, ServerPlayer, localHost, "server");
-	SetHost(1, LocalPlayer, serverHost, "client");
-	CUDPSocket &clientSocket = serverSocket;
-	const CHost &clientHost = serverHost;
-	GameCycle = 5;
-
-	// player 2 was heard and then timed out: its quit is in cycle 6
-	Parse(SyncPacket(OtherPlayer, 12, 0x1111), otherHost);
-	NetworkTestTimeOutPlayer(OtherPlayer);
-	CNetworkPacket packet;
-	int commands = 0;
-	// to the client of player 1: the packet of player 2 passed on, then the time-out packet
-	REQUIRE(Receive(clientSocket, packet, commands));
-	CHECK(packet.Header.Type[0] == MessageSync);
-	CHECK(packet.Header.OrigPlayer == OtherPlayer);
-	REQUIRE(Receive(clientSocket, packet, commands));
-	CHECK(packet.Header.Type[0] == MessageQuit);
-	CHECK(packet.Header.OrigPlayer == OtherPlayer);
-	CHECK(packet.Command[0].size() == CNetworkCommandQuit::Size());
-	// nothing to the player timed out
-	CHECK(otherSocket.HasDataToRead(200) == false);
-
-	// the client of player 1 asks for cycle 6
-	Parse(BuildPacket(255, 6, MessageResend, {}), clientHost);
-	REQUIRE(Receive(clientSocket, packet, commands));
-	CHECK(packet.Header.Type[0] == MessageSync);
-	CHECK(packet.Header.Cycle == 6);
-	CHECK(packet.Header.OrigPlayer == ServerPlayer);
-	REQUIRE(Receive(clientSocket, packet, commands));
-	CHECK(commands == 1);
-	CHECK(packet.Header.Type[0] == MessageQuit);
-	CHECK(packet.Header.Cycle == 6);
-	CHECK(packet.Header.OrigPlayer == OtherPlayer);
-	CNetworkCommandQuit nc;
-	REQUIRE(packet.Command[0].size() == nc.Size());
-	nc.Deserialize(packet.Command[0].data());
-	CHECK(nc.player == OtherPlayer);
-	CHECK(clientSocket.HasDataToRead(200) == false);
-	// the other client gets the request passed on, no answer
-	REQUIRE(Receive(otherSocket, packet, commands));
-	CHECK(packet.Header.Type[0] == MessageResend);
-	CHECK(otherSocket.HasDataToRead(200) == false);
-}
-
-TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: the time-out packet carries the quit and names the player")
+TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: the time-out places the quit of the player in the next cycle")
 {
 	REQUIRE(NetworkFildes.IsValid());
 	REQUIRE(serverSocket.IsValid());
 
 	// player 2 has been heard once; the server never (no time-out for it)
-	Parse(SyncPacket(OtherPlayer, 22, 0x1111), serverHost);
+	Parse(SyncPacket(OtherPlayer, 22, 0x1111), otherHost);
 	NetworkTestTimeOutPlayer(OtherPlayer);
 
 	// the quit is in the slot of player 2 of the next cycle
@@ -531,18 +436,7 @@ TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: the time-out packet
 	CHECK(type == MessageQuit);
 	CHECK(NetworkTestPlayerQuit(OtherPlayer) == true);
 
-	// a client sends to the server only
-	CNetworkPacket packet;
-	int commands = 0;
-	REQUIRE(Receive(serverSocket, packet, commands));
-	CHECK(commands == 1);
-	CHECK(packet.Header.Type[0] == MessageQuit);
-	CHECK(packet.Header.Cycle == 21);
-	CHECK(packet.Header.OrigPlayer == OtherPlayer);
-	CNetworkCommandQuit nc;
-	REQUIRE(packet.Command[0].size() == nc.Size());
-	nc.Deserialize(packet.Command[0].data());
-	CHECK(nc.player == OtherPlayer);
+	// by the own clock: nobody is told
 	CHECK(serverSocket.HasDataToRead(200) == false);
 	CHECK(otherSocket.HasDataToRead(200) == false);
 }
@@ -553,7 +447,7 @@ TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: the time-out counts
 	REQUIRE(serverSocket.IsValid());
 
 	// player 2 has just been heard; then a great number of frames is drawn in no time
-	Parse(SyncPacket(OtherPlayer, 22, 0x1111), serverHost);
+	Parse(SyncPacket(OtherPlayer, 22, 0x1111), otherHost);
 	const unsigned long savedFrameCounter = FrameCounter;
 	FrameCounter += 1000000;
 	NetworkRecover();
@@ -561,13 +455,15 @@ TEST_CASE_FIXTURE(InGameNetworkWithSockets, "in-game packet: the time-out counts
 
 	CHECK(HasStored(21, OtherPlayer) == false);
 	CHECK(NetworkTestPlayerQuit(OtherPlayer) == false);
-	// only the resend request went out
+	// only the resend request went out, to every other device
 	CNetworkPacket packet;
 	int commands = 0;
 	REQUIRE(Receive(serverSocket, packet, commands));
 	CHECK(packet.Header.Type[0] == MessageResend);
 	CHECK(packet.Header.OrigPlayer == 255);
 	CHECK(serverSocket.HasDataToRead(200) == false);
+	REQUIRE(Receive(otherSocket, packet, commands));
+	CHECK(packet.Header.Type[0] == MessageResend);
 }
 
 TEST_CASE_FIXTURE(NetworkInit, "server start: a client which does not answer ends the wait")
@@ -649,7 +545,6 @@ class MeshNetwork : public InGameNetworkWithSockets
 public:
 	MeshNetwork()
 	{
-		NetMesh = true;
 		NetworkTestTakeMeshMessages();
 		droppedAtStart = NetworkTestMeshDropped();
 	}
@@ -773,7 +668,6 @@ public:
 			} else if (header.GetSubType() == ICMState && len == int(CInitMessage_State::Size())) {
 				CInitMessage_State state;
 				state.Deserialize(buf);
-				stateMesh = state.mesh;
 				++states;
 				const CInitMessage_Header go(MessageInit_FromClient, ICMGo);
 				NetworkSendICMessage(socket, serverHost, go);
@@ -805,7 +699,6 @@ public:
 	CInitMessage_Config config;
 	int configs = 0;
 	int states = 0;
-	int stateMesh = -1;
 	bool go = false;
 private:
 	unsigned long lastAck = 0;
@@ -821,8 +714,7 @@ public:
 		localHost("127.0.0.1", port),
 		client1(CHost("127.0.0.1", port + 1), localHost, withMask, mask1),
 		client2(CHost("127.0.0.1", port + 2), localHost, withMask, mask2),
-		savedRandomPlacement(NoRandomPlacementMultiplayer),
-		savedMeshWanted(GetNetMesh())
+		savedRandomPlacement(NoRandomPlacementMultiplayer)
 	{
 		NetworkFildes.Open(localHost);
 		for (int i = 0; i != PlayerMax; ++i) {
@@ -844,8 +736,6 @@ public:
 		NetConnectRunning = 0;
 		NetConnectType = 0;
 		NetPlayers = 0;
-		NetMesh = false;
-		SetNetMesh(savedMeshWanted);
 		NoRandomPlacementMultiplayer = savedRandomPlacement;
 		OnlineContextHandler = std::move(savedOnline);
 		for (int i = 0; i != PlayerMax; ++i) {
@@ -891,7 +781,6 @@ public:
 private:
 	PlayerTypes savedPlayerType[PlayerMax];
 	bool savedRandomPlacement;
-	bool savedMeshWanted;
 	std::unique_ptr<OnlineContext> savedOnline;
 };
 
@@ -927,20 +816,6 @@ TEST_CASE_FIXTURE(MeshNetwork, "mesh: a client sends its packet to every other d
 	}
 }
 
-TEST_CASE_FIXTURE(MeshNetwork, "mesh off: a client sends its packet to the server only")
-{
-	NetMesh = false;
-	NetworkQuitGame();
-
-	CNetworkPacket packet;
-	int commands = 0;
-	REQUIRE(Receive(serverSocket, packet, commands));
-	CHECK(packet.Header.Type[0] == MessageQuit);
-	CHECK(packet.Header.OrigPlayer == LocalPlayer);
-	CHECK(serverSocket.HasDataToRead(100) == false);
-	CHECK(otherSocket.HasDataToRead(200) == false);
-}
-
 TEST_CASE_FIXTURE(MeshNetwork, "mesh: the server does not pass on the packets of other players")
 {
 	BecomeServer();
@@ -966,30 +841,9 @@ TEST_CASE_FIXTURE(MeshNetwork, "mesh: the server does not pass on the packets of
 	}
 }
 
-TEST_CASE_FIXTURE(MeshNetwork, "mesh off: the server passes the packet of a client on to the other clients")
-{
-	NetMesh = false;
-	BecomeServer();
-	CUDPSocket &clientSocket = serverSocket;
-
-	Parse(SyncPacket(OtherPlayer, 25, 0x1111), otherHost);
-	CHECK(StoredSeed(25, OtherPlayer) == 0x1111);
-
-	CNetworkPacket packet;
-	int commands = 0;
-	REQUIRE(Receive(clientSocket, packet, commands));
-	CHECK(commands == 1);
-	CHECK(packet.Header.Type[0] == MessageSync);
-	CHECK(packet.Header.Cycle == 25);
-	CHECK(packet.Header.OrigPlayer == OtherPlayer);
-	CHECK(clientSocket.HasDataToRead(100) == false);
-	// not back to the player it came from
-	CHECK(otherSocket.HasDataToRead(200) == false);
-}
-
 TEST_CASE_FIXTURE(MeshNetwork, "mesh: the packet of a player is taken from the address of that player only")
 {
-	// the server names player 2, as it does when it passes a packet on in the star
+	// the server names player 2
 	Parse(SyncPacket(OtherPlayer, 25, 0x1111), serverHost);
 	CHECK(HasStored(25, OtherPlayer) == false);
 	// player 2 names the server, and an address nobody plays at names player 2
@@ -1010,10 +864,6 @@ TEST_CASE_FIXTURE(MeshNetwork, "mesh: the packet of a player is taken from the a
 	Parse(SyncPacket(ServerPlayer, 25, 0x6666), serverHost);
 	CHECK(StoredSeed(25, ServerPlayer) == 0x6666);
 
-	// with the mesh off the server may name player 2 again
-	NetMesh = false;
-	Parse(SyncPacket(OtherPlayer, 27, 0x7777), serverHost);
-	CHECK(StoredSeed(27, OtherPlayer) == 0x7777);
 }
 
 TEST_CASE_FIXTURE(MeshNetwork, "mesh: a request for a missing packet is answered to the asker directly")
@@ -1083,13 +933,10 @@ TEST_CASE_FIXTURE(MeshNetwork, "mesh message: taken from the address of the host
 	CHECK(NetworkTestTakeMeshMessages().empty());
 	CHECK(Dropped() == 3 + bytes.size() + 2);
 
-	// the right one again; and not when the game is no mesh
+	// the right one again
 	NetworkTestParseMeshEvent(bytes.data(), int(bytes.size()), otherHost);
 	CHECK(NetworkTestTakeMeshMessages().size() == 1);
-	NetMesh = false;
-	NetworkTestParseMeshEvent(bytes.data(), int(bytes.size()), otherHost);
-	CHECK(NetworkTestTakeMeshMessages().empty());
-	CHECK(Dropped() == 3 + bytes.size() + 3);
+	CHECK(Dropped() == 3 + bytes.size() + 2);
 }
 
 TEST_CASE_FIXTURE(MeshNetwork, "mesh message: sent to one device or to every other device, under the own host slot")
@@ -1131,8 +978,6 @@ TEST_CASE_FIXTURE(MeshNetwork, "mesh message: sent to one device or to every oth
 
 TEST_CASE_FIXTURE(MeshNetwork, "mesh probe: answered to the device in the host slot it names")
 {
-	NetMesh = false; // the probes travel before the game, when the mesh is not on yet
-
 	// host slot 2 probes: the answer names our slot
 	std::vector<unsigned char> probe = ProbeBytes(false, 2);
 	REQUIRE(probe.size() == mesh::kWireProbeSize);
@@ -1182,8 +1027,7 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 	REQUIRE(thirdSocket.IsValid());
 	REQUIRE(NetworkFildes.IsValid());
 
-	for (const bool meshAtTheEnd : {true, false}) {
-		CAPTURE(meshAtTheEnd);
+	{
 		REQUIRE(NetworkSetupServerAddress("127.0.0.1", 6521) == 0);
 		NetworkInitClientConnect();
 		NetworkTestSetClientState(ccs_synced);
@@ -1205,7 +1049,6 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 		config.hosts[3].Port = thirdHost.getPort();
 		config.hosts[3].PlyNr = 3;
 		config.hosts[3].SetName("third");
-		config.mesh = 1;
 		const std::vector<unsigned char> configBytes = config.Serialize();
 		REQUIRE(NetworkParseSetupEvent(configBytes.data(), int(configBytes.size()), serverHost));
 
@@ -1226,7 +1069,6 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 		CHECK(FindHostIndexBy(otherHost) == 2);
 		CHECK(FindHostIndexBy(thirdHost) == 3);
 		CHECK(Hosts[4].IsValid() == false);
-		CHECK(NetMesh == false);
 		CHECK(NetworkTestMeshProbeMask() == 0);
 
 		// it probes the two other clients, not the server, and answers the config without a peer
@@ -1279,13 +1121,11 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 		CHECK(otherSocket.HasDataToRead(100) == false);
 		CHECK(MeshNetwork::ReceiveBytes(thirdSocket).size() == mesh::kWireProbeSize);
 
-		// the final state of the server says how the game runs
+		// the final state of the server
 		CInitMessage_State state(MessageInit_FromServer, ServerSetupState);
-		state.mesh = meshAtTheEnd ? 1 : 0;
 		const std::vector<unsigned char> stateBytes = state.Serialize();
 		REQUIRE(NetworkParseSetupEvent(stateBytes.data(), int(stateBytes.size()), serverHost));
 		CHECK(GetNetworkState() == ccs_started);
-		CHECK(NetMesh == meshAtTheEnd);
 
 		while (serverSocket.HasDataToRead(0)) {
 			MeshNetwork::ReceiveBytes(serverSocket);
@@ -1295,36 +1135,6 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 		}
 	}
 
-	// a config which does not ask for the mesh: the plain answer, no probe, and no mesh whatever the state says
-	NetworkInitClientConnect();
-	NetworkTestSetClientState(ccs_synced);
-	CInitMessage_Config config;
-	config.clientIndex = 1;
-	config.hosts[0].SetName("server");
-	config.hosts[1].PlyNr = 1;
-	config.hosts[1].SetName("local");
-	config.hosts[2].Host = otherHost.getIp();
-	config.hosts[2].Port = otherHost.getPort();
-	config.hosts[2].PlyNr = 2;
-	config.hosts[2].SetName("other");
-	const std::vector<unsigned char> configBytes = config.Serialize();
-	REQUIRE(NetworkParseSetupEvent(configBytes.data(), int(configBytes.size()), serverHost));
-	CHECK(CHost(Hosts[0].Host, Hosts[0].Port) == serverHost);
-	CHECK(CHost(Hosts[2].Host, Hosts[2].Port) == otherHost);
-	for (int i = 0; i != 100 && !serverSocket.HasDataToRead(10); ++i) {
-		NetworkProcessClientRequest();
-	}
-	const std::vector<unsigned char> bytes = MeshNetwork::ReceiveBytes(serverSocket);
-	CHECK(bytes.size() == CInitMessage_Header::Size());
-	CHECK(otherSocket.HasDataToRead(200) == false);
-	CHECK(thirdSocket.HasDataToRead(0) == false);
-	CInitMessage_State state(MessageInit_FromServer, ServerSetupState);
-	state.mesh = 1;
-	const std::vector<unsigned char> stateBytes = state.Serialize();
-	REQUIRE(NetworkParseSetupEvent(stateBytes.data(), int(stateBytes.size()), serverHost));
-	CHECK(GetNetworkState() == ccs_started);
-	CHECK(NetMesh == false);
-
 	NetworkFildes.Close();
 	serverSocket.Close();
 	otherSocket.Close();
@@ -1333,7 +1143,6 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 	NetConnectType = 0;
 	NetPlayers = 0;
 	NetLocalHostsSlot = 0;
-	NetMesh = false;
 	for (int i = 0; i != PlayerMax; ++i) {
 		Hosts[i].Clear();
 	}
@@ -1341,13 +1150,12 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 	LocalSetupState.Clear();
 }
 
-TEST_CASE("server start: every client reached every other client, the game is a mesh")
+TEST_CASE("server start: every client reached every other client, the game starts")
 {
 	ServerStart start(6531, true, 0x0004, 0x0002);
 	REQUIRE(NetworkFildes.IsValid());
 	REQUIRE(start.client1.socket.IsValid());
 	REQUIRE(start.client2.socket.IsValid());
-	SetNetMesh(true);
 
 	// what the server holds: itself without address, each client at the address it joined from
 	CHECK(NetLocalHostsSlot == 0);
@@ -1358,7 +1166,7 @@ TEST_CASE("server start: every client reached every other client, the game is a 
 	const unsigned long taken = start.Start(result);
 	CHECK(result == true);
 	CHECK(taken < 2000); // the answers with the peers end the wait, not the bound
-	CHECK(NetMesh == true);
+	CHECK(NetworkServerStartFailure().empty());
 	CHECK(NetworkTestMeshProbeFailed().empty());
 	CHECK(CHost(Hosts[1].Host, Hosts[1].Port) == start.client1.host);
 	CHECK(CHost(Hosts[2].Host, Hosts[2].Port) == start.client2.host);
@@ -1366,10 +1174,8 @@ TEST_CASE("server start: every client reached every other client, the game is a 
 	for (const FakeClient *client : {&start.client1, &start.client2}) {
 		CHECK(client->configs >= 1);
 		CHECK(client->states >= 1);
-		CHECK(client->stateMesh == 1);
 		CHECK(client->go == true);
 		// the table of the config: the server without address, both clients as the server sees them
-		CHECK(client->config.mesh == 1);
 		CHECK(client->config.hosts[0].Host == 0);
 		CHECK(client->config.hosts[0].Port == 0);
 		CHECK(CHost(client->config.hosts[1].Host, client->config.hosts[1].Port) == start.client1.host);
@@ -1380,65 +1186,45 @@ TEST_CASE("server start: every client reached every other client, the game is a 
 	CHECK(start.client2.config.clientIndex == 2);
 }
 
-TEST_CASE("server start: a pair of clients which do not reach each other, the game runs over the server")
+TEST_CASE("server start: a pair of clients which do not reach each other, the start is given up")
 {
 	// client 1 never hears client 2
 	ServerStart start(6534, true, 0x0000, 0x0002);
 	REQUIRE(NetworkFildes.IsValid());
-	SetNetMesh(true);
 
-	bool result = false;
+	bool result = true;
 	const unsigned long taken = start.Start(result);
-	CHECK(result == true);
+	CHECK(result == false);
 	CHECK(taken >= 2000); // the bound of the probe
 	CHECK(taken < 4000);
-	CHECK(NetMesh == false);
+	CHECK(NetworkServerStartFailure() == "no_path");
 	const std::vector<std::pair<int, int>> failed = NetworkTestMeshProbeFailed();
 	REQUIRE(failed.size() == 1);
 	CHECK(failed[0].first == 1);
 	CHECK(failed[0].second == 2);
+	CHECK(Hosts[1].IsValid() == false);
+	CHECK(Hosts[2].IsValid() == false);
 
 	for (const FakeClient *client : {&start.client1, &start.client2}) {
-		CHECK(client->config.mesh == 1);
-		CHECK(client->states >= 1);
-		CHECK(client->stateMesh == 0);
-		CHECK(client->go == true);
+		CHECK(client->configs >= 1);
+		CHECK(client->states == 0);
+		CHECK(client->go == false);
 	}
 }
 
-TEST_CASE("server start: the mesh not asked for, the start is the one of the star")
-{
-	// the clients answer with the plain header, as they do to a config without the mesh byte
-	ServerStart start(6537, false, 0, 0);
-	REQUIRE(NetworkFildes.IsValid());
-	SetNetMesh(false);
-
-	bool result = false;
-	const unsigned long taken = start.Start(result);
-	CHECK(result == true);
-	CHECK(taken < 2000);
-	CHECK(NetMesh == false);
-	for (const FakeClient *client : {&start.client1, &start.client2}) {
-		CHECK(client->config.mesh == 0);
-		CHECK(client->stateMesh == 0);
-		CHECK(client->go == true);
-	}
-}
-
-TEST_CASE("server start: clients which answer without peers get no mesh")
+TEST_CASE("server start: clients which answer without peers get no game")
 {
 	ServerStart start(6540, false, 0, 0);
 	REQUIRE(NetworkFildes.IsValid());
-	SetNetMesh(true);
 
-	bool result = false;
+	bool result = true;
 	const unsigned long taken = start.Start(result);
-	CHECK(result == true);
+	CHECK(result == false);
 	CHECK(taken >= 2000);
-	CHECK(NetMesh == false);
+	CHECK(NetworkServerStartFailure() == "no_path");
 	CHECK(NetworkTestMeshProbeFailed().size() == 2);
-	CHECK(start.client1.stateMesh == 0);
-	CHECK(start.client2.stateMesh == 0);
+	CHECK(start.client1.states == 0);
+	CHECK(start.client2.states == 0);
 }
 
 TEST_CASE("spell id: the type byte of a command packet has no room for the mesh byte")
@@ -1477,6 +1263,7 @@ public:
 		std::vector<mesh::Msg> meshes;                          /// mesh messages of the engine
 		std::vector<CNetworkPacket> packets;                    /// command packets
 		std::vector<std::pair<int, CNetworkPacket>> relays;     /// (host slot of the sender, packet)
+		std::vector<std::tuple<int, uint32_t, std::string>> chats; /// (host slot of the sender, number, text)
 	};
 
 	/// With `release` the two other devices have loaded and the game runs; without it the game is held
@@ -1529,6 +1316,7 @@ public:
 		params.loadedMs = 50;
 		params.lingerQuietMs = 300;
 		params.lingerCapMs = 1000;
+		params.chatMs = 60;
 		return params;
 	}
 
@@ -1612,8 +1400,13 @@ public:
 			int slot = -1;
 			const unsigned char *relayed = nullptr;
 			size_t relayedSize = 0;
+			uint32_t chatNumber = 0;
+			const char *chatText = nullptr;
+			size_t chatSize = 0;
 			if (mesh::Deserialize(buf, len, &message, &slot)) {
 				seen.meshes.push_back(message);
+			} else if (mesh::DeserializeChat(buf, len, &slot, &chatNumber, &chatText, &chatSize)) {
+				seen.chats.emplace_back(slot, chatNumber, std::string(chatText, chatSize));
 			} else if (mesh::DeserializeRelay(buf, len, &slot, &relayed, &relayedSize)) {
 				CNetworkPacket packet;
 				int commands = 0;
@@ -1725,35 +1518,6 @@ public:
 
 }
 
-TEST_CASE_FIXTURE(InGameNetworkWithSockets, "mesh off: there is no model")
-{
-	CHECK(NetworkTestMeshStart(mesh::Params()) == false);
-	CHECK(NetworkTestMeshGlue() == nullptr);
-	CHECK(NetworkGetWaitState().Player == -1);
-	CHECK(NetworkGetWaitState().SelfOut == false);
-	NetworkTestMeshUpdate(); // nothing
-	// no start barrier: the game runs from its first frame, nothing is said while it loads
-	GameCycle = 0;
-	NetworkOnStartGame();
-	CHECK(NetworkInSync);
-	CHECK(NetworkIsHeld() == false);
-	CHECK(NetworkGetWaitState().Held == false);
-	std::this_thread::sleep_for(std::chrono::milliseconds(260));
-	NetworkLoadingPing();
-	NetworkGameLoaded();
-	CHECK(serverSocket.HasDataToRead(100) == false);
-	CHECK(otherSocket.HasDataToRead(0) == false);
-	CHECK(NetworkGetQuitReason(OtherPlayer) == -1);
-	GameCycle = 20;
-	// the request for a missing packet is the one of the star
-	NetworkRecover();
-	CNetworkPacket packet;
-	int commands = 0;
-	REQUIRE(Receive(serverSocket, packet, commands));
-	CHECK(packet.Header.Type[0] == MessageResend);
-	CHECK(otherSocket.HasDataToRead(100) == false);
-}
-
 TEST_CASE_FIXTURE(MeshGame, "mesh game: cycles run while every device delivers, and stop at the first missing packet")
 {
 	REQUIRE(started);
@@ -1787,7 +1551,7 @@ TEST_CASE_FIXTURE(MeshGame, "mesh game: cycles run while every device delivers, 
 			CHECK(seen.packets[i].Header.Cycle == 11 + i);
 		}
 		CHECK(seen.relays.empty());
-		// the wait asked for the missing packets with the model's request, not with the star's
+		// the wait asked for the missing packets with the model's request, not with the one of the queue
 		bool asked = false;
 		for (const mesh::Msg &message : seen.meshes) {
 			asked = asked || (message.kind == mesh::Kind::Need && message.cycle == 11 && message.mask == 0x5);
@@ -1867,7 +1631,7 @@ TEST_CASE_FIXTURE(MeshGame, "mesh game: a silent player is waited for and remove
 	CHECK(NetworkInSync == false);
 	CHECK(NetworkTestPlayerQuit(OtherPlayer) == false);
 	CHECK(QuitStored(16, OtherPlayer) == false);
-	// no request of the star, no quit made up for the silent player
+	// no request of the queue, no quit made up for the silent player
 	const Seen other = Take(otherSocket);
 	packets.insert(packets.end(), other.packets.begin(), other.packets.end());
 	for (const CNetworkPacket &packet : packets) {
@@ -2162,7 +1926,7 @@ TEST_CASE_FIXTURE(MeshGame, "mesh game: a packet which does not arrive is asked 
 	Send(serverSocket, wrongSlot);                                 // under the host slot of another device
 	EngineReadsAll(200);
 	CHECK(Dropped() == 2);
-	Send(serverSocket, Idle(OtherPlayer, 16));                     // the bare packet, as the star passed it on
+	Send(serverSocket, Idle(OtherPlayer, 16));                     // the bare packet under his name
 	Send(serverSocket, RelayBytes(QuitPacket(OtherPlayer, 16, LocalPlayer), 0)); // a quit of somebody else in it
 	Send(serverSocket, RelayBytes(Idle(LocalPlayer, 40), 0));      // our own packet
 	Send(serverSocket, RelayBytes(Idle(7, 16), 0));                // a player who is not in the game
@@ -2629,6 +2393,185 @@ TEST_CASE_FIXTURE(MeshGame, "mesh game: a pause for everybody begins with the cy
 	CHECK(RunCycles() == 15); // 46..60
 }
 
+TEST_CASE_FIXTURE(MeshGame, "watching: no order leaves the device, its packets and the pause still do")
+{
+	struct StopWatching {
+		~StopWatching() { NetworkSetWatching(false); }
+	} stopWatching;
+
+	REQUIRE(started);
+	GamePaused = false;
+	Deliver(40, 40);
+	CHECK(RunCycles(5) == 5);
+	Take(serverSocket);
+	Take(otherSocket);
+
+	// the player is defeated and watches: the screen takes no order, the map is drawn whole
+	CHECK(NetworkIsWatching() == false);
+	NetworkSetWatching(true);
+	CHECK(NetworkIsWatching());
+	CHECK(GameObserve);
+	CHECK(ReplayRevealMap);
+
+	// an order and a change of diplomacy are not taken
+	CUnit unit;
+	NetworkSendCommand(MessageCommandStop, unit, 0, 0, nullptr, nullptr, EFlushMode::On);
+	NetworkSendExtendedCommand(ExtendedMessageDiplomacy, 1, 2, 3, 4, 0);
+	CHECK(RunCycles(5) == 5); // 6..10
+	for (unsigned long cycle = 16; cycle <= 20; ++cycle) {
+		CHECK(StoredType(cycle, LocalPlayer) == MessageSync);
+	}
+	// the device sent its packet for every cycle all the same: nobody waits for it
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	for (CUDPSocket *socket : {&serverSocket, &otherSocket}) {
+		const Seen seen = Take(*socket);
+		REQUIRE(seen.packets.size() == 5);
+		for (size_t i = 0; i != seen.packets.size(); ++i) {
+			CHECK(seen.packets[i].Header.Cycle == 16 + i);
+			CHECK(seen.packets[i].Header.Type[0] == MessageSync);
+			CHECK(seen.packets[i].Header.Type[1] == MessageNone);
+		}
+	}
+
+	// the pause for everybody is still his to give, and to end
+	CHECK(NetworkTogglePause());
+	CHECK(RunCycles() == 11); // 11..21
+	CHECK(GameCycle == 21);
+	CHECK(StoredType(21, LocalPlayer) == MessageExtendedCommand);
+	CHECK(NetworkIsPaused());
+	CHECK(NetworkTogglePause());
+	CHECK(NetworkIsPaused() == false);
+	CHECK(NetworkInSync);
+
+	// the end of the game: the next one is played
+	NetworkSetWatching(false);
+	CHECK(NetworkIsWatching() == false);
+	CHECK(GameObserve == false);
+	CHECK(ReplayRevealMap == false);
+	NetworkSendExtendedCommand(ExtendedMessageDiplomacy, 1, 2, 3, 4, 0);
+	CHECK(RunCycles(1) == 1);
+	CHECK(StoredType(32, LocalPlayer) == MessageExtendedCommand);
+}
+
+TEST_CASE_FIXTURE(MeshGame, "mesh game: a chat line travels beside the commands, also while the game is paused")
+{
+	REQUIRE(started);
+	GamePaused = false;
+	LauncherChatReset();
+	Deliver(40, 40);
+	CHECK(RunCycles(5) == 5);
+	CHECK(NetworkTogglePause());
+	CHECK(RunCycles() == 11);
+	REQUIRE(NetworkIsPaused());
+	Take(serverSocket);
+	Take(otherSocket);
+	CHECK(NetworkChatIsDirect());
+
+	// the local player says a line: both others get it with its text, no cycle runs
+	CHECK(NetworkChat("  shall we\tgo on?  "));
+	CHECK(LauncherChatCount() == 1);
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	for (CUDPSocket *socket : {&serverSocket, &otherSocket}) {
+		const Seen seen = Take(*socket);
+		REQUIRE(seen.chats.size() == 1);
+		CHECK(seen.chats[0] == std::make_tuple(1, uint32_t(1), std::string("shall we go on?")));
+	}
+	// only the server answers: the other one gets the line again. Both stand and say so meanwhile.
+	const auto alive = [&]() {
+		mesh::Msg stands;
+		stands.kind = mesh::Kind::Pause;
+		stands.player = 1;
+		stands.flags = 1;
+		stands.cycle = 16;
+		Send(serverSocket, MeshBytes(stands, 0));
+		Send(otherSocket, MeshBytes(stands, 2));
+	};
+	mesh::Msg answer;
+	answer.kind = mesh::Kind::ChatAck;
+	answer.data = 1;
+	alive();
+	Send(serverSocket, MeshBytes(answer, 0));
+	EngineReadsAll(50);
+	Take(serverSocket);
+	Take(otherSocket);
+	std::this_thread::sleep_for(std::chrono::milliseconds(80)); // beyond the interval of the repeat
+	alive();
+	EngineReadsAll(50);
+	NetworkTestMeshUpdate();
+	std::this_thread::sleep_for(std::chrono::milliseconds(30));
+	CHECK(Take(serverSocket).chats.empty());
+	const Seen again = Take(otherSocket);
+	REQUIRE(again.chats.size() >= 1);
+	CHECK(again.chats[0] == std::make_tuple(1, uint32_t(1), std::string("shall we go on?")));
+	alive();
+	Send(otherSocket, MeshBytes(answer, 2));
+	EngineReadsAll(50);
+	Take(otherSocket);
+
+	// a line of the player in host slot 2 arrives twice: taken once, answered twice
+	unsigned char buf[mesh::kWireChatMaxSize];
+	const size_t size = mesh::SerializeChat(1, "yes", 3, 2, buf, sizeof(buf));
+	REQUIRE(size != 0);
+	const std::vector<unsigned char> line(buf, buf + size);
+	Send(otherSocket, line);
+	Send(otherSocket, line);
+	EngineReadsAll(200);
+	CHECK(LauncherChatCount() == 2);
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	int answers = 0;
+	for (const mesh::Msg &message : Take(otherSocket).meshes) {
+		answers += (message.kind == mesh::Kind::ChatAck && message.data == 1) ? 1 : 0;
+	}
+	CHECK(answers == 2);
+	// the same bytes from the address of another device are dropped
+	const unsigned dropped = NetworkTestMeshDropped();
+	Send(serverSocket, line);
+	EngineReadsAll(100);
+	CHECK(NetworkTestMeshDropped() == dropped + 1);
+	CHECK(LauncherChatCount() == 2);
+	// nothing of it let the game go on
+	CHECK(NetworkIsPaused());
+	CHECK(GameCycle == 16);
+	// no line: nothing is said
+	CHECK(NetworkChat(" \t ") == false);
+	CHECK(LauncherChatCount() == 2);
+}
+
+TEST_CASE("chat text: controls become spaces, the ends are trimmed, the length is bounded between characters")
+{
+	CHECK(NetworkChatText("") == "");
+	CHECK(NetworkChatText(" \r\n\t ") == "");
+	CHECK(NetworkChatText("  a\nb\x7f c  ") == "a b  c");
+	CHECK(NetworkChatText(std::string(300, 'x')) == std::string(120, 'x'));
+	// two-byte characters: 120 of them fit the 240 bytes of the wire
+	std::string wide;
+	for (int i = 0; i < 200; ++i) wide += "\xC4\x85";
+	CHECK(NetworkChatText(wide) == wide.substr(0, 240));
+	// four-byte characters: cut between two of them, never inside one
+	std::string emoji;
+	for (int i = 0; i < 100; ++i) emoji += "\xF0\x9F\x99\x82";
+	const std::string cut = NetworkChatText(emoji);
+	CHECK(cut.size() <= mesh::kWireChatMaxText);
+	CHECK(cut.size() % 4 == 0);
+	CHECK(cut.size() >= 236);
+	CHECK(cut == emoji.substr(0, cut.size()));
+}
+
+TEST_CASE_FIXTURE(MeshGameHeld, "mesh start: no chat line before the game has begun")
+{
+	REQUIRE(started);
+	LauncherChatReset();
+	CHECK(NetworkChat("hello") == false);
+	CHECK(LauncherChatCount() == 0);
+}
+
+TEST_CASE_FIXTURE(InGameNetworkWithSockets, "no model: a chat line is a command of the stream")
+{
+	CHECK(NetworkChatIsDirect() == false);
+	CHECK(NetworkChat("hello"));
+	CHECK(serverSocket.HasDataToRead(50) == false); // nothing beside the stream
+}
+
 TEST_CASE_FIXTURE(MeshGameHeld, "mesh start: no pause before the game has begun")
 {
 	REQUIRE(started);
@@ -2638,7 +2581,7 @@ TEST_CASE_FIXTURE(MeshGameHeld, "mesh start: no pause before the game has begun"
 	CHECK(GamePaused == false);
 }
 
-TEST_CASE_FIXTURE(InGameNetworkWithSockets, "mesh off: the pause button does nothing")
+TEST_CASE_FIXTURE(InGameNetworkWithSockets, "no model: the pause button does nothing")
 {
 	GamePaused = false;
 	CHECK(NetworkTogglePause() == false);

@@ -47,9 +47,9 @@ const WC2MissionRules &CurrentMissionRules();
 /// PORTAL-ATTACK-ORDER: in the mission whose rule is 0x1E (Beyond the Dark Portal, Human XII) the
 /// neutral Dark Portal takes damage from Khadgar only - the mission's own objective says "Only
 /// Khadgar can destroy the Portal", and on the original a group without him left it at 5000 / 5000
-/// while a group with him destroyed it (work/agent-orig-4/ORIG4.md, sections 7-11). False = this hit
-/// does nothing. In the mission of rule 0x08 (Tides of Darkness, Human XIV) the portal takes ordinary
-/// damage; in every other campaign mission it takes none (measured, ORIG3.md item 8, ORIG5.md).
+/// while a group with him destroyed it. False = this hit does nothing. In the mission of rule 0x08
+/// (Tides of Darkness, Human XIV) the portal takes ordinary damage; in every other campaign
+/// mission it takes none (measured on the original).
 /// Outside the campaigns (custom games) and for every other target: true - not measured there.
 class CUnit;
 bool MissionAllowsDamage(const CUnit *attacker, const CUnit &target);

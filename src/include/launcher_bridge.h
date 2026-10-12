@@ -28,6 +28,8 @@
 #ifndef __LAUNCHER_BRIDGE_H__
 #define __LAUNCHER_BRIDGE_H__
 
+#include <string>
+
 //@{
 
 /**
@@ -51,13 +53,29 @@ extern int LauncherPollCommand();
 enum {
 	LauncherMsgLoadingBegin = 1, /// loading has begun; the host shows its loading screen
 	LauncherMsgLoadingEnd = 2,   /// the first frame after loading is on screen
-	LauncherMsgGameEnded = 4     /// the game's last picture is on screen; the host may copy it
+	LauncherMsgGameEnded = 4,    /// the game's last picture is on screen; the host may copy it
+	LauncherMsgChatLine = 6,     /// a chat line was added; the value is how many were added in all
+	LauncherMsgChat = 7          /// a game with other people can be talked in (1) or no longer (0)
 };
 
 /// Command numbers the host leaves for the engine itself (the scripts have their own).
 enum {
 	LauncherCmdFrameTaken = 9    /// the host has dealt with LauncherMsgGameEnded
 };
+
+/**
+**  The chat of a game with other people, as the host shows it. The engine adds the lines it
+**  shows (its own thread); the host reads the last ones and leaves the lines its player has
+**  typed (its thread). Both sides only copy text under one lock.
+*/
+/// Forget the lines and what was typed (a new game)
+extern void LauncherChatReset();
+/// A line was said: colour of the player as 0xRRGGBB (-1 = a line without a player), his name, the text
+extern void LauncherChatAdd(int rgb, const std::string &name, const std::string &text);
+/// Take the next line the host's player has typed; false if there is none
+extern bool LauncherChatTakeTyped(std::string &text);
+/// How many lines were added since the last reset (the tests)
+extern unsigned LauncherChatCount();
 
 /**
 **  A game has just ended: put its last picture on screen once more, without the banner that

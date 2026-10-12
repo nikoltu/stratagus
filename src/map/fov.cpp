@@ -148,12 +148,57 @@ void CFieldOfView::Refresh(const CPlayer &player, const CUnit &unit, const Vec2i
 		ProceedShadowCasting(pos, width, height, range + 1);
 		ResetShadowCaster();
 	} else {
-		ProceedSimpleRadial(player, pos, width, height, range, marker);
+		// A ship or a flyer is a one-tile unit in the original and lights from its own tile
+		// (EVIDENCE-SIGHT-002, work/agent-orig-13/ORIG13.md); only buildings light from the middle.
+		const CUnit *holder = unit.Container ? unit.Container : &unit;
+		if (holder->Type->Building) {
+			ProceedSimpleRadial(player, pos, width, height, range, marker);
+		} else {
+			ProceedSimpleRadial(player, pos, 1, 1, range, marker);
+		}
 	}
 }
 
 /**
+**  Half width of a lit row of the sight shape: the tiles centre.x - n .. centre.x + n of the row
+**  `dy` tiles above or below the centre tile are lit.
+**
+**  @param range  Sight range
+**  @param dy     Row offset from the centre tile
+**
+**  @return       n, or -1 when the row is not lit
+*/
+int SightHalfWidth(int range, int dy)
+{
+	if (dy < 0) {
+		dy = -dy;
+	}
+	if (range <= 0 || dy > range) {
+		return -1;
+	}
+	// Outlines measured on the original (EVIDENCE-SIGHT-003, work/agent-orig-12/ORIG12.md):
+	// the square |dx|, |dy| <= r without 1 tile per corner (r 3, 4) or 3 tiles per corner (r 5, 9).
+	switch (range) {
+		case 3: return dy < 3 ? 3 : 2;                  // o12_21 farm, o12_24 barracks
+		case 4: return dy < 4 ? 4 : 3;                  // o12_15 peasant / hall, o12_37 hall
+		case 5: return dy < 4 ? 5 : (dy == 4 ? 4 : 3);  // o12_39 archer
+		case 9: return dy < 8 ? 9 : (dy == 8 ? 8 : 7);  // o12_29 scout tower
+		default: break;
+	}
+	// FITTED form for the radii not measured: dx^2 + dy^2 <= K r^2 with K = 13 / 8, inside the
+	// interval [1.605, 1.64) that the four measured radii allow.
+	int dx = range;
+	while (8 * (dx * dx + dy * dy) > 13 * range * range) {
+		--dx;
+	}
+	return dx;
+}
+
+/**
 **  Refresh the whole sight of unit by SimpleRadial algorithm. (Explore and make visible.)
+**
+**  The shape is that of a one-tile unit standing on the centre tile (pos.x + w / 2, pos.y + h / 2),
+**  whatever the size (EVIDENCE-SIGHT-001, work/agent-orig-12/ORIG12.md).
 **
 **  @param player  player to mark the sight for (not unit owner)
 **  @param pos     location to mark
@@ -166,40 +211,22 @@ void CFieldOfView::ProceedSimpleRadial(const CPlayer &player, const Vec2i &pos,
 									   const int16_t w, const int16_t h, const int16_t range,
 									   MapMarkerFunc *marker) const
 {
-	// Up hemi-cycle
-	const int16_t miny = std::max(-range, 0 - pos.y);
-	for (int16_t offsety = miny; offsety != 0; offsety++) {
-		const int16_t offsetx = isqrt(square(range + 1) - square(-offsety) - 1);
-		const int16_t minx = std::max(0, pos.x - offsetx);
-		const int16_t maxx = std::min(Map.Info.MapWidth, pos.x + w + offsetx);
-		Vec2i mpos(minx, pos.y + offsety);
-		const size_t index = mpos.y * Map.Info.MapWidth;
+	const int centerx = pos.x + w / 2;
+	const int centery = pos.y + h / 2;
+	const int miny = std::max(0, centery - range);
+	const int maxy = std::min(Map.Info.MapHeight - 1, centery + range);
 
-		for (mpos.x = minx; mpos.x < maxx; mpos.x++) {
-			marker(player, mpos.x + index);
+	for (int y = miny; y <= maxy; ++y) {
+		const int half = SightHalfWidth(range, y - centery);
+		if (half < 0) {
+			continue;
 		}
-	}
-	for (int16_t offsety = 0; offsety < h; offsety++) {
-		const int16_t minx = std::max(0, pos.x - range);
-		const int16_t maxx = std::min(Map.Info.MapWidth, pos.x + w + range);
-		Vec2i mpos(minx, pos.y + offsety);
-		const size_t index = mpos.y * Map.Info.MapWidth;
+		const int minx = std::max(0, centerx - half);
+		const int maxx = std::min(Map.Info.MapWidth - 1, centerx + half);
+		const size_t index = size_t(y) * Map.Info.MapWidth;
 
-		for (mpos.x = minx; mpos.x < maxx; mpos.x++) {
-			marker(player, mpos.x + index);
-		}
-	}
-	// bottom hemi-cycle
-	const int16_t maxy = std::min(range, int16_t(Map.Info.MapHeight - pos.y - h));
-	for (int16_t offsety = 0; offsety < maxy; offsety++) {
-		const int16_t offsetx = isqrt(square(range + 1) - square(offsety + 1) - 1);
-		const int16_t minx = std::max(0, pos.x - offsetx);
-		const int16_t maxx = std::min(Map.Info.MapWidth, pos.x + w + offsetx);
-		Vec2i mpos(minx, pos.y + h + offsety);
-		const size_t index = mpos.y * Map.Info.MapWidth;
-
-		for (mpos.x = minx; mpos.x < maxx; mpos.x++) {
-			marker(player, mpos.x + index);
+		for (int x = minx; x <= maxx; ++x) {
+			marker(player, x + index);
 		}
 	}
 }

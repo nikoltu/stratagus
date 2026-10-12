@@ -43,11 +43,17 @@ final class Screen {
 
     /**
      * The game window keeps its own layout (the engine's picture stays clear of a display
-     * cutout) and only hides the system bars. Call from onCreate and on regained focus.
+     * cutout) and only hides the system bars; on a low screen it also takes the rows the hidden
+     * bars leave. Call from onCreate and on regained focus.
      */
     static void hideBars(Activity a) {
         final Window w = a.getWindow();
         if (Build.VERSION.SDK_INT >= 30) {
+            // A low screen has too few rows to leave the hidden status bar's strip empty.
+            final android.util.DisplayMetrics m = a.getResources().getDisplayMetrics();
+            if (Math.min(m.widthPixels, m.heightPixels) < 1000) {
+                w.setDecorFitsSystemWindows(false);
+            }
             final WindowInsetsController c = w.getInsetsController();
             if (c != null) {
                 c.hide(WindowInsets.Type.systemBars());

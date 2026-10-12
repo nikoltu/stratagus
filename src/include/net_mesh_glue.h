@@ -45,11 +45,13 @@
 **  cycle is held (OnPacket), a device was heard (OnHeard), a mesh message arrived
 **  (OnMeshMessage), a cycle was executed (OnExecuted), the local player leaves
 **  (OnQuit), the pause command of a player ran (OnPause), the local player lets a
-**  paused game go on (OnResume), time passes (Tick).
+**  paused game go on (OnResume), the local player says a chat line (OnChat), a
+**  chat line arrived (OnChatMessage), time passes (Tick).
 **
 **  model -> engine (CMeshGlueEngine): send a mesh message, send a held packet to
 **  one device (the answer to a request), write the quit of a player into a cycle,
-**  the game is paused or goes on (SetPaused);
+**  the game is paused or goes on (SetPaused), send a chat line with its text
+**  (SendChat), a chat line of another player is new (ShowChat);
 **  and the answers CanExecute, Held, Lingering and WaitState.
 **
 **  The start: the game is held until every device has reported its load (the
@@ -60,6 +62,10 @@
 **
 **  The model's command (mesh::Kind::Cmd) never travels: it stands for a command
 **  packet of the engine. Its content is of no interest to the model.
+**
+**  A chat line is no part of the game. The model numbers the lines, repeats one
+**  until every device has answered and tells a line of another player once; the
+**  texts are kept here by the number.
 **
 **  Players: the model and the wire count in host slots, the engine in player
 **  numbers. PlayerOfSlot and SlotOfPlayer are the only translation.
@@ -75,6 +81,9 @@
 #include "network.h"
 
 #include <cstdint>
+#include <deque>
+#include <string>
+#include <utility>
 #include <vector>
 
 /*----------------------------------------------------------------------------
@@ -97,6 +106,10 @@ public:
 	virtual void InstallQuit(int player, unsigned long cycle, mesh::Reason reason) = 0;
 	/// The game is paused for everybody by a player, or goes on by a player
 	virtual void SetPaused(bool paused, int player) = 0;
+	/// Send the chat line with that number and text of the local player to the device in a host slot
+	virtual void SendChat(int hostSlot, uint32_t number, const std::string &text) = 0;
+	/// A chat line of another player has arrived for the first time
+	virtual void ShowChat(int player, const std::string &text) = 0;
 };
 
 class CMeshGlue
@@ -129,6 +142,10 @@ public:
 	void OnPause(int player, int64_t now);
 	/// The local player lets a paused game go on
 	void OnResume(int64_t now);
+	/// The local player says a chat line; false if it is not taken (out of the game, too many unanswered)
+	bool OnChat(const std::string &text, int64_t now);
+	/// A chat line with that number arrived from the address of that host slot
+	void OnChatMessage(int hostSlot, uint32_t number, const std::string &text, int64_t now);
 	/// Time passes: the start, silence, requests, the removal round
 	void Tick(int64_t now);
 
@@ -163,6 +180,8 @@ private:
 	int32_t waitLeft[mesh::kMaxPlayers] = {}; /// its time to the bound
 	bool selfOut = false;                  /// this device is out of the game, not by leaving
 	mesh::Reason selfOutReason = mesh::Reason::Lost;
+	std::deque<std::pair<uint32_t, std::string>> ownChat; /// the last own chat lines by number, for the repeats
+	const std::string *chatArrived = nullptr; /// text of the chat line the model is being told
 };
 
 //@}

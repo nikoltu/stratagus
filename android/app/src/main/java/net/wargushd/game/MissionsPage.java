@@ -39,9 +39,12 @@ final class MissionsPage {
     int difficulty = 1;
     private float scroll;
 
-    private Bitmap lock, map, buttonPlain, buttonPrimary;
-    private int mapAct = -1;
-    private String mapCode;
+    private volatile Bitmap lock, map, buttonPlain, buttonPrimary;
+    private volatile int mapAct = -1;
+    private volatile String mapCode;
+    private boolean framesAsked;
+    /** Asks for the page to be drawn again; may be called from any thread. */
+    Runnable redraw;
 
     // List dragging.
     private float downY, downScroll;
@@ -109,10 +112,22 @@ final class MissionsPage {
     }
 
     void draw(Canvas c, SkinKit kit) {
-        if (lock == null) {
-            lock = kit.atlasFrame("Modern_Graphics", "icon_lock", 80, 80);
-            buttonPlain = kit.atlasFrame("Modern_Widgets_Orc", "large", 1008, 126);
-            buttonPrimary = kit.atlasFrame("Modern_Widgets_Orc", "large_active", 1008, 126);
+        // Pictures are cut out of their atlases off the main thread: the page is drawn without
+        // them first and again when they are there.
+        final SkinKit k = kit;
+        if (!framesAsked) {
+            framesAsked = true;
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    lock = k.atlasFrame("Modern_Graphics", "icon_lock", 80, 80);
+                    buttonPlain = k.atlasFrame("Modern_Widgets_Orc", "large", 1008, 126);
+                    buttonPrimary = k.atlasFrame("Modern_Widgets_Orc", "large_active", 1008, 126);
+                    if (redraw != null) {
+                        redraw.run();
+                    }
+                }
+            }, "missions-frames").start();
         }
         if (reveal) {
             reveal = false;
@@ -124,8 +139,22 @@ final class MissionsPage {
         if (act != mapAct || !campaign.code.equals(mapCode)) {
             mapAct = act;
             mapCode = campaign.code;
-            map = kit.atlasFrame("Maps", campaign.code + "_act" + act,
-                                 Math.round(MAP_W * kit.unit), Math.round(MAP_H * kit.unit));
+            map = null;
+            final String code = campaign.code;
+            final int mw = Math.round(MAP_W * kit.unit), mh = Math.round(MAP_H * kit.unit);
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    final Bitmap picture = k.atlasFrame("Maps", code + "_act" + act, mw, mh);
+                    // Only the picture still asked for is kept.
+                    if (act == mapAct && code.equals(mapCode)) {
+                        map = picture;
+                        if (redraw != null) {
+                            redraw.run();
+                        }
+                    }
+                }
+            }, "missions-map").start();
         }
 
         final boolean expansion = campaign.code.startsWith("x");

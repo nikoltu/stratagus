@@ -278,12 +278,9 @@ void UpdateDisplay()
 				}
 
 				// IG5: a guichan menu (the in-game Game Menu, its dialogs, tooltips) paints into the
-				// CPU overlay INSIDE the map interior. The interior clear used to be gated on
-				// messages / drag-rectangle only, so the frame a menu stopped drawing nothing erased
-				// its last image: the panel stayed on screen for good while the game ran on
-				// underneath, invisible. This branch is only reached when the overlay WAS written
-				// last frame, so clearing the interior here is both necessary and self-limiting --
-				// a resting in-game frame still takes the skip path above and pays nothing.
+				// CPU overlay inside the map interior, so the interior must be cleared in the frame after
+				// a menu stops drawing. This branch is only reached when the overlay was written
+				// last frame: a resting in-game frame still takes the skip path above and pays nothing.
 				const bool messagesVisible = AreMessagesShown();
 				const bool cursorRectangle = CursorState == CursorStates::Rectangle;
 				{
@@ -311,13 +308,15 @@ void UpdateDisplay()
 		GpuHudDrawActive = true;
 		// TODO: for e.g. environmental effects, we want to push to the renderer here with appropriate shaders set,
 		// then do the rest.
-		// NG14/NG36: the objectives block and the transient message list share the map's top-left corner
-		// (messages at UI.MapArea.X+8, UI.MapArea.Y+8; objectives at the authored 849,126). The objectives
-		// used to be drawn later, in the HUD-panel pass, which painted over every message -- a refusal like
-		// "Not enough resources to build X" could never be read. Objectives are persistent and messages are
-		// transient, so the persistent block goes down first and the message list wins the overlap.
-		DrawObjectives();
-		DrawMessages();
+		// NG14/NG36: objectives are persistent and messages are transient, so the persistent block
+		// goes down first and the message list wins any overlap.
+		// Classic view: the box holds the classic frame, the map view and the minimap. The
+		// Remastered widgets have no place in it and are not drawn there.
+		const bool classicHud = ClassicHudActive();
+		if (!classicHud) {
+			DrawObjectives();
+			DrawMessages();
+		}
 
 		if (CursorState == CursorStates::Rectangle) {
 			FrameProfBegin(FP_HUD_CURSOR);
@@ -329,7 +328,18 @@ void UpdateDisplay()
 			UiToggleBigMap();
 		}
 
-		if (!BigMapMode) {
+		if (!BigMapMode && classicHud) {
+			FrameProfBegin(FP_HUD_FILLERS);
+			DrawClassicHud();
+			FrameProfEnd(FP_HUD_FILLERS);
+			FrameProfBegin(FP_HUD_MINIMAP);
+			UI.Minimap.Draw();
+			for (std::size_t i = 0; i != UI.NumViewports; ++i) {
+				UI.Minimap.DrawViewportArea(UI.Viewports[i],
+				                            UI.SelectedViewport == &UI.Viewports[i] ? 255 : 128);
+			}
+			FrameProfEnd(FP_HUD_MINIMAP);
+		} else if (!BigMapMode) {
 			FrameProfBegin(FP_HUD_FILLERS);
 			for (auto &filler : UI.Fillers) {
 				// GPU: static opaque HUD fillers RenderCopy straight to the backbuffer (under the
@@ -364,7 +374,9 @@ void UpdateDisplay()
 			FrameProfEnd(FP_HUD_PANELS);
 		}
 
-		DrawTimer();
+		if (!classicHud) {
+			DrawTimer();
+		}
 		DrawNetWaitPlate();
 		// TOUCH-R1: the group strip, over the map view. In the HUD pass, so that its plates and
 		// its text both go to the GPU backbuffer in draw order and the CPU overlay stays clean.
@@ -496,8 +508,7 @@ static void RunOneGameCycle()
 
 	if (Preference.AutosaveMinutes != 0 && !IsNetworkGame() && !IsReplayGame() && GameCycle > 0 && (GameCycle % (CYCLES_PER_SECOND * 60 * Preference.AutosaveMinutes)) == 0) { // autosave every X minutes (default is 5), if the option is enabled
 	//Wyrmgus end
-		// No text for an automatic save: the original has no status strip, and the line was
-		// drawn half below the surface under the message line.
+		// No text for an automatic save: the original has no status strip.
 		SaveGame("autosave.sav");
 	}
 }
@@ -631,9 +642,8 @@ static void SingleGameLoop()
 				++guard;
 				if (FastForwardCycle > GameCycle) { break; }
 				// LAN-MESH S2: a cycle may leave the network game waiting for another device
-				// (NetworkInSync false). The rest of the catch-up must not run then: it was tested
-				// once per frame, and up to nine further cycles ran without the others
-				// (work/agent-lan-mesh/LAN_MESH_SPEC.md, step S2). Always true in a single-player game.
+				// (NetworkInSync false). The rest of the catch-up must not run then, or further cycles
+				// would run without the others. Always true in a single-player game.
 				if (!NetworkInSync) {
 					LogicAccumulatorMs = 0.0;
 					break;
@@ -721,6 +731,7 @@ void GameMainLoop(bool clean)
 	GameCycle = 0;
 	CParticleManager::exit();
 	FlagRevealMap = MapRevealModes::cHidden;
+	NetworkSetWatching(false); // a device which watched: the next game is played
 	ReplayRevealMap = 0;
 	GamePaused = false;
 	GodMode = false;

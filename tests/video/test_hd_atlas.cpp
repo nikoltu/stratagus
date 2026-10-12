@@ -25,6 +25,7 @@
 #include <doctest.h>
 
 #include "video.h"
+#include "../../src/video/hd_classic_hud.h"
 
 #include <SDL_image.h>
 
@@ -1652,4 +1653,1016 @@ TEST_CASE("hd_atlas LoadTexturePacker cuts fog masks keyed, with dithered copies
 	g.~CAtlasGraphic();
 	new (&g) CAtlasGraphic();
 	h.shutdown();
+}
+
+TEST_CASE("hd_atlas classic sprite rules: frame and mirror, palette run, group names")
+{
+	// Engine frame -> classic frame: negative = (-f - 1), mirrored.
+	bool mirror = true;
+	CHECK(hdatlas::classicFrame(0, mirror) == 0);
+	CHECK_FALSE(mirror);
+	CHECK(hdatlas::classicFrame(12, mirror) == 12);
+	CHECK_FALSE(mirror);
+	CHECK(hdatlas::classicFrame(-1, mirror) == 0);
+	CHECK(mirror);
+	CHECK(hdatlas::classicFrame(-3, mirror) == 2); // west = the east column, mirrored
+	CHECK(mirror);
+	CHECK(hdatlas::classicFrame(-14, mirror) == 13);
+	CHECK(mirror);
+
+	// Player colour name -> first index of its four-entry run.
+	CHECK(hdatlas::classicRampStart("red") == 208);
+	CHECK(hdatlas::classicRampStart("blue") == 212);
+	CHECK(hdatlas::classicRampStart("green") == 216);
+	CHECK(hdatlas::classicRampStart("violet") == 220);
+	CHECK(hdatlas::classicRampStart("orange") == 224);
+	CHECK(hdatlas::classicRampStart("black") == 228);
+	CHECK(hdatlas::classicRampStart("white") == 232);
+	CHECK(hdatlas::classicRampStart("yellow") == 12);
+	CHECK(hdatlas::classicRampStart("re") == -1);
+	CHECK(hdatlas::classicRampStart("reds") == -1);
+	CHECK(hdatlas::classicRampStart("") == -1);
+	CHECK(hdatlas::classicRampStart(nullptr) == -1);
+
+	// The run replaces entries 208..211 only.
+	uint8_t rgba[256][4];
+	for (int i = 0; i < 256; ++i) {
+		rgba[i][0] = static_cast<uint8_t>(i);
+		rgba[i][1] = static_cast<uint8_t>(255 - i);
+		rgba[i][2] = 7;
+		rgba[i][3] = 255;
+	}
+	hdatlas::classicApplyRamp(rgba, 12);
+	for (int i = 0; i < 256; ++i) {
+		const int from = (i >= 208 && i < 212) ? 12 + (i - 208) : i;
+		CHECK(rgba[i][0] == from);
+		CHECK(rgba[i][1] == 255 - from);
+	}
+	hdatlas::classicApplyRamp(rgba, 208); // the art's own run: nothing moves
+	CHECK(rgba[208][0] == 12);
+	hdatlas::classicApplyRamp(rgba, 254); // would run past the palette: refused
+	CHECK(rgba[208][0] == 12);
+
+	// "<group>/indexed_<N>".
+	std::string group;
+	int n = -1;
+	CHECK(hdatlas::classicSplitGroupFrame("Orc/peon.grp/indexed_2", "/indexed_", group, n));
+	CHECK(group == "Orc/peon.grp");
+	CHECK(n == 2);
+	CHECK(hdatlas::classicSplitGroupFrame("Other/death.grp/indexed_34", "/indexed_", group, n));
+	CHECK(n == 34);
+	CHECK_FALSE(hdatlas::classicSplitGroupFrame("Forest/forest_12", "/indexed_", group, n));
+	CHECK_FALSE(hdatlas::classicSplitGroupFrame("Orc/peon.grp/indexed_", "/indexed_", group, n));
+	CHECK_FALSE(hdatlas::classicSplitGroupFrame("Orc/peon.grp/indexed_2x", "/indexed_", group, n));
+	CHECK_FALSE(hdatlas::classicSplitGroupFrame("/indexed_2", "/indexed_", group, n));
+
+	// HD map entry -> group names to try, in order.
+	const std::vector<std::string> orc = hdatlas::classicGroupNames("units_orc_common", "peon");
+	REQUIRE(orc.size() == 4);
+	CHECK(orc[0] == "Orc/peon.grp");
+	CHECK(orc[1] == "Other/peon.grp");
+	CHECK(orc[2] == "Monster/peon.grp");
+	CHECK(orc[3] == "Human/peon.grp");
+	const std::vector<std::string> human = hdatlas::classicGroupNames("units_human_winter", "s_farm");
+	REQUIRE(human.size() == 4);
+	CHECK(human[0] == "Human/s_farm.grp");
+	CHECK(human[3] == "Orc/s_farm.grp");
+	const std::vector<std::string> other = hdatlas::classicGroupNames("units_common_forest", "vcircle_0");
+	REQUIRE(other.size() == 4);
+	CHECK(other[0] == "Other/vcircle.grp"); // a trailing "_<digits>" is not part of the base name
+	CHECK(other[1] == "Monster/vcircle.grp");
+	CHECK(hdatlas::classicGroupNames("units_common_forest", "x_inv")[0] == "Other/x_inv.grp");
+	CHECK(hdatlas::classicGroupNames("units_common_forest", "").empty());
+}
+
+TEST_CASE("hd_atlas classicLandSiteGroup: the scaffold group by construction file and tileset")
+{
+	const std::string summer = "neutral/buildings/land_construction_site.png";
+	const std::string winter = "tilesets/winter/neutral/buildings/land_construction_site.png";
+
+	CHECK(std::string(hdatlas::classicLandSiteGroup(summer, "forest")) == "Other/build_1.grp");
+	CHECK(std::string(hdatlas::classicLandSiteGroup(winter, "winter")) == "Other/s_build1.grp");
+	// The tileset decides, not the folder of the file; the name is compared without regard to case.
+	CHECK(std::string(hdatlas::classicLandSiteGroup(summer, "winter")) == "Other/s_build1.grp");
+	CHECK(std::string(hdatlas::classicLandSiteGroup("Neutral\\Buildings\\Land_Construction_Site.PNG", "forest"))
+	      == "Other/build_1.grp");
+	CHECK(std::string(hdatlas::classicLandSiteGroup("land_construction_site.png", "forest")) == "Other/build_1.grp");
+
+	// Tilesets never seen in the original's classic view, and an unknown tileset: no answer.
+	CHECK(hdatlas::classicLandSiteGroup(summer, "swamp") == nullptr);
+	CHECK(hdatlas::classicLandSiteGroup(summer, "xswamp") == nullptr);
+	CHECK(hdatlas::classicLandSiteGroup(summer, "") == nullptr);
+
+	// Constructions with art of their own, and near misses of the name: no answer.
+	CHECK(hdatlas::classicLandSiteGroup("human/buildings/shipyard_construction_site.png", "forest") == nullptr);
+	CHECK(hdatlas::classicLandSiteGroup("tilesets/summer/neutral/buildings/wall_construction_site.png", "forest")
+	      == nullptr);
+	CHECK(hdatlas::classicLandSiteGroup("neutral/buildings/island_construction_site.png", "forest") == nullptr);
+	CHECK(hdatlas::classicLandSiteGroup("neutral/buildings/land_construction_site.png.bak", "forest") == nullptr);
+	CHECK(hdatlas::classicLandSiteGroup("", "forest") == nullptr);
+
+	// The two scaffold stages are frames 0 and 1 as stored; a third frame does not exist.
+	bool mirror = true;
+	CHECK(hdatlas::classicFrame(0, mirror) < hdatlas::ClassicLandSiteFrames);
+	CHECK(hdatlas::classicFrame(1, mirror) < hdatlas::ClassicLandSiteFrames);
+	CHECK_FALSE(hdatlas::classicFrame(2, mirror) < hdatlas::ClassicLandSiteFrames);
+}
+
+TEST_CASE("hd_atlas classicMinimapSlot: the mapColors sample of a minimap pixel")
+{
+	auto slots = [](int tiles, int pixels, int count) {
+		std::vector<int> out;
+		for (int p = 0; p < count; ++p) {
+			out.push_back(hdatlas::classicMinimapSlot(p, tiles, pixels));
+		}
+		return out;
+	};
+	// Measured on the original, 128-pixel minimap: 32 wide = 4 pixels a tile, all four samples.
+	CHECK(slots(32, 128, 9) == std::vector<int>{0, 1, 2, 3, 0, 1, 2, 3, 0});
+	// 64 wide = 2 pixels a tile: samples 0 and 1, not 0 and 2.
+	CHECK(slots(64, 128, 6) == std::vector<int>{0, 1, 0, 1, 0, 1});
+	// 96 wide = 4 pixels for 3 tiles: the first tile of three gets two pixels.
+	CHECK(slots(96, 128, 9) == std::vector<int>{0, 1, 0, 0, 0, 1, 0, 0, 0});
+	// 128 wide = 1 pixel a tile: sample 0 (derived from the rule, not measured).
+	CHECK(slots(128, 128, 5) == std::vector<int>{0, 0, 0, 0, 0});
+	for (int p = 0; p < 128; ++p) {
+		CHECK(hdatlas::classicMinimapSlot(p, 32, 128) == p % 4);
+		CHECK(hdatlas::classicMinimapSlot(p, 64, 128) == p % 2);
+		CHECK(hdatlas::classicMinimapSlot(p, 96, 128) == (p % 4 == 1 ? 1 : 0));
+	}
+	// A larger minimap (not measured): each tile keeps the samples it shows at 128 pixels, stretched.
+	CHECK(slots(32, 256, 9) == std::vector<int>{0, 0, 1, 1, 2, 2, 3, 3, 0});
+	CHECK(slots(32, 576, 19) == std::vector<int>{0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 0});
+	CHECK(slots(64, 576, 10) == std::vector<int>{0, 0, 0, 0, 0, 1, 1, 1, 1, 0});
+	CHECK(slots(96, 576, 19) == std::vector<int>{0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+	CHECK(slots(96, 576, 22)[21] == 1);
+	for (int p = 0; p < 576; ++p) {
+		CHECK(hdatlas::classicMinimapSlot(p, 128, 576) == 0);
+		const int s = hdatlas::classicMinimapSlot(p, 32, 300);
+		CHECK(s >= 0);
+		CHECK(s <= 3);
+	}
+	CHECK(hdatlas::classicMinimapSlot(-1, 32, 128) == 0);
+	CHECK(hdatlas::classicMinimapSlot(5, 0, 128) == 0);
+	CHECK(hdatlas::classicMinimapSlot(5, 32, 0) == 0);
+}
+
+TEST_CASE("hd_atlas ClassicGroup cuts a sprite group keyed, with the player's palette run, nearest")
+{
+	const int W = 64, H = 64;
+	SdlHarness h;
+	if (!h.init(W, H)) {
+		MESSAGE("SDL renderer unavailable - skipping atlas render tests");
+		return;
+	}
+	fs::path dir = caseDir("palette_sprite_groups");
+
+	// 32x8 indexed page: a tile cell, two cells of a group with team pixels, one cell of a group
+	// without. Sprite cell: column 0 = index 208, column 1 = 209, column 2 (upper half) = 5, rest 0.
+	const int pw = 32, ph = 8;
+	auto unitAt = [](int x, int y) -> uint8_t {
+		return static_cast<uint8_t>(x == 0 ? 208 : x == 1 ? 209 : (x == 2 && y < 4) ? 5 : 0);
+	};
+	SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, pw, ph, 8, SDL_PIXELFORMAT_INDEX8);
+	REQUIRE(s != nullptr);
+	SDL_Color red[256];
+	for (int i = 0; i < 256; ++i) {
+		red[i] = SDL_Color{255, 0, 0, 255};
+	}
+	SDL_SetPaletteColors(s->format->palette, red, 0, 256);
+	SDL_LockSurface(s);
+	for (int y = 0; y < ph; ++y) {
+		for (int x = 0; x < pw; ++x) {
+			uint8_t v;
+			if (x < 8) {
+				v = 3;
+			} else if (x < 16) {
+				v = unitAt(x - 8, y);
+			} else if (x < 24) {
+				v = static_cast<uint8_t>(x - 16 < 3 ? 6 : 0);
+			} else {
+				v = static_cast<uint8_t>(x - 24 < 2 ? 5 : 0);
+			}
+			static_cast<uint8_t *>(s->pixels)[y * s->pitch + x] = v;
+		}
+	}
+	SDL_UnlockSurface(s);
+	const int rc = IMG_SavePNG(s, (dir / "page.png").string().c_str());
+	SDL_FreeSurface(s);
+	REQUIRE(rc == 0);
+	{
+		SDL_Surface *back = IMG_Load((dir / "page.png").string().c_str());
+		REQUIRE(back != nullptr);
+		const bool indexed = back->format->BytesPerPixel == 1;
+		SDL_FreeSurface(back);
+		if (!indexed) {
+			MESSAGE("SDL_image did not write an indexed PNG - skipping the sprite group test");
+			h.shutdown();
+			return;
+		}
+	}
+	auto cell = [](const char *name, int x) {
+		return std::string("\"") + name + "\": {\"frame\": {\"x\":" + std::to_string(x)
+		       + ",\"y\":0,\"w\":8,\"h\":8}, \"rotated\": false, \"trimmed\": false,"
+		         " \"spriteSourceSize\": {\"x\":0,\"y\":0,\"w\":8,\"h\":8}, \"sourceSize\": {\"w\":8,\"h\":8}}";
+	};
+	const std::string json = "{\"frames\": {\n" + cell("Tiles/tile_0", 0) + ",\n"
+	                         + cell("Orc/unit.grp/indexed_0", 8) + ",\n"
+	                         + cell("Orc/unit.grp/indexed_1", 16) + ",\n"
+	                         + cell("Other/plain.grp/indexed_0", 24) + "\n"
+	                         + "}, \"meta\": {\"image\": \"page.png\"}}\n";
+	writeBytes(dir / "page.json", std::vector<uint8_t>(json.begin(), json.end()));
+
+	// 6-bit palette, every entry its own colour.
+	std::vector<uint8_t> ppl(768, 0);
+	for (int i = 0; i < 256; ++i) {
+		ppl[i * 3 + 0] = static_cast<uint8_t>(i % 64);
+		ppl[i * 3 + 1] = static_cast<uint8_t>((i * 3 + 1) % 64);
+		ppl[i * 3 + 2] = static_cast<uint8_t>((i * 7 + 2) % 64);
+	}
+	const uint8_t bg[3] = {1, 2, 3};
+	auto colourOf = [&](int index, uint8_t out[3]) {
+		for (int c = 0; c < 3; ++c) {
+			out[c] = static_cast<uint8_t>(ppl[index * 3 + c] * 4);
+		}
+	};
+
+	// Without a group mark nothing is listed and no page is kept (the behaviour before).
+	{
+		CAtlasGraphic plain;
+		REQUIRE(plain.LoadTexturePacker((dir / "page.json").string(), false, false, ppl.data(), true, "Tiles/tile_"));
+		CHECK(plain.NumFrames() == 1);
+		CHECK(plain.ClassicSerial() == 0);
+		CHECK(plain.ClassicGroupByName("Orc/unit.grp") == -1);
+		CHECK(plain.ClassicGroup(0, 208) == nullptr);
+	}
+
+	CAtlasGraphic g;
+	REQUIRE(g.LoadTexturePacker((dir / "page.json").string(), false, false, ppl.data(), true,
+	                            "Tiles/tile_", nullptr, "/indexed_"));
+	CHECK(g.NumFrames() == 1); // the sprite cells are not cut at load
+	CHECK(g.ClassicSerial() != 0);
+	const int unit = g.ClassicGroupByName("orc/UNIT.grp"); // without regard to case
+	const int plainGroup = g.ClassicGroupByName("Other/plain.grp");
+	REQUIRE(unit >= 0);
+	REQUIRE(plainGroup >= 0);
+	CHECK(g.ClassicGroupByName("Orc/none.grp") == -1);
+	CHECK(g.ClassicGroup(99, 208) == nullptr);
+	CHECK(g.ClassicGroup(unit, -1) == nullptr);
+
+	const CAtlasGraphic *black = g.ClassicGroup(unit, 228);
+	REQUIRE(black != nullptr);
+	CHECK(black->NumFrames() == 2);
+	CHECK(g.ClassicGroup(unit, 228) == black);          // cut once
+	CHECK(g.ClassicGroup(unit, 208) != black);          // another run, another cut
+	// A group without team pixels is one cut for every run.
+	CHECK(g.ClassicGroup(plainGroup, 228) == g.ClassicGroup(plainGroup, 212));
+
+	// Draw frame 0 centred on (20, 20) at `scale` screen pixels per classic pixel and compare
+	// every screen pixel of the cell with the expected index (0 = the background shows).
+	auto drawnAs = [&](const CAtlasGraphic *cells, int scale, bool flip, int run) -> bool {
+		SDL_SetRenderDrawColor(h.renderer, bg[0], bg[1], bg[2], 255);
+		SDL_RenderClear(h.renderer);
+		cells->DrawAtlasFrameCentred(0, 20.0f, 20.0f, static_cast<float>(scale), flip);
+		SDL_RenderPresent(h.renderer);
+		SDL_LockSurface(h.screen);
+		const uint8_t *sp = static_cast<const uint8_t *>(h.screen->pixels);
+		const int x0 = 20 - 4 * scale, y0 = 20 - 4 * scale;
+		bool exact = true;
+		for (int y = 0; y < 8 * scale; ++y) {
+			for (int x = 0; x < 8 * scale; ++x) {
+				const int cx = flip ? 7 - x / scale : x / scale;
+				int index = unitAt(cx, y / scale);
+				if (index >= 208 && index < 212) {
+					index = run + (index - 208);
+				}
+				uint8_t want[3] = {bg[0], bg[1], bg[2]};
+				if (index) {
+					colourOf(index, want);
+				}
+				const uint8_t *got = sp + static_cast<size_t>(y0 + y) * h.screen->pitch
+				                     + static_cast<size_t>(x0 + x) * 4;
+				if (got[0] != want[0] || got[1] != want[1] || got[2] != want[2]) {
+					exact = false;
+				}
+			}
+		}
+		SDL_UnlockSurface(h.screen);
+		return exact;
+	};
+	CHECK(drawnAs(black, 1, false, 228));                     // as stored, black run
+	CHECK(drawnAs(black, 1, true, 228));                      // mirrored inside its cell
+	CHECK(drawnAs(black, 3, false, 228));                     // whole blocks, no blended pixel
+	CHECK(drawnAs(black, 3, true, 228));
+	CHECK(drawnAs(g.ClassicGroup(unit, 208), 1, false, 208)); // the art's own run
+	CHECK(drawnAs(g.ClassicGroup(unit, 12), 1, false, 12));   // the run that is not beside the others
+	CHECK_FALSE(drawnAs(black, 1, false, 208));               // the check does tell runs apart
+
+	// Another page gets another serial, so a remembered group number is not reused for it.
+	{
+		CAtlasGraphic second;
+		REQUIRE(second.LoadTexturePacker((dir / "page.json").string(), false, false, ppl.data(), true,
+		                                 "Tiles/tile_", nullptr, "/indexed_"));
+		CHECK(second.ClassicSerial() != 0);
+		CHECK(second.ClassicSerial() != g.ClassicSerial());
+	}
+
+	g.~CAtlasGraphic();
+	new (&g) CAtlasGraphic();
+	h.shutdown();
+}
+
+TEST_CASE("hd_atlas stored canvas: a reduced family is stretched to its rule canvas, others are not")
+{
+	// 64 px a tile, zoom 1: the sheet density scale.
+	const float s = 64.0f / 216.0f;
+	// No "canvas" key: the very same value, whatever the frame's canvas.
+	CHECK(hdatlas::hdStoredCanvasScale(s, 0, 608) == s);
+	CHECK(hdatlas::hdStoredCanvasScale(s, 0, 225) == s);
+	CHECK(hdatlas::hdStoredCanvasScale(s, -1, 225) == s);
+	// A frame record without a canvas does not divide by zero.
+	CHECK(hdatlas::hdStoredCanvasScale(s, 500, 0) == s);
+	// Skeleton: body and mask stored at 225, rule canvas 500.
+	CHECK(hdatlas::hdStoredCanvasScale(s, 500, 225) == doctest::Approx(s * 2.2222).epsilon(0.0001));
+	CHECK(hdatlas::hdStoredCanvasScale(s, 500, 225) * 225 == doctest::Approx(s * 500));
+	// Eye of Kilrogg: body stored at 186, mask at the rule canvas 338 -- the mask is not stretched.
+	CHECK(hdatlas::hdStoredCanvasScale(s, 338, 186) == doctest::Approx(s * 1.8172).epsilon(0.0001));
+	CHECK(hdatlas::hdStoredCanvasScale(s, 338, 338) == doctest::Approx(s));
+	// A family already at its rule canvas that carried the key would be drawn as before.
+	CHECK(hdatlas::hdStoredCanvasScale(1.5f, 608, 608) == doctest::Approx(1.5f));
+}
+
+TEST_CASE("hd_atlas flyer shadow: the Remastered square from the unit's tile")
+{
+	// 64 px a tile: the blot's centre is +1, +89 from the tile centre (32, 32), side 92.
+	hdatlas::FlyerShadowRect r = hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 0, 1.0f);
+	CHECK(r.size == 92);
+	CHECK(r.x == -13);
+	CHECK(r.y == 75);
+	CHECK(2 * r.x + r.size == 2 * (32 + 1));
+	CHECK(2 * r.y + r.size == 2 * (32 + 89));
+	// 32 px a tile: whole pixels of +0.5, +44.5.
+	r = hdatlas::hdFlyerShadowRect(1, 1, 32, 32, 0, 0, 0, 1.0f);
+	CHECK(r.size == 46);
+	CHECK(r.x == -7);
+	CHECK(r.y == 37);
+	// Zoom 1.5 scales the place and the side alike.
+	r = hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 0, 1.5f);
+	CHECK(r.size == 138);
+	CHECK(r.x == -20);
+	CHECK(r.y == 113);
+	r = hdatlas::hdFlyerShadowRect(1, 1, 32, 32, 0, 0, 0, 1.5f);
+	CHECK(r.size == 69);
+	CHECK(r.x == -11);
+	CHECK(r.y == 56);
+	// The type's draw offset moves it; the hover height keeps its sign and factor.
+	r = hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 3, -5, 0, 1.0f);
+	CHECK(r.x == -10);
+	CHECK(r.y == 70);
+	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 1, 1.0f).y == 73);
+	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, -1, 1.0f).y == 77);
+	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 1, 1.0f).x == -13);
+}
+
+TEST_CASE("hd_atlas flyer shadow: the classic disc's cell from the unit's tile")
+{
+	CHECK(std::string(hdatlas::ClassicFlyerShadowGroup) == "Other/shadow.grp");
+	CHECK(hdatlas::ClassicFlyerShadowFrame == 2);
+	// 32 px a tile: the 32 x 32 cell is centred 0, +43 from the tile centre (16, 16), 1:1.
+	hdatlas::ClassicFlyerShadowPlace p = hdatlas::classicFlyerShadowPlace(1, 1, 32, 32, 0, 0, 0, 1.0f);
+	CHECK(p.cx == 16.0f);
+	CHECK(p.cy == 59.0f);
+	CHECK(p.scale == 1.0f);
+	// 64 px a tile: two screen pixels a classic pixel.
+	p = hdatlas::classicFlyerShadowPlace(1, 1, 64, 64, 0, 0, 0, 1.0f);
+	CHECK(p.cx == 32.0f);
+	CHECK(p.cy == 118.0f);
+	CHECK(p.scale == 2.0f);
+	p = hdatlas::classicFlyerShadowPlace(1, 1, 64, 64, 0, 0, 0, 1.5f);
+	CHECK(p.cx == 48.0f);
+	CHECK(p.cy == 177.0f);
+	CHECK(p.scale == 3.0f);
+	p = hdatlas::classicFlyerShadowPlace(1, 1, 32, 32, 0, 0, 0, 1.5f);
+	CHECK(p.cx == 24.0f);
+	CHECK(p.cy == 88.5f);
+	CHECK(p.scale == 1.5f);
+	// Same hover term as the Remastered square.
+	CHECK(hdatlas::classicFlyerShadowPlace(1, 1, 64, 64, 0, 0, 1, 1.0f).cy == 116.0f);
+	CHECK(hdatlas::classicFlyerShadowPlace(1, 1, 64, 64, 2, 4, 0, 1.0f).cx == 34.0f);
+	CHECK(hdatlas::classicFlyerShadowPlace(1, 1, 64, 64, 2, 4, 0, 1.0f).cy == 122.0f);
+}
+
+TEST_CASE("hd_atlas classicStep: one more screen pixel a classic pixel every 480 rows of the screen")
+{
+	// The original: 959 -> 1, 960 -> 2 (at three widths), 1439 -> 2, 1440 -> 3, 1746 -> 3,
+	// 1919 -> 3, 1920 -> 4.
+	const int heights[] = {479, 480, 720, 959, 960, 1439, 1440, 1746, 1752, 1919, 1920};
+	const int steps[] = {1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4};
+	for (int i = 0; i < 11; ++i) {
+		CAPTURE(heights[i]);
+		CHECK(hdatlas::classicStep(heights[i]) == steps[i]);
+	}
+	CHECK(hdatlas::classicStep(2400) == 5);
+	CHECK(hdatlas::classicStep(0) == 1);
+	// The height of the screen, not of the box: 2400 x 1920 has a box 1800 high and 4,
+	// 1100 x 960 a box 825 high and 2.
+	CHECK(hdatlas::classicBox(2400, 1920).h == 1800);
+	CHECK(hdatlas::classicScreen(2400, 1920).s == 4);
+	CHECK(hdatlas::classicScreen(2400, 1920).lw == 600);
+	CHECK(hdatlas::classicScreen(2400, 1920).lh == 450);
+	CHECK(hdatlas::classicBox(1100, 960).h == 825);
+	CHECK(hdatlas::classicScreen(1100, 960).s == 2);
+}
+
+TEST_CASE("hd_atlas classic screen: the 4:3 box, the step, the logical screen and the rects on it")
+{
+	using hdatlas::ClassicRect;
+	struct Screen {
+		int w, h;
+		ClassicRect box;
+		int s, lw, lh;
+		ClassicRect view, mini, menu;   // screen pixels
+	};
+	const Screen screens[] = {
+		// the original's own size: box at client x 171, view at client 347,16, minimap at 195,26
+		{1366, 768, {171, 0, 1024, 768}, 1, 1024, 768, {347, 16, 832, 736}, {195, 26, 128, 128}, {217, 2, 60, 20}},
+		// o21_14: box x 316..2643, tile 96 px, left column 528 px, minimap inner 384 px
+		{2960, 1746, {316, 0, 2328, 1746}, 3, 776, 582, {844, 48, 1752, 1650}, {388, 78, 384, 384}, {454, 6, 180, 60}},
+		{2800, 1752, {232, 0, 2336, 1752}, 3, 778, 584, {760, 48, 1758, 1656}, {304, 78, 384, 384}, {370, 6, 180, 60}},
+		{1600, 720, {320, 0, 960, 720}, 1, 960, 720, {496, 16, 768, 688}, {344, 26, 128, 128}, {366, 2, 60, 20}},
+		// o11_11: map view 352,32 1056 x 1016 in the box
+		{1920, 1080, {240, 0, 1440, 1080}, 2, 720, 540, {592, 32, 1056, 1016}, {288, 52, 256, 256}, {332, 4, 120, 40}},
+	};
+	const auto same = [](const ClassicRect &a, const ClassicRect &b) {
+		return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+	};
+	for (const Screen &s : screens) {
+		CAPTURE(s.w);
+		const hdatlas::ClassicScreen c = hdatlas::classicScreen(s.w, s.h);
+		CHECK(same(c.box, s.box));
+		CHECK(same(hdatlas::classicBox(s.w, s.h), s.box));
+		CHECK(c.s == s.s);
+		CHECK(c.lw == s.lw);
+		CHECK(c.lh == s.lh);
+		const ClassicRect lv = hdatlas::classicView(c);
+		CHECK(lv.x == 176);
+		CHECK(lv.y == 16);
+		CHECK(lv.w == s.lw - 192);
+		CHECK(lv.h == s.lh - 32);
+		const ClassicRect view = hdatlas::classicToScreen(c, lv.x, lv.y, lv.w, lv.h);
+		CHECK(same(view, s.view));
+		CHECK(same(hdatlas::classicToScreen(c, hdatlas::ClassicMinimapX, hdatlas::ClassicMinimapY,
+		                                    hdatlas::ClassicMinimapSize, hdatlas::ClassicMinimapSize), s.mini));
+		CHECK(same(hdatlas::classicToScreen(c, hdatlas::ClassicMenuX, hdatlas::ClassicMenuY,
+		                                    hdatlas::ClassicMenuW, hdatlas::ClassicMenuH), s.menu));
+		// A tile is 32 logical pixels at every size: 32 x s on the screen.
+		CHECK(hdatlas::classicToScreen(c, 0, 0, hdatlas::ClassicTilePx, hdatlas::ClassicTilePx).w == 32 * s.s);
+
+		// screen -> logical: outside the logical screen nothing; the corners
+		int lx = -1;
+		int ly = -1;
+		CHECK_FALSE(hdatlas::classicFromScreen(c, c.box.x - 1, 0, lx, ly));
+		CHECK_FALSE(hdatlas::classicFromScreen(c, c.box.x + c.lw * c.s, 0, lx, ly));
+		CHECK_FALSE(hdatlas::classicFromScreen(c, 0, s.h / 2, lx, ly));
+		CHECK_FALSE(hdatlas::classicFromScreen(c, s.w - 1, s.h / 2, lx, ly));
+		CHECK_FALSE(hdatlas::classicFromScreen(c, c.box.x, -1, lx, ly));
+		CHECK_FALSE(hdatlas::classicFromScreen(c, c.box.x, s.h, lx, ly));
+		CHECK(hdatlas::classicFromScreen(c, c.box.x, c.box.y, lx, ly));
+		CHECK(lx == 0);
+		CHECK(ly == 0);
+		CHECK(hdatlas::classicFromScreen(c, c.box.x + c.lw * c.s - 1, c.box.y + c.lh * c.s - 1, lx, ly));
+		CHECK(lx == c.lw - 1);
+		CHECK(ly == c.lh - 1);
+		// Every screen pixel of a logical pixel maps back to it: the first and the last pixel of
+		// the first, a middle and the last whole tile of the view.
+		for (const int tile : {0, lv.w / 64, lv.w / 32 - 1}) {
+			const int cellX = lv.x + tile * 32;
+			const ClassicRect r = hdatlas::classicToScreen(c, cellX, lv.y, 32, 32);
+			CHECK(hdatlas::classicFromScreen(c, r.x, r.y, lx, ly));
+			CHECK(lx == cellX);
+			CHECK(ly == lv.y);
+			CHECK(hdatlas::classicFromScreen(c, r.x + r.w - 1, r.y + r.h - 1, lx, ly));
+			CHECK(lx == cellX + 31);
+			CHECK(ly == lv.y + 31);
+		}
+		// Neighbours meet: the side column ends where the view begins, the view where the right strip begins.
+		const ClassicRect side = hdatlas::classicToScreen(c, 0, 0, hdatlas::ClassicViewX, c.lh);
+		const ClassicRect right = hdatlas::classicToScreen(c, c.lw - 16, 0, 16, c.lh);
+		CHECK(side.x == c.box.x);
+		CHECK(side.w == 176 * s.s);
+		CHECK(side.x + side.w == view.x);
+		CHECK(view.x + view.w == right.x);
+		CHECK(right.x + right.w == c.box.x + c.lw * c.s);
+		// The logical screen never leaves the box and misses fewer than s of its columns / rows.
+		CHECK(c.box.w - c.lw * c.s >= 0);
+		CHECK(c.box.w - c.lw * c.s < c.s);
+		CHECK(c.box.h - c.lh * c.s >= 0);
+		CHECK(c.box.h - c.lh * c.s < c.s);
+	}
+
+	// Tiles in view: 2960 x 1746 shows 18.25 x 17.19 tiles of 96 px, 1366 x 768 26 x 23 of 32 px,
+	// 1920 x 1080 16.5 x 15.88 of 64 px, 1600 x 720 24 x 21.5 of 32 px.
+	const auto tiles = [](int w, int h, bool wide) {
+		const ClassicRect v = hdatlas::classicView(hdatlas::classicScreen(w, h));
+		return (wide ? v.w : v.h) / (double) hdatlas::ClassicTilePx;
+	};
+	CHECK(tiles(2960, 1746, true) == doctest::Approx(18.25));
+	CHECK(tiles(2960, 1746, false) == doctest::Approx(17.1875));
+	CHECK(tiles(1366, 768, true) == doctest::Approx(26.0));
+	CHECK(tiles(1366, 768, false) == doctest::Approx(23.0));
+	CHECK(tiles(1920, 1080, true) == doctest::Approx(16.5));
+	CHECK(tiles(1920, 1080, false) == doctest::Approx(15.875));
+	CHECK(tiles(1600, 720, true) == doctest::Approx(24.0));
+	CHECK(tiles(1600, 720, false) == doctest::Approx(21.5));
+	CHECK(tiles(800, 480, true) == doctest::Approx(14.0));
+	CHECK(tiles(2400, 1440, true) == doctest::Approx(14.0));
+
+	// The original's other window sizes (bounding box of the picture): width-limited is centred vertically.
+	CHECK(same(hdatlas::classicBox(1000, 800), ClassicRect{0, 25, 1000, 750}));
+	CHECK(same(hdatlas::classicBox(1920, 1080), ClassicRect{240, 0, 1440, 1080}));
+	CHECK(same(hdatlas::classicBox(800, 480), ClassicRect{80, 0, 640, 480}));
+	CHECK(same(hdatlas::classicBox(2400, 1440), ClassicRect{240, 0, 1920, 1440}));
+	CHECK(same(hdatlas::classicBox(0, 0), ClassicRect{0, 0, 0, 0}));
+}
+
+TEST_CASE("hd_atlas classicHudFramePieces: the frame covers the logical screen outside the map view once")
+{
+	hdatlas::ClassicHudPiece pieces[hdatlas::ClassicHudPieceMax];
+	// 1024 x 768, where the layout was compared with the original pixel for pixel.
+	int count = hdatlas::classicHudFramePieces(1024, 768, pieces);
+	REQUIRE(count == 12);
+	CHECK(std::string(pieces[0].frame) == "TopLeft");
+	CHECK(pieces[0].h == 464);
+	CHECK(std::string(pieces[1].frame) == "TileableLeft");
+	CHECK(pieces[1].y == 464);
+	CHECK(pieces[1].h == 176);
+	CHECK(std::string(pieces[2].frame) == "TileableLeft");
+	CHECK(pieces[2].y == 640);
+	CHECK(pieces[2].h == 112);
+	CHECK(std::string(pieces[3].frame) == "BottomLeft");
+	CHECK(pieces[3].y == 752);
+	// 640 x 480: the top piece and the foot fill the column, one tile each of the strips.
+	count = hdatlas::classicHudFramePieces(640, 480, pieces);
+	REQUIRE(count == 7);
+	CHECK(pieces[0].h == 464);
+	CHECK(std::string(pieces[1].frame) == "BottomLeft");
+	CHECK(pieces[1].y == 464);
+	// 776 x 582 (2960 x 1746): the column runs to the bottom, the strips sit on the edges.
+	count = hdatlas::classicHudFramePieces(776, 582, pieces);
+	REQUIRE(count == 11);
+	CHECK(std::string(pieces[1].frame) == "TileableLeft");
+	CHECK(pieces[1].h == 102);
+	CHECK(pieces[2].y == 566);
+	CHECK(std::string(pieces[count - 1].frame) == "BottomRight");
+	CHECK(pieces[count - 1].x == 760);
+	CHECK(pieces[count - 1].y == 566);
+	CHECK(hdatlas::classicHudFramePieces(100, 100, pieces) == 0);
+
+	const auto frameSize = [](const std::string &name, int &w, int &h) {
+		w = name == "Top" || name == "Bottom" ? 448 : name == "Right" || name == "TopRight"
+		    || name == "BottomRight" ? 16 : 176;
+		h = name == "TopLeft" ? 464 : name == "TileableLeft" ? 176 : name == "Right" ? 448 : 16;
+	};
+	const int sizes[][2] = {{1024, 768}, {776, 582}, {778, 584}, {640, 480}, {960, 720}, {720, 540},
+	                        {600, 450}, {480, 360}, {1279, 959}, {333, 250}};
+	for (const auto &size : sizes) {
+		const int lw = size[0];
+		const int lh = size[1];
+		CAPTURE(lw);
+		count = hdatlas::classicHudFramePieces(lw, lh, pieces);
+		REQUIRE(count > 0);
+		REQUIRE(count <= hdatlas::ClassicHudPieceMax);
+		std::vector<int> hits(lw * lh, 0);
+		for (int i = 0; i < count; ++i) {
+			const hdatlas::ClassicHudPiece &p = pieces[i];
+			int fw = 0;
+			int fh = 0;
+			frameSize(p.frame, fw, fh);
+			CHECK(p.w > 0);
+			CHECK(p.h > 0);
+			CHECK(p.w <= fw);
+			CHECK(p.h <= fh);
+			REQUIRE(p.x >= 0);
+			REQUIRE(p.y >= 0);
+			REQUIRE(p.x + p.w <= lw);
+			REQUIRE(p.y + p.h <= lh);
+			for (int y = p.y; y < p.y + p.h; ++y) {
+				for (int x = p.x; x < p.x + p.w; ++x) {
+					++hits[y * lw + x];
+				}
+			}
+		}
+		const hdatlas::ClassicRect v = hdatlas::classicView({{0, 0, lw, lh}, 1, lw, lh});
+		int wrong = 0;
+		for (int y = 0; y < lh; ++y) {
+			for (int x = 0; x < lw; ++x) {
+				const bool view = x >= v.x && x < v.x + v.w && y >= v.y && y < v.y + v.h;
+				wrong += hits[y * lw + x] != (view ? 0 : 1);
+			}
+		}
+		CHECK(wrong == 0);
+	}
+}
+
+TEST_CASE("hd_atlas tilesBeforeViewEnd: a placement preview past the view's end has no tiles, never a negative count")
+{
+	using hdatlas::tilesBeforeViewEnd;
+	// Wholly inside, cut by the end, on the end, past the end.
+	CHECK(tilesBeforeViewEnd(10, 2, 7, 19) == 2);
+	CHECK(tilesBeforeViewEnd(24, 2, 7, 19) == 2);
+	CHECK(tilesBeforeViewEnd(25, 2, 7, 19) == 1);
+	CHECK(tilesBeforeViewEnd(26, 2, 7, 19) == 0);
+	// The reported state: a farm (2 x 2) on row 30 of a 32-row map, the view moved by a tap on
+	// the minimap to rows 7..25 (classic view, 2960 x 1746: 17.19 tiles down). Was -4.
+	CHECK(tilesBeforeViewEnd(30, 2, 7, 19) == 0);
+	// Before the view's start the whole footprint is kept (the clip rect cuts the drawing).
+	CHECK(tilesBeforeViewEnd(3, 4, 7, 19) == 4);
+	CHECK(tilesBeforeViewEnd(0, 0, 0, 0) == 0);
+	for (int first = -5; first < 40; ++first) {
+		for (int count = 0; count <= 4; ++count) {
+			const int n = tilesBeforeViewEnd(first, count, 7, 19);
+			CHECK(n >= 0);
+			CHECK(n <= count);
+		}
+	}
+}
+
+TEST_CASE("classichud: resource icons about the middle; the hit rect of a command cell at step 1 and 3")
+{
+	// Gold icon in the original: 250 of 640, 430 of 1000, 463 of 1067, 442 of 1024, 447 of 1035,
+	// 263 of 667, 290 of 720, 363 of 867; pitch 75.
+	const int widths[] = {640, 1000, 1067, 1024, 1035, 667, 720, 867};
+	const int gold[] = {250, 430, 463, 442, 447, 263, 290, 363};
+	for (int i = 0; i < 8; ++i) {
+		CAPTURE(widths[i]);
+		CHECK(classichud::resourceIconX(widths[i], 0) == gold[i]);
+		CHECK(classichud::resourceIconX(widths[i], 3) == gold[i] + 225);
+	}
+	CHECK(classichud::resourceIconX(1024, 1) == 517);
+	CHECK(classichud::resourceIconX(1024, 2) == 592);
+	// 2960 x 1746: logical 776, gold at 318 = screen 1270, 42 px wide, pitch 225.
+	const hdatlas::ClassicScreen big = hdatlas::classicScreen(2960, 1746);
+	const hdatlas::ClassicRect icon = hdatlas::classicToScreen(
+		big, classichud::resourceIconX(big.lw, 0), classichud::ResourceIconY, classichud::ResourceIconSize,
+		classichud::ResourceIconSize);
+	CHECK(icon.x == 1270);
+	CHECK(icon.y == 0);
+	CHECK(icon.w == 42);
+	CHECK(hdatlas::classicToScreen(big, classichud::resourceIconX(big.lw, 1), 0, 14, 14).x == 1495);
+	CHECK(classichud::tooltipMidY(768) == doctest::Approx(716.0));
+
+	const auto cellAt = [](const hdatlas::ClassicScreen &c, int sx, int sy) {
+		int lx = 0;
+		int ly = 0;
+		return hdatlas::classicFromScreen(c, sx, sy, lx, ly) ? classichud::commandCellAt(lx, ly) : -1;
+	};
+	// Step 1 (1366 x 768, box at 171): cell 1 is screen 176..229 x 336..381.
+	const hdatlas::ClassicScreen one = hdatlas::classicScreen(1366, 768);
+	const classichud::Rect first = classichud::commandCell(0);
+	hdatlas::ClassicRect r = hdatlas::classicToScreen(one, first.x, first.y, first.w, first.h);
+	CHECK(r.x == 176);
+	CHECK(r.y == 336);
+	CHECK(r.w == 54);
+	CHECK(r.h == 46);
+	CHECK(cellAt(one, 176, 336) == 0);
+	CHECK(cellAt(one, 229, 381) == 0);
+	CHECK(cellAt(one, 175, 336) == -1);
+	CHECK(cellAt(one, 230, 336) == -1);
+	CHECK(cellAt(one, 176, 335) == -1);
+	CHECK(cellAt(one, 176, 382) == -1);
+	CHECK(cellAt(one, 232, 336) == 1);
+	// Step 3 (2960 x 1746, box at 316): cell 1 is screen 331..492 x 1008..1145.
+	r = hdatlas::classicToScreen(big, first.x, first.y, first.w, first.h);
+	CHECK(r.x == 331);
+	CHECK(r.y == 1008);
+	CHECK(r.w == 162);
+	CHECK(r.h == 138);
+	CHECK(cellAt(big, 331, 1008) == 0);
+	CHECK(cellAt(big, 492, 1145) == 0);
+	CHECK(cellAt(big, 330, 1008) == -1);
+	CHECK(cellAt(big, 493, 1008) == -1);
+	CHECK(cellAt(big, 331, 1007) == -1);
+	CHECK(cellAt(big, 331, 1146) == -1);
+	CHECK(cellAt(big, 499, 1008) == 1);
+	CHECK(cellAt(big, 331, 1149) == 3);
+	CHECK(cellAt(big, 315, 1008) == -1);
+	// The last cell ends inside the column at both steps.
+	const classichud::Rect last = classichud::commandCell(8);
+	r = hdatlas::classicToScreen(big, last.x, last.y, last.w, last.h);
+	CHECK(r.x + r.w == 316 + 171 * 3);
+	CHECK(r.y + r.h == 476 * 3);
+	CHECK(r.y + r.h <= big.box.y + big.lh * big.s);
+}
+
+TEST_CASE("classichud: the cells of the command card and of the portrait")
+{
+	// o11_16: pictures at box 9 / 65 / 121 x 340 / 387 / 434, the cell 4 px larger on every side.
+	const int px[3] = {9, 65, 121};
+	const int py[3] = {340, 387, 434};
+	for (int i = 0; i < 9; ++i) {
+		const classichud::Rect cell = classichud::commandCell(i);
+		const classichud::Rect pic = classichud::cellPicture(cell);
+		CHECK(pic.x == px[i % 3]);
+		CHECK(pic.y == py[i / 3]);
+		CHECK(pic.w == 46);
+		CHECK(pic.h == 38);
+		CHECK(cell.w == 54);
+		CHECK(cell.h == 46);
+		CHECK(classichud::commandCellAt(cell.x, cell.y) == i);
+		CHECK(classichud::commandCellAt(cell.x + cell.w - 1, cell.y + cell.h - 1) == i);
+	}
+	// Between the cells and around the card: nothing.
+	CHECK(classichud::commandCellAt(59, 340) == -1);
+	CHECK(classichud::commandCellAt(60, 340) == -1);
+	CHECK(classichud::commandCellAt(9, 382) == -1);
+	CHECK(classichud::commandCellAt(4, 340) == -1);
+	CHECK(classichud::commandCellAt(171, 340) == -1);
+	CHECK(classichud::commandCellAt(9, 335) == -1);
+	CHECK(classichud::commandCellAt(9, 476) == -1);
+	// The last cell ends at 170 / 475, inside the side column (176 wide).
+	CHECK(classichud::commandCell(8).x + classichud::CellW == 171);
+	CHECK(classichud::commandCell(8).y + classichud::CellH == 476);
+	// Portrait: picture at 9,169; the bar's fill 50 x 5 at 7,211 inside the bar 54 x 9 at 5,209.
+	const classichud::Rect portrait = classichud::cellPicture(classichud::PortraitCell);
+	CHECK(portrait.x == 9);
+	CHECK(portrait.y == 169);
+	CHECK(classichud::HitPointFill.x == classichud::HitPointBar.x + classichud::HitPointSlice);
+	CHECK(classichud::HitPointFill.w == classichud::HitPointBar.w - 2 * classichud::HitPointSlice);
+	CHECK(classichud::HitPointBar.y == classichud::PortraitCell.y + classichud::CellH - 2);
+	// Header and resource row.
+	CHECK(classichud::contains(classichud::PauseFace, 108, 2));
+	CHECK(classichud::contains(classichud::PauseFace, 167, 21));
+	CHECK_FALSE(classichud::contains(classichud::PauseFace, 107, 2));
+	CHECK_FALSE(classichud::contains(classichud::PauseFace, 168, 2));
+	CHECK(classichud::F5Inset.w * 5 == 180);
+	CHECK(classichud::F5Inset.h * 5 == 80);
+	CHECK(classichud::resourceIconX(1024, 1) - classichud::resourceIconX(1024, 0) == 75);
+	CHECK(classichud::resourceIconX(1024, 3) - classichud::resourceIconX(1024, 2) == 75);
+}
+
+TEST_CASE("classichud nineSlice: corners keep their size, the pieces cover the rect once")
+{
+	classichud::SlicePiece pieces[9];
+	const classichud::Rect dst = {5, 336, 54, 46};
+	const int count = classichud::nineSlice(16, 16, 7, dst, pieces);
+	REQUIRE(count == 9);
+	std::vector<int> hits(54 * 46, 0);
+	int srcArea = 0;
+	for (int i = 0; i < count; ++i) {
+		const classichud::SlicePiece &p = pieces[i];
+		srcArea += p.src.w * p.src.h;
+		CHECK(p.src.x >= 0);
+		CHECK(p.src.y >= 0);
+		CHECK(p.src.x + p.src.w <= 16);
+		CHECK(p.src.y + p.src.h <= 16);
+		for (int y = p.dst.y; y < p.dst.y + p.dst.h; ++y) {
+			for (int x = p.dst.x; x < p.dst.x + p.dst.w; ++x) {
+				++hits[(y - dst.y) * 54 + (x - dst.x)];
+			}
+		}
+	}
+	CHECK(srcArea == 16 * 16);
+	int wrong = 0;
+	for (int h : hits) {
+		wrong += h != 1;
+	}
+	CHECK(wrong == 0);
+	// Corners 7 x 7 unscaled; the middle 2 x 2 of the sprite fills the rest.
+	CHECK(pieces[0].dst.w == 7);
+	CHECK(pieces[0].dst.h == 7);
+	CHECK(pieces[8].src.x == 9);
+	CHECK(pieces[8].dst.x == 5 + 54 - 7);
+	CHECK(pieces[4].src.w == 2);
+	CHECK(pieces[4].dst.w == 40);
+	CHECK(pieces[4].dst.h == 32);
+	// The hit point bar: sprite 6 x 6, border 2, on 54 x 9.
+	const int bar = classichud::nineSlice(6, 6, 2, classichud::HitPointBar, pieces);
+	REQUIRE(bar == 9);
+	CHECK(pieces[4].dst.x == classichud::HitPointFill.x);
+	CHECK(pieces[4].dst.y == classichud::HitPointFill.y);
+	CHECK(pieces[4].dst.w == classichud::HitPointFill.w);
+	CHECK(pieces[4].dst.h == classichud::HitPointFill.h);
+	// A rect smaller than two borders has no middle.
+	CHECK(classichud::nineSlice(16, 16, 7, classichud::Rect{0, 0, 14, 14}, pieces) == 4);
+}
+
+TEST_CASE("classichud hitPointFill: width and colour of the bar")
+{
+	int colour = -1;
+	CHECK(classichud::hitPointFill(30, 30, colour) == 50);   // o11_16: Peasant 30 / 30, 50 px green
+	CHECK(colour == 0);
+	CHECK(classichud::hitPointFill(1200, 1200, colour) == 50);
+	CHECK(classichud::hitPointFill(40, 30, colour) == 50);
+	CHECK(classichud::hitPointFill(15, 30, colour) == 25);
+	CHECK(colour == 1);
+	CHECK(classichud::hitPointFill(14, 30, colour) == 23);
+	CHECK(colour == 2);
+	CHECK(classichud::hitPointFill(0, 30, colour) == 0);
+	CHECK(classichud::hitPointFill(5, 0, colour) == 0);
+}
+
+TEST_CASE("classichud text: the face for a capital's height and its scale")
+{
+	using namespace classichud;
+	// 2960 x 1746: step 3, a capital 24 px; the HUD faces at step 3 have capitals of 25.5 and 18 px.
+	const double caps[2] = {38.25 * 3 / 4.5, 27.0 * 3 / 4.5};
+	double scale = 0.0;
+	CHECK(capOnScreen(TextCap, 1) == doctest::Approx(8.0));
+	CHECK(capOnScreen(TextCap, 2) == doctest::Approx(16.0));
+	CHECK(capOnScreen(TextCap, hdatlas::classicStep(1746)) == doctest::Approx(24.0));
+	CHECK(pickFace(capOnScreen(TextCap, 3), caps, 2, scale) == 0);
+	CHECK(scale * caps[0] == doctest::Approx(24.0));
+	CHECK(pickFace(capOnScreen(TextCapSmall, 3), caps, 2, scale) == 1);
+	CHECK(scale * caps[1] == doctest::Approx(15.0));
+	// 1600 x 720: step 1, a capital 8 px whatever the box's height.
+	CHECK(pickFace(capOnScreen(TextCap, hdatlas::classicStep(720)), caps, 2, scale) == 1);
+	CHECK(scale * caps[1] == doctest::Approx(8.0));
+	// A height nearer to the large face takes it; a tie keeps the first.
+	CHECK(pickFace(24.0, caps, 2, scale) == 0);
+	CHECK(scale == doctest::Approx(24.0 / 25.5));
+	CHECK(pickFace((caps[0] + caps[1]) / 2, caps, 2, scale) == 0);
+	// A face that is not loaded is passed over; none at all: -1, drawn at 1.
+	const double one[2] = {0.0, 18.0};
+	CHECK(pickFace(30.0, one, 2, scale) == 1);
+	CHECK(scale == doctest::Approx(30.0 / 18.0));
+	const double none[2] = {0.0, 0.0};
+	CHECK(pickFace(30.0, none, 2, scale) == -1);
+	CHECK(scale == doctest::Approx(1.0));
+}
+
+TEST_CASE("classichud text: left, centred and to the colon; the panel's rows")
+{
+	using namespace classichud;
+	CHECK(textLeft(TextAlign::Left, 460.0, 33.0, 0.0) == doctest::Approx(460.0));
+	// "Menu" 29 px wide in the face 46..105: 15 px free on the left (o11_13: ink 61..89).
+	CHECK(textLeft(TextAlign::Centre, 46 + 60 / 2.0, 29.0, 0.0) == doctest::Approx(61.5));
+	CHECK(textLeft(TextAlign::Centre, PauseFace.x + PauseFace.w / 2.0, 28.0, 0.0) == doctest::Approx(124.0));
+	// "Armor: 0": the label ends at the colon's column whatever the value's width.
+	CHECK(textLeft(TextAlign::Tab, PanelColonX, 60.0, 37.0) == doctest::Approx(63.0));
+	CHECK(textLeft(TextAlign::Tab, PanelColonX, 90.0, 37.0) == doctest::Approx(63.0));
+	// Resource numbers start 18 px right of each icon.
+	CHECK(resourceIconX(1024, 0) + ResourceTextDX == 460);
+	CHECK(resourceIconX(1024, 3) + ResourceTextDX == 685);
+	// The Remastered panel's places are the measured classic ones.
+	CHECK(panelMidY(852.75) == doctest::Approx(PanelNameMidY));
+	CHECK(panelMidY(920.25) == doctest::Approx(PanelLevelMidY));
+	for (int n = 0; n < 5; ++n) {
+		CHECK(panelMidY(1064.25 + 67.5 * n) == doctest::Approx(PanelStatMidY + PanelStatPitch * n));
+	}
+	CHECK(panelX(450.0) == doctest::Approx(PanelColonX));
+	CHECK(panelX(520.0) == doctest::Approx(PanelNameX).epsilon(0.01));
+	// Hit point figure: centred on the bar (x 144 units = 32; measured centre 31.5), capitals'
+	// middle 1003.5 units = 223.5 (measured 222.5): within a pixel.
+	CHECK(panelX(144.0) == doctest::Approx(HitPointBar.x + HitPointBar.w / 2.0));
+	CHECK(panelMidY(1003.5) - 222.5 <= 1.0);
+}
+
+TEST_CASE("hd_atlas minimapMarkPixels: one pixel more than the unit's tiles cover")
+{
+	constexpr int fac = 48;
+	// 1 pixel a tile (128 map on 128 pixels): a one-tile unit is 2 x 2, whatever its grid step.
+	CHECK(hdatlas::minimapMarkPixels(1, 1 * fac, fac) == 2);
+	CHECK(hdatlas::minimapMarkPixels(2, 1 * fac, fac) == 3);
+	CHECK(hdatlas::minimapMarkPixels(4, 1 * fac, fac) == 5);
+	// 4/3 pixels a tile (96 map): still 2.
+	CHECK(hdatlas::minimapMarkPixels(1, 64, fac) == 2);
+	CHECK(hdatlas::minimapMarkPixels(3, 64, fac) == 5);
+	CHECK(hdatlas::minimapMarkPixels(1, 2 * fac, fac) == 3);
+	CHECK(hdatlas::minimapMarkPixels(1, 4 * fac, fac) == 5);
+}
+
+TEST_CASE("hd_atlas classicMinimapViewPixels: the view rectangle of every measured capture")
+{
+	struct Row {
+		int map;   // tiles of the map's side
+		int lw;    // logical screen
+		int lh;
+		int w;     // the rectangle read from the capture, logical pixels
+		int h;
+	};
+	static const Row rows[] = {
+		// 32-tile map: o11_13, o11_12 (1366 x 776), o11_11 (1920 x 1080, step 2).
+		{32, 1024, 768, 104, 92}, {32, 1035, 776, 104, 92}, {32, 720, 540, 64, 60},
+		// 64-tile map: o11_80, o11_83_* (1000 x 800, 1280 x 800, 1366 x 1000, 2560 x 1300, 800 x 480).
+		{64, 1024, 768, 52, 46}, {64, 1000, 750, 50, 44}, {64, 1067, 800, 54, 48},
+		{64, 666, 500, 28, 28}, {64, 866, 650, 42, 38}, {64, 640, 480, 28, 28},
+		// 96-tile map, step 1: o21_01 / o11_40, o21_20, o21_21, o21_22 / o21_28, o21_26.
+		{96, 1024, 768, 35, 31}, {96, 1200, 900, 42, 37}, {96, 1267, 950, 45, 38},
+		{96, 1279, 959, 45, 38}, {96, 1100, 825, 38, 33},
+		// step 2: o21_23 / o21_29, o21_25, o21_27, o21_50.
+		{96, 640, 480, 19, 19}, {96, 647, 485, 19, 19}, {96, 550, 413, 15, 15}, {96, 720, 540, 22, 21},
+		// step 3: o21_11, o21_10, o21_12, o21_13 / o21_14 / o21_53..55, o21_31.
+		{96, 640, 480, 19, 19}, {96, 666, 500, 19, 19}, {96, 711, 533, 22, 21}, {96, 776, 582, 25, 23},
+		{96, 800, 600, 26, 23},
+		// step 4 and 5: o21_15, o21_16, o21_17.
+		{96, 600, 450, 17, 18}, {96, 650, 487, 19, 19}, {96, 480, 360, 13, 14},
+	};
+	for (const Row &r : rows) {
+		const hdatlas::ClassicScreen c = {{0, 0, r.lw, r.lh}, 1, r.lw, r.lh};
+		const hdatlas::ClassicRect v = hdatlas::classicView(c);
+		CAPTURE(r.map);
+		CAPTURE(r.lw);
+		CAPTURE(r.lh);
+		CHECK(hdatlas::classicMinimapViewPixels(v.w, r.map) == r.w);
+		CHECK(hdatlas::classicMinimapViewPixels(v.h, r.map) == r.h);
+	}
+	// The device: 2960 x 1746, step 3, a 96-tile map: 75 x 69 screen pixels (was 72 x 69).
+	const hdatlas::ClassicScreen dev = hdatlas::classicScreen(2960, 1746);
+	const hdatlas::ClassicRect view = hdatlas::classicView(dev);
+	CHECK(dev.s * hdatlas::classicMinimapViewPixels(view.w, 96) == 75);
+	CHECK(dev.s * hdatlas::classicMinimapViewPixels(view.h, 96) == 69);
+	// The part of a tile at the view's end does not count; the place of the view neither.
+	CHECK(hdatlas::classicMinimapViewPixels(18 * 32, 96) == 25);
+	CHECK(hdatlas::classicMinimapViewPixels(18 * 32 + 31, 96) == 25);
+	CHECK(hdatlas::classicMinimapViewPixels(19 * 32, 96) == 26);
+	// o21_30 (2400 x 1439, step 2, box 1918 wide): 33 x 29, the size of 24 x 21 whole tiles.
+	CHECK(hdatlas::classicMinimapViewPixels(24 * 32, 96) == 33);
+	CHECK(hdatlas::classicMinimapViewPixels(21 * 32 + 15, 96) == 29);
+	// Nothing to show.
+	CHECK(hdatlas::classicMinimapViewPixels(0, 96) == 0);
+	CHECK(hdatlas::classicMinimapViewPixels(584, 0) == 0);
+}
+
+TEST_CASE("classichud: the hotkey letter of a command cell and its place")
+{
+	using namespace classichud;
+	CHECK(hotkeyLetter('m') == "M");
+	CHECK(hotkeyLetter('B') == "B");
+	CHECK(hotkeyLetter('1') == "1");
+	CHECK(hotkeyLetter(0).empty());
+	CHECK(hotkeyLetter(27).empty());      // Escape: Cancel has no letter (o21_55)
+	CHECK(hotkeyLetter(' ').empty());
+	CHECK(hotkeyLetter(1004).empty());    // a key outside ASCII
+	// o21_54: "M" in cell 1, ink x 12.33..22.33, rows 343.67..351.67; "S" in cell 2, 69.33..74.67;
+	// "V" in cell 8, 69..76, rows 437.67..446.
+	CHECK(hotkeyMidX(commandCell(0)) == doctest::Approx(16.5));
+	CHECK(hotkeyMidY(commandCell(0)) == doctest::Approx(348.0));
+	CHECK(hotkeyMidX(commandCell(0)) - (12.33 + 22.33) / 2 <= 1.0);
+	CHECK((69.33 + 74.67) / 2 - hotkeyMidX(commandCell(1)) <= 1.0);
+	CHECK(hotkeyMidX(commandCell(1)) == doctest::Approx(72.5));
+	CHECK(hotkeyMidX(commandCell(7)) == doctest::Approx((69.0 + 76.0) / 2));
+	CHECK(hotkeyMidY(commandCell(7)) == doctest::Approx(442.0));
+	// On the device (2960 x 1746, step 3): cell 1's letter about screen 365.5, 1044; 24 px high.
+	const hdatlas::ClassicScreen dev = hdatlas::classicScreen(2960, 1746);
+	CHECK(dev.box.x + hotkeyMidX(commandCell(0)) * dev.s == doctest::Approx(365.5));
+	CHECK(dev.box.y + hotkeyMidY(commandCell(0)) * dev.s == doctest::Approx(1044.0));
+	CHECK(capOnScreen(TextCap, dev.s) == doctest::Approx(24.0));
+	// The letter is inside the picture's top-left quarter.
+	const Rect pic = cellPicture(commandCell(4));
+	CHECK(hotkeyMidX(commandCell(4)) - TextCap / 2.0 > pic.x);
+	CHECK(hotkeyMidY(commandCell(4)) - TextCap / 2.0 >= pic.y);
+	CHECK(hotkeyMidY(commandCell(4)) + TextCap / 2.0 < pic.y + pic.h / 2);
+}
+
+TEST_CASE("classichud f5InsetSample: a logical pixel shows the middle pixel of its 5 x 5 block")
+{
+	using namespace classichud;
+	CHECK(F5Inset.w * F5InsetBlock == F5InsetArtW);
+	CHECK(F5Inset.h * F5InsetBlock == F5InsetArtH);
+	const Rect first = f5InsetSample(0, 0);
+	CHECK(first.x == 2);
+	CHECK(first.y == 2);
+	CHECK(first.w == 1);
+	CHECK(first.h == 1);
+	const Rect last = f5InsetSample(F5Inset.w - 1, F5Inset.h - 1);
+	CHECK(last.x == 177);
+	CHECK(last.y == 77);
+	for (int ly = 0; ly < F5Inset.h; ++ly) {
+		for (int lx = 0; lx < F5Inset.w; ++lx) {
+			const Rect r = f5InsetSample(lx, ly);
+			CHECK(r.x / F5InsetBlock == lx);
+			CHECK(r.y / F5InsetBlock == ly);
+			CHECK(r.x % F5InsetBlock == 2);
+			CHECK(r.y % F5InsetBlock == 2);
+			CHECK(r.x < F5InsetArtW);
+			CHECK(r.y < F5InsetArtH);
+		}
+	}
+	// The place a renderer's nearest sample takes at step 1 (the middle of the target pixel).
+	CHECK((int) ((7 + 0.5) * F5InsetArtW / F5Inset.w) == f5InsetSample(7, 0).x);
+}
+
+TEST_CASE("classichud splitStatLine: the label to the colon, the value from its own column")
+{
+	using namespace classichud;
+	std::string label;
+	std::string value;
+	CHECK(splitStatLine("Armor~|:~_~_~_~_0", label, value));
+	CHECK(label == "Armor~|:");
+	CHECK(value == "0");
+	CHECK(splitStatLine("Damage~|: 1-5", label, value));
+	CHECK(label == "Damage~|:");
+	CHECK(value == "1-5");
+	CHECK(splitStatLine("Armor~|:~_~_~_~_4~<+2~>", label, value));
+	CHECK(value == "4~<+2~>");
+	// A heading, a name, a line without a value: not split.
+	CHECK_FALSE(splitStatLine("Food Usage~|", label, value));
+	CHECK_FALSE(splitStatLine("Peon", label, value));
+	CHECK_FALSE(splitStatLine("Gold~|:~_~_~_~_", label, value));
+	// The value's column: 4.67 right of the colon's column (ink of "0" from 104.67 at step 3).
+	CHECK(PanelValueX - PanelColonX == doctest::Approx(4.67));
+	CHECK(textLeft(TextAlign::Left, PanelValueX, 6.0, 0.0) == doctest::Approx(104.67));
+	// The hit point figure: 1003.5 units is row 223.0 (measured 222.83, 223.0, 222.5).
+	CHECK(panelSmallMidY(1003.5) == doctest::Approx(223.0));
+	CHECK(panelSmallMidY(1003.5) - 222.83 < 0.5);
 }

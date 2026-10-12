@@ -51,8 +51,15 @@ class CHost;
 /// byte and the Config ack the probe mask, +3 since a mesh game runs with the model (relay on
 /// request, removal round), +4 since the quit command carries its reason and a mesh game
 /// begins behind the start barrier, +5 since a pause is a command of the stream and a mesh
-/// message (a pause for everybody). A build without them is refused at Hello.
-#define NetworkProtocolPatchLevel   (StratagusPatchLevel + 5)
+/// message (a pause for everybody), +6 since a chat line of a mesh game is a mesh message
+/// of its own, +7 since every game is a mesh game: the Config and the State carry no mesh
+/// byte and the server passes nothing on, +8 since sight is counted from the unit's centre
+/// tile and a building under construction lights with range 3 (simulation state on every
+/// device), +12 since an attack range against a unit is counted as the larger axis gap
+/// (simulation state on every device), +14 since a missile comes down no nearer than its
+/// unit type's minimal impact distance (simulation state on every device). A build without
+/// them is refused at Hello.
+#define NetworkProtocolPatchLevel   (StratagusPatchLevel + 14)
 /// Network protocol version (1,2,3) -> 10203
 #define NetworkProtocolVersion \
 	(NetworkProtocolMajorVersion * 10000 + NetworkProtocolMinorVersion * 100 + \
@@ -104,7 +111,6 @@ extern int NetConnectRunning;              /// Network menu: Setup mode active
 extern int NetConnectType;              /// Network menu: Setup mode active
 extern int NetLocalHostsSlot;              /// Network menu: Slot # in Hosts array of local client
 extern int NetLocalPlayerNumber;           /// Player number of local client
-extern bool NetMesh;                       /// This game: every device sends to every device, nobody forwards
 
 extern std::string NetworkMapName;         /// Name of the map received with ICMMap
 extern std::string NetworkMapFragmentName; /// Name of the map currently loading via ICMMapNeeded
@@ -146,8 +152,7 @@ extern void NetworkDetachFromServer();      /// Menu Loop: Client: Send GoodBye 
 
 extern void NetworkSendICMessage(CUDPSocket &socket, const CHost &host, const CInitMessage_Header &msg);
 
-extern void SetNetMesh(bool mesh);          /// Server: ask for the mesh in the games started from now on
-extern bool GetNetMesh();                   /// Server: the mesh is asked for
+extern const std::string &NetworkServerStartFailure(); /// Server: why the last start was given up
 extern void NetworkMeshProbeAnswered(int hostIndex); /// Client: the peer in that host slot answered our probe
 
 //@}

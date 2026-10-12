@@ -171,8 +171,9 @@ void CMeshGlue::OnHeard(int hostSlot, int64_t now)
 
 void CMeshGlue::OnMeshMessage(int hostSlot, const mesh::Msg &message, int64_t now)
 {
-	// A command of the model stands for a command packet, which has its own way in.
-	if (PlayerOfSlot(hostSlot) == -1 || message.kind == mesh::Kind::Cmd) {
+	// A command of the model stands for a command packet, which has its own way in; so has
+	// a chat line, which comes with its text.
+	if (PlayerOfSlot(hostSlot) == -1 || message.kind == mesh::Kind::Cmd || message.kind == mesh::Kind::Chat) {
 		return;
 	}
 	model.OnMessage(hostSlot, message, now);
@@ -214,6 +215,48 @@ void CMeshGlue::OnResume(int64_t now)
 {
 	model.Resume(now);
 	Drain(false, now);
+}
+
+/**
+**  The local player says a chat line. The model sends it to every device and repeats
+**  it until each has answered; the text is kept for that.
+**
+**  @return  false if the model takes no line now.
+*/
+bool CMeshGlue::OnChat(const std::string &text, int64_t now)
+{
+	const uint32_t number = model.Chat(now);
+
+	if (number == 0) {
+		return false;
+	}
+	// The model repeats only the lines of its window; twice that many are kept.
+	if (ownChat.size() == 2 * mesh::kChatWindow) {
+		ownChat.pop_front();
+	}
+	ownChat.emplace_back(number, text);
+	Drain(false, now);
+	return true;
+}
+
+/**
+**  A chat line arrived from the address of a host slot. The model answers it and
+**  tells whether it is new; a new one is shown.
+*/
+void CMeshGlue::OnChatMessage(int hostSlot, uint32_t number, const std::string &text, int64_t now)
+{
+	if (PlayerOfSlot(hostSlot) == -1) {
+		return;
+	}
+	mesh::Msg message;
+	message.kind = mesh::Kind::Chat;
+	message.player = uint8_t(hostSlot);
+	message.data = number;
+	model.OnMessage(hostSlot, message, now);
+	Heard(hostSlot);
+	chatArrived = &text;
+	Drain(false, now);
+	chatArrived = nullptr;
 }
 
 void CMeshGlue::Tick(int64_t now)
@@ -295,7 +338,14 @@ void CMeshGlue::Drain(bool ownPackets, int64_t now)
 	out.swap(model.out);
 	events.swap(model.events);
 	for (const mesh::Out &o : out) {
-		if (o.msg.kind != mesh::Kind::Cmd) {
+		if (o.msg.kind == mesh::Kind::Chat) {
+			for (const auto &line : ownChat) {
+				if (line.first == o.msg.data) {
+					engine.SendChat(o.to, line.first, line.second);
+					break;
+				}
+			}
+		} else if (o.msg.kind != mesh::Kind::Cmd) {
 			engine.SendMesh(o.to, o.msg);
 		} else if (!ownPackets) {
 			engine.SendPacket(o.to, PlayerOfSlot(o.msg.player), o.msg.cycle);
@@ -329,6 +379,11 @@ void CMeshGlue::Drain(bool ownPackets, int64_t now)
 				break;
 			case mesh::Event::Resumed:
 				engine.SetPaused(false, PlayerOfSlot(event.player));
+				break;
+			case mesh::Event::ChatLine:
+				if (chatArrived) {
+					engine.ShowChat(PlayerOfSlot(event.player), *chatArrived);
+				}
 				break;
 		}
 	}

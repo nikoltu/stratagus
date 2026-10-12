@@ -169,6 +169,12 @@ static void Finish(COrder_Built &order, CUnit &unit)
 			// Bye bye worker.
 			LetUnitDie(*worker);
 			worker = nullptr;
+		} else if (worker->Type->GridStep > 1 && worker->Container == &unit
+		           && worker->Type->ResInfo[type.GivesResource]
+		           && !worker->Type->ResInfo[type.GivesResource]->HarvestFromOutside
+		           && !worker->Type->ResInfo[type.GivesResource]->TerrainHarvester) {
+			// It stays inside the resource it has built and comes out with its first load.
+			worker->Orders[0] = COrder::NewActionResource(*worker, unit);
 		} else { // Drop out the worker.
 			worker->ClearAction();
 

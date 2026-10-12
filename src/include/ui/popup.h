@@ -261,6 +261,12 @@ public:
 extern void DrawRemasteredTooltip(const CPopup &popup, const ButtonAction &button,
 								  const int *costs, bool allowed);
 
+/// The three texts DrawRemasteredTooltip draws for `button`: the title, the body and, for a
+/// greyed button (`allowed` false), the requirement line. Returns the id of the string record
+/// the button's target resolved to, -1 when it has none (a plain command, or no counterpart).
+extern int GetRemasteredTooltipTexts(const ButtonAction &button, bool allowed, std::string &title,
+									 std::string &body, std::string &requirement);
+
 
 //@}
 

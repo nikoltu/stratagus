@@ -292,15 +292,15 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 	const int mask = CursorBuilding->MovementMask;
 	const int tileW = (int) std::lround(PixelTileSize.x * vp.Zoom);
 	const int tileH = (int) std::lround(PixelTileSize.y * vp.Zoom);
-	int h = CursorBuilding->TileHeight;
-	// reduce to view limits
-	h = std::min(h, vp.MapPos.y + vp.MapHeight - mpos.y);
-	int w0 = CursorBuilding->TileWidth;
-	w0 = std::min(w0, vp.MapPos.x + vp.MapWidth - mpos.x);
+	// reduce to view limits. With a finger the preview keeps its tile while the view moves
+	// (a tap on the minimap), so it can stand wholly below or right of the view: the count
+	// is then 0, not negative (`while (h--)` from a negative count runs 2^32 times).
+	int h = hdatlas::tilesBeforeViewEnd(mpos.y, CursorBuilding->TileHeight, vp.MapPos.y, vp.MapHeight);
+	const int w0 = hdatlas::tilesBeforeViewEnd(mpos.x, CursorBuilding->TileWidth, vp.MapPos.x, vp.MapWidth);
 
-	while (h--) {
+	while (h-- > 0) {
 		int w = w0;
-		while (w--) {
+		while (w-- > 0) {
 			const Vec2i posIt(mpos.x + w, mpos.y + h);
 			Uint32 color;
 
@@ -338,13 +338,12 @@ static void DrawBuildingCursor()
 	}
 }
 
-// TOUCH-R7 (owner decision 2026-10-08, option B): with a finger there is no pointer for the
-// preview to follow, so the preview stands on a map tile of its own. A tap or a drag puts it
-// there (ui/mouse.cpp); a tap on it places the building. It keeps its tile while the view is
-// panned or zoomed. Owner's answers of 2026-10-08: Q3 = A, no preview until the map is first
-// touched; Q4 = B, the finger marks the middle of the building (ui/mouse.cpp,
-// TouchPlacementTile). The tile kept here is the footprint's top-left one, which is what
-// DrawBuildingCursorViewport and the build command take.
+// TOUCH-R7 (owner's rule): with a finger there is no pointer for the preview to follow, so
+// the preview stands on a map tile of its own. A tap or a drag puts it there (ui/mouse.cpp);
+// a tap on it places the building. It keeps its tile while the view is panned or zoomed.
+// There is no preview until the map is first touched, and the finger marks the middle of
+// the building (ui/mouse.cpp, TouchPlacementTile). The tile kept here is the footprint's
+// top-left one, which is what DrawBuildingCursorViewport and the build command take.
 static const CUnitType *BuildingPreviewType = nullptr; /// type the tile was set for
 static const CViewport *BuildingPreviewViewport = nullptr;
 static Vec2i BuildingPreviewTilePos(0, 0);

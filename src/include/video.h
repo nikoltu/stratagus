@@ -109,6 +109,9 @@ extern bool IsClassicView();
 // building and effect sheets are drawn at the same density (EVIDENCE-SST-002; captures M7-M12 of
 // SPEC_SPRITE_SCALE_TRUE.md). One screen pixel per native pixel = PixelTileSize * zoom / 216.
 constexpr int HdNativeTilePx = 216;
+// Classic view: classic pixels per map tile. Every classic terrain frame is 32 x 32
+// (Data/Art/hd/classic/classic_*.json), and a classic sprite cell is drawn at the same density.
+constexpr int ClassicTilePx = 32;
 
 // World internal-resolution scale (0.25..1.0). When < 1.0 the zoomed in-game world (terrain, units,
 // missiles, particles, fog) is rendered into a GPU target texture at this fraction of the viewport
@@ -400,9 +403,13 @@ public:
 	// fog masks: index 0 is nothing. Each gets a second frame "<name>_dither" that keeps only the
 	// checkerboard pixels (hdatlas::classicFogDither), and two full cells of the masks' colour are
 	// added: "<maskPrefix>solid" and "<maskPrefix>solid_dither".
+	// groupMark: with a palette only. The frames named "<group><groupMark><N>" (classic sprite
+	// groups, e.g. "Orc/peon.grp/indexed_3") are listed but not cut at load; the indexed page and
+	// the palette are kept so that ClassicGroup() can cut a group when it is first drawn.
 	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false, bool fogMask = false,
 	                       const unsigned char *palette = nullptr, bool nearest = false,
-	                       const char *framePrefix = nullptr, const char *maskPrefix = nullptr);
+	                       const char *framePrefix = nullptr, const char *maskPrefix = nullptr,
+	                       const char *groupMark = nullptr);
 	bool IsLoaded() const { return !pages.empty(); }
 
 	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.
@@ -441,8 +448,37 @@ public:
 	// so the trimmed src rect is the full frame. No-op if not loaded or frame/page out of range.
 	void DrawAtlasFrameFull(int frame, const SDL_Rect &dst) const;
 	void DrawAtlasFrameFullAlpha(int frame, const SDL_Rect &dst, uint8_t alpha) const;
+	// Classic view (HUD frame): draw the top-left srcW x srcH part of an untrimmed frame scaled into
+	// dst; a part larger than the frame is cut to the frame. For a piece that is repeated and cut at
+	// the end of its run. No-op as DrawAtlasFrameFull.
+	void DrawAtlasFramePart(int frame, int srcW, int srcH, const SDL_Rect &dst) const;
+
+	// Classic view: sprite groups of a page loaded with a groupMark.
+	// ClassicGroupByName: number of the group (the name is compared without regard to case), or -1.
+	int ClassicGroupByName(const std::string &group) const;
+	// ClassicGroup: the textures of one group, its team-colour pixels drawn with the palette run
+	// that starts at rampStart (hdatlas::classicRampStart). Frame N of the result is the group's
+	// frame N; index 0 is nothing; sampling is nearest. Cut at the first call and kept until this
+	// atlas dies; a group without team-colour pixels is cut once for all runs. Null when the group
+	// number is out of range or the cut failed (the failure is kept, it is not tried again).
+	const CAtlasGraphic *ClassicGroup(int group, int rampStart);
+	// A number that differs for every page loaded with a groupMark: a cached group number is good
+	// only for the atlas it was asked from.
+	unsigned ClassicSerial() const { return classicSerial; }
 
 private:
+	struct ClassicGroupData {
+		std::string name;
+		std::vector<hdatlas::HdFrameRecord> cells;       // by frame number; sw == 0: absent
+		int hasTeam = -1;                                 // -1 not looked at yet
+		std::map<int, std::unique_ptr<CAtlasGraphic>> byRamp;
+	};
+	SDL_Surface *classicPage = nullptr;               // the 8-bit page, kept for ClassicGroup
+	std::vector<uint8_t> classicPalette;              // 768 bytes, as given to LoadTexturePacker
+	std::vector<ClassicGroupData> classicGroups;
+	std::unordered_map<std::string, int> classicGroupByName; // lower-case name -> classicGroups index
+	unsigned classicSerial = 0;
+
 	uint32_t cap = 0;
 	std::vector<hdatlas::HdFrameRecord> frames;
 	std::vector<SDL_Texture *> pages;                 // one texture per page PNG
@@ -627,24 +663,23 @@ public:
 	int WindowWidth = 0;
 	int WindowHeight = 0;
 
-	// WORLD-ZOOM-RULE: the IN-GAME picture and the HUD scale, as the original computes them
-	// (work/agent-zoom-rule/SPEC_WORLD_ZOOM_RULE.md, rules R1..R4, 46 client sizes; 2960x1848
-	// measured directly on captures g_2960x1848.png / c_k_2960x1848.png):
+	// WORLD-ZOOM-RULE: the in-game picture and the HUD scale, as the original computes them
+	// (rules R1..R4, 46 client sizes; measured: g_2960x1848.png, c_k_2960x1848.png):
 	//   Step  k = max(1, floor(Height / 480))                        -- the height alone decides
 	//   picture (X, Y, W, H) = the framebuffer clamped to an aspect between 4:3 and 16:9, centred;
 	//                          black outside it, none inside it (3440x1440 -> 2560x1440 at x 440)
+	//                          WIDE-MAP-VIEW (an owner's deviation): on a screen wider
+	//                          than 16:9 the picture is the whole width instead, X = 0, W = Width
 	//   Scale = k * 480 / 2160  -- px per unit of the HUD's 2160-high art space (k / 4.5)
 	// The HUD is the classic 640x480 layout times k, anchored at the picture's top-left; the map
 	// view starts at X + 176 * k and runs to the picture's right and bottom edges; a world tile is
 	// 32 * k px. NOTE: H is the picture's height, NOT 2160 * Scale -- the HUD art ends at
 	// Y + 2160 * Scale (= 480 * k) and the side bar's tileable strip fills the rest down to Y + H.
 	//
-	// MENUS AND IN-GAME WINDOWS DO NOT USE Scale (the Game Menu rows of capture
-	// work/agent-hud/captures/o34_h1_menu_open.png are 592 px wide at a 1684x1031 client:
-	// 1350 units at min(W/3840, H/2160) = 0.4385, not at k / 4.5 = 0.4444).
+	// Menus and in-game windows do not use Scale: they keep min(W/3840, H/2160) (measured:
+	// o34_h1_menu_open.png).
 	//
-	// It is computed ONCE, here, and read everywhere else: the NG87..NG93 family was one transform
-	// copied nine times, and the rule that came out of it is that the formula is called, never copied.
+	// It is computed once, here, and read everywhere else: the formula is called, never copied.
 	struct {
 		int X = 0, Y = 0, W = 0, H = 0;   // the picture rect in framebuffer px
 		double Scale = 1.0;              // px per HUD unit (2160-high art space) = Step * 480 / 2160

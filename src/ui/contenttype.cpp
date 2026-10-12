@@ -47,6 +47,7 @@
 #include "unit.h"
 #include "ui.h"
 #include "video.h"
+#include "../video/hd_classic_hud.h"
 
 #include <variant>
 
@@ -61,7 +62,7 @@ extern UStrInt GetComponent(const CUnit &unit, int index, EnumVariable e, int t)
 **  @param defaultfont  default font if no specific font in extra data.
 */
 // UPGRADE-LOOK: the original prints the bonus an upgrade gives - "Damage: 2-9+2", "Armor: 2+2" - with
-// the "+n" in yellow (255, 204, 0) (work/agent-orig-7 captures f3_footman_w1, f5_footman_w1a1). The
+// the "+n" in yellow (255, 204, 0) (captures f3_footman_w1, f5_footman_w1a1). The
 // card's texts mark that part as reverse ("~<...~>"); the baked HD face takes no font colour, so
 // the marked part is tinted here. Returns the drawn width, as CLabel::Draw does.
 static int DrawWithBonusTint(CLabel &label, int x, int y, std::string_view text)
@@ -121,7 +122,7 @@ void CContentTypeText::Draw(const CUnit &unit, CFont *defaultfont) const /* over
 	if (this->Index != -1) {
 		if (!this->Stat) {
 			// CASTER-PANEL: a value with no caption before it and Centered set is centred on its
-			// position (the number inside the "Magic:" bar, work/agent-orig-6/ORIG6.md).
+			// position (the number inside the "Magic:" bar).
 			const bool centred = this->Centered && !this->Text;
 			std::visit([&](const auto &value) {
 				if (centred) {
@@ -246,6 +247,65 @@ void CContentTypeFormattedText2::Draw(const CUnit &unit, CFont *defaultfont) con
 
 
 /**
+**  Classic view: the text a content of the info panel prints for the unit, as its Draw builds it
+**  (the caption, then the value), with the place and the face it would be drawn with.
+*/
+bool ClassicContentText(const CContentType &content, const CUnit &unit, CFont *defaultFont,
+                        ClassicPanelText &out)
+{
+	char buf[256]{};
+	out.x = content.Pos.x;
+	out.y = content.Pos.y;
+	if (const auto *text = dynamic_cast<const CContentTypeText *>(&content)) {
+		out.font = text->Font ? text->Font : defaultFont;
+		out.centred = text->Centered;
+		out.text = text->Text ? EvalString(*text->Text) : std::string();
+		if (text->ShowName) {
+			out.text += unit.Type->Name;
+		} else if (text->Index != -1 && text->Stat) {
+			const int value = unit.Type->MapDefaultStat.Variables[text->Index].Value;
+			const int diff = unit.Stats->Variables[text->Index].Value - value;
+			if (!diff) {
+				out.text += std::to_string(value);
+			} else {
+				snprintf(buf, sizeof(buf), diff > 0 ? "%d~<+%d~>" : "%d~<-%d~>", value, diff);
+				out.text += buf;
+			}
+		} else if (text->Index != -1) {
+			std::visit([&](const auto &value) {
+				if constexpr (std::is_same_v<std::decay_t<decltype(value)>, int>) {
+					out.text += std::to_string(value);
+				} else {
+					out.text += value;
+				}
+			}, GetComponent(unit, text->Index, text->Component, 0));
+		}
+		return out.font != nullptr && !out.text.empty();
+	}
+	if (const auto *text = dynamic_cast<const CContentTypeFormattedText *>(&content)) {
+		out.font = text->Font ? text->Font : defaultFont;
+		out.centred = text->Centered;
+		std::visit([&](auto v) { snprintf(buf, sizeof(buf), text->Format.c_str(), printfArg(tr(v))); },
+		           GetComponent(unit, text->Index, text->Component, 0));
+		out.text = buf;
+		return out.font != nullptr && !out.text.empty();
+	}
+	if (const auto *text = dynamic_cast<const CContentTypeFormattedText2 *>(&content)) {
+		out.font = text->Font ? text->Font : defaultFont;
+		out.centred = text->Centered;
+		std::visit(
+			[&](auto v1, auto v2) {
+				snprintf(buf, sizeof(buf), text->Format.c_str(), printfArg(tr(v1)), printfArg(tr(v2)));
+			},
+			GetComponent(unit, text->Index1, text->Component1, 0),
+			GetComponent(unit, text->Index2, text->Component2, 0));
+		out.text = buf;
+		return out.font != nullptr && !out.text.empty();
+	}
+	return false;
+}
+
+/**
 **  Get unit from a unit depending of the relation.
 **
 **  @param unit  unit reference.
@@ -352,8 +412,7 @@ void CContentTypeLifeBar::Draw(const CUnit &unit, CFont *) const /* override */
 
 	if (this->hasSeat) {
 		// M666-9: the original's bar sits on a black seat and its unfilled part is grey (skin
-		// `hud_hp_bar`; k = 3, work/agent-orig-scenes/captures e01, hi10, i02: fill x 21..170,
-		// y 633..647; black x 15..176, y 627..653). The margins and the grey come from Lua.
+		// `hud_hp_bar`; captures e01, hi10, i02). The margins and the grey come from Lua.
 		Video.FillRectangleClip(ColorBlack, this->Pos.x - 1 - this->seat[0], this->Pos.y - 1 - this->seat[1],
 		                        this->Width + this->seat[0] + this->seat[2],
 		                        this->Height + this->seat[1] + this->seat[3]);

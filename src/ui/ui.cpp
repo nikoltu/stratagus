@@ -45,14 +45,24 @@
 #include "loadingscreen.h"
 #include "map.h"
 #include "menus.h"
+#include "minimap.h"
+#include "player.h"
 #include "network.h"
 #include "title.h"
 #include "ui/contenttype.h"
 #include "ui/popup.h"
 #include "unit.h"
 #include "video.h"
+#include "../video/hd_classic_hud.h"
+#include "icons.h"
+#include "settings.h"
+#include "unittype.h"
 
+#include <cctype>
+#include <cmath>
 #include <cstdarg>
+#include <map>
+#include <memory>
 
 /*----------------------------------------------------------------------------
 -- Variables
@@ -83,13 +93,10 @@ void ShowLoadProgress(const char *fmt, ...)
 	va_list va;
 	char temp[4096];
 
-	// NG68: beat the debug watchdog's heartbeat here, BEFORE the loading-screen early-return below.
-	// A mission load blocks the main loop for many seconds without crossing a main-loop checkpoint,
-	// so the watchdog used to report "main loop STALLED 3..10s at 'UpdateDisplay:begin'" on every
-	// single mission load -- a false alarm that trains the reader to ignore real ones. This call
-	// keeps the heartbeat moving for as long as loading is making progress, and a genuine hang
-	// INSIDE the load still trips the watchdog, now labelled 'loading' instead of pointing at the
-	// main loop.
+	// NG68: beat the debug watchdog's heartbeat here, before the loading-screen early return below.
+	// A mission load blocks the main loop for many seconds without crossing a main-loop checkpoint.
+	// This call keeps the heartbeat moving for as long as loading is making progress; a real hang
+	// inside the load still trips the watchdog, labelled 'loading'.
 	DBG_CHECKPOINT("loading");
 	NetworkLoadingPing(); // LAN-MESH S8: a device which loads is not a dead one
 
@@ -179,14 +186,21 @@ CPopup &PopupByIdent(std::string_view ident)
 // Magnification applied to the in-game map viewports. Only the play area is scaled. Used both when
 // the map area is sized (InitUserInterface, ClipViewport) and when the viewport zoom is set
 // (FinishViewportModeConfiguration).
-// WORLD-ZOOM-RULE (work/agent-zoom-rule/SPEC_WORLD_ZOOM_RULE.md R3): the original draws a map tile
-// at 32 * k px, k = CVideo::HudCanvas.Step (tile period 96.0 px at a 2960x1848 client, capture
-// g_2960x1848.png). The zoom is that size over the logical tile: 1.5 for the 64-px tile at k = 3,
-// 1.0 at k = 2, 2.0 at k = 4; with a 32-px tile it is k itself.
+// WORLD-ZOOM-RULE (R3): the original draws a map tile at 32 * k px, k = CVideo::HudCanvas.Step
+// (measured: g_2960x1848.png). The zoom is that size over the logical tile: 1.5 for the 64-px
+// tile at k = 3, 1.0 at k = 2, 2.0 at k = 4; with a 32-px tile it is k itself.
 // It is a function, not a constant: the step exists only after CVideo::ComputeHudCanvas and the tile
 // size only after the scripts have set it; both are final before InitUserInterface runs.
+// Classic view: a tile is 32 classic pixels and a classic pixel is a whole number of screen pixels
+// (hdatlas::classicStep), so the zoom is that step times 32 over the logical tile
+// (ClassicLayoutScale is 0 outside the classic layout).
+static float ClassicLayoutScale = 0.0f;
+
 static float MapViewportZoom()
 {
+	if (ClassicLayoutScale > 0.0f && PixelTileSize.x > 0) {
+		return 32.0f * ClassicLayoutScale / PixelTileSize.x;
+	}
 #ifdef __ANDROID__
 	if (PixelTileSize.x > 0 && Video.HudCanvas.Step > 0) {
 		return 32.0f * Video.HudCanvas.Step / PixelTileSize.x;
@@ -195,22 +209,88 @@ static float MapViewportZoom()
 	return 1.0f;
 }
 
-/**
-**  Initialize the user interface.
-*/
-void InitUserInterface()
+// Classic view layout. The scripts lay out the Remastered picture; the classic rects are put over
+// theirs while the classic view is on, and theirs are kept here to be put back unchanged.
+struct LayoutRects {
+	CMapArea MapArea;
+	int MinimapX = 0;
+	int MinimapY = 0;
+	int MinimapW = 0;
+	int MinimapH = 0;
+};
+static LayoutRects RemasteredLayout;       /// the scripts' rects, as InitUserInterface found them
+static LayoutRects ClassicLayout;          /// the classic rects as they were put
+static bool RemasteredLayoutKept = false;
+static bool ClassicLayoutOn = false;
+
+static LayoutRects PresentLayoutRects()
 {
-	UI.Offset640X = (Video.Width - 640) / 2;
-	UI.Offset480Y = (Video.Height - 480) / 2;
+	LayoutRects r;
+	r.MapArea = UI.MapArea;
+	r.MinimapX = UI.Minimap.X;
+	r.MinimapY = UI.Minimap.Y;
+	r.MinimapW = UI.Minimap.W;
+	r.MinimapH = UI.Minimap.H;
+	return r;
+}
 
-	UI.LifeBarColorsInt.clear();
-	for(const std::string& name : UI.LifeBarColorNames) {
-		UI.LifeBarColorsInt.push_back(IndexToColor(GetColorIndexByName(name)));
-	}
+static void PutLayoutRects(const LayoutRects &r)
+{
+	UI.MapArea = r.MapArea;
+	UI.Minimap.X = r.MinimapX;
+	UI.Minimap.Y = r.MinimapY;
+	UI.Minimap.W = r.MinimapW;
+	UI.Minimap.H = r.MinimapH;
+}
 
-	//
-	// Calculations
-	//
+static bool SameMapRect(const CMapArea &a, const CMapArea &b)
+{
+	return a.X == b.X && a.Y == b.Y && a.EndX == b.EndX && a.EndY == b.EndY;
+}
+
+static hdatlas::ClassicScreen ClassicBoxOnScreen()
+{
+	return hdatlas::classicScreen(Video.Width, Video.Height);
+}
+
+/// Put the classic rects: the map view from logical 176,16 to 16 short of the logical screen's
+/// right and bottom edges; minimap 128 x 128 at logical 24,26; all times the step. The map view
+/// has no HUD over it in the box, so it has no scroll padding (o11_13: the view lies flush on the
+/// map's left and bottom edges).
+static void PutClassicLayoutRects()
+{
+	const hdatlas::ClassicScreen box = ClassicBoxOnScreen();
+	const hdatlas::ClassicRect lv = hdatlas::classicView(box);
+	const hdatlas::ClassicRect view = hdatlas::classicToScreen(box, lv.x, lv.y, lv.w, lv.h);
+	const hdatlas::ClassicRect mini = hdatlas::classicToScreen(
+		box, hdatlas::ClassicMinimapX, hdatlas::ClassicMinimapY, hdatlas::ClassicMinimapSize,
+		hdatlas::ClassicMinimapSize);
+
+	LayoutRects r;
+	r.MapArea.X = view.x;
+	r.MapArea.Y = view.y;
+	r.MapArea.EndX = view.x + view.w - 1;
+	r.MapArea.EndY = view.y + view.h - 1;
+	r.MinimapX = mini.x;
+	r.MinimapY = mini.y;
+	r.MinimapW = mini.w;
+	r.MinimapH = mini.h;
+	PutLayoutRects(r);
+	ClassicLayout = r;
+	ClassicLayoutOn = true;
+	ClassicLayoutScale = (float) box.s;
+}
+
+static void PutRemasteredLayoutRects()
+{
+	PutLayoutRects(RemasteredLayout);
+	ClassicLayoutOn = false;
+	ClassicLayoutScale = 0.0f;
+}
+
+/// Align UI map area if at least one of the map dimensions fits completely into it.
+static void AlignMapAreaToMap()
+{
 	if (Map.Info.MapWidth) {
 		/// Align UI map area if at least one of the map dimensions fits completely into it.
 		// WargusHD: the viewport renders each tile at PixelTileSize * MapViewportZoom(), so the
@@ -237,6 +317,40 @@ void InitUserInterface()
 		UI.MapArea.EndX = std::min<int>(UI.MapArea.EndX - xAlign, UI.MapArea.X + (int)(Map.Info.MapWidth * PixelTileSize.x * MapViewportZoom()) - 1);
 		UI.MapArea.EndY = std::min<int>(UI.MapArea.EndY - yAlign, UI.MapArea.Y + (int)(Map.Info.MapHeight * PixelTileSize.y * MapViewportZoom()) - 1);
 	}
+}
+
+/**
+**  Initialize the user interface.
+*/
+void InitUserInterface()
+{
+	UI.Offset640X = (Video.Width - 640) / 2;
+	UI.Offset480Y = (Video.Height - 480) / 2;
+
+	UI.LifeBarColorsInt.clear();
+	for(const std::string& name : UI.LifeBarColorNames) {
+		UI.LifeBarColorsInt.push_back(IndexToColor(GetColorIndexByName(name)));
+	}
+
+	// Keep the scripts' rects. If the classic rects of an earlier game are still in place (the
+	// scripts did not lay the picture out again), the kept ones stay as they are.
+	if (!(ClassicLayoutOn && SameMapRect(UI.MapArea, ClassicLayout.MapArea))) {
+		RemasteredLayout = PresentLayoutRects();
+		RemasteredLayoutKept = true;
+	}
+	if (IsClassicView()) {
+		PutClassicLayoutRects();
+	} else if (ClassicLayoutOn) {
+		PutRemasteredLayoutRects();
+	}
+
+	//
+	// Calculations
+	//
+	AlignMapAreaToMap();
+	if (ClassicLayoutOn) {
+		ClassicLayout.MapArea = UI.MapArea;
+	}
 
 	UI.SelectedViewport = UI.Viewports;
 
@@ -244,6 +358,528 @@ void InitUserInterface()
 
 	UI.CompletedBarColor = Video.MapRGB(TheScreen->format, UI.CompletedBarColorRGB);
 	UI.ViewportCursorColor = ColorWhite;
+}
+
+bool ClassicHudActive()
+{
+	return ClassicLayoutOn;
+}
+
+/**
+**  Classic view switched: put the rects of the present view and rebuild what depends on them.
+**
+**  The world keeps its place on the screen (the original: the Town Hall's selection box stays at
+**  the same client x through a switch, captures o11_85 / o11_86): the map pixel under the new
+**  view's top-left corner is the one that was drawn there before, as far as the map's edges allow.
+*/
+void ApplyClassicViewLayout()
+{
+	if (IsClassicView() == ClassicLayoutOn) {
+		return;
+	}
+	// Outside a game there is nothing to rebuild: InitUserInterface puts the rects at the start
+	// of the next one.
+	if (!RemasteredLayoutKept || !Map.Info.MapWidth || UI.NumViewports == 0 || !MinimapSurface) {
+		return;
+	}
+	if (BigMapMode) {
+		// The whole-screen map mode keeps its own copy of the map area; left as it is.
+		ErrorPrint("ClassicView: the layout is not switched in the big map mode\n");
+		return;
+	}
+
+	const CViewport &old = UI.Viewports[0];
+	const PixelPos oldTopLeft = old.GetTopLeftPos();
+	const float oldZoom = old.Zoom > 0.0f ? old.Zoom : 1.0f;
+	const PixelPos oldMapPixel = Map.TilePosToMapPixelPos_TopLeft(old.MapPos) + old.Offset;
+
+	if (IsClassicView()) {
+		PutClassicLayoutRects();
+	} else {
+		PutRemasteredLayoutRects();
+	}
+	AlignMapAreaToMap();
+	if (ClassicLayoutOn) {
+		ClassicLayout.MapArea = UI.MapArea;
+	}
+	SetViewportMode(UI.ViewportMode);
+
+	CViewport &vp = UI.Viewports[0];
+	const PixelPos newTopLeft = vp.GetTopLeftPos();
+	vp.Set(Vec2i(0, 0),
+	       PixelDiff(oldMapPixel.x + (int) std::lround((newTopLeft.x - oldTopLeft.x) / oldZoom),
+	                 oldMapPixel.y + (int) std::lround((newTopLeft.y - oldTopLeft.y) / oldZoom)));
+
+	// The minimap's surfaces and tables are made for its size.
+	UI.Minimap.Destroy();
+	UI.Minimap.Create();
+}
+
+static std::string ClassicRaceName()
+{
+	std::string race;
+	if (ThisPlayer && ThisPlayer->Race >= 0 && ThisPlayer->Race < (int) PlayerRaces.Count) {
+		race = PlayerRaces.Name[ThisPlayer->Race];
+	}
+	return race;
+}
+
+/// A HUD atlas of the game folder, loaded once; a failed load is kept and reported once.
+static CAtlasGraphic *ClassicHudAtlas(const std::string &jsonPath)
+{
+	static std::map<std::string, std::unique_ptr<CAtlasGraphic>> atlases;
+	auto it = atlases.find(jsonPath);
+	if (it == atlases.end()) {
+		auto atlas = std::make_unique<CAtlasGraphic>();
+		if (!atlas->LoadTexturePacker(jsonPath)) {
+			ErrorPrint("Classic HUD: '%s' not readable, that part is not drawn\n", jsonPath.c_str());
+			atlas.reset();
+		}
+		it = atlases.emplace(jsonPath, std::move(atlas)).first;
+	}
+	return it->second.get();
+}
+
+bool ClassicBoxContains(const PixelPos &screenPos)
+{
+	int bx;
+	int by;
+	return hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenPos.x, screenPos.y, bx, by);
+}
+
+bool ClassicMenuButtonContains(const PixelPos &screenPos)
+{
+	int bx;
+	int by;
+	if (!hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenPos.x, screenPos.y, bx, by)) {
+		return false;
+	}
+	return bx >= hdatlas::ClassicMenuX && bx < hdatlas::ClassicMenuX + hdatlas::ClassicMenuW
+		   && by >= hdatlas::ClassicMenuY && by < hdatlas::ClassicMenuY + hdatlas::ClassicMenuH;
+}
+
+int ClassicCommandCellAt(int screenX, int screenY)
+{
+	int bx;
+	int by;
+	if (!ClassicLayoutOn
+		|| !hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenX, screenY, bx, by)) {
+		return -1;
+	}
+	return classichud::commandCellAt(bx, by);
+}
+
+bool ClassicPauseButtonContains(int screenX, int screenY)
+{
+	int bx;
+	int by;
+	return ClassicLayoutOn
+		   && hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenX, screenY, bx, by)
+		   && classichud::contains(classichud::PauseFace, bx, by);
+}
+
+static SDL_Rect ClassicScreenRect(const hdatlas::ClassicScreen &box, const classichud::Rect &r)
+{
+	const hdatlas::ClassicRect s = hdatlas::classicToScreen(box, r.x, r.y, r.w, r.h);
+	return {s.x, s.y, s.w, s.h};
+}
+
+/// Draw the part src (frame pixels) of an untrimmed frame into dst. The atlas draws a frame's
+/// top-left part only, so that part is laid with its right and bottom edge on dst's and the
+/// rest of it is clipped away.
+static void DrawClassicFramePart(const CAtlasGraphic &atlas, int frame, const classichud::Rect &src,
+                                 const SDL_Rect &dst)
+{
+	if (frame < 0 || src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0) {
+		return;
+	}
+	if (src.x == 0 && src.y == 0) {
+		atlas.DrawAtlasFramePart(frame, src.w, src.h, dst);
+		return;
+	}
+	const int w = (int) std::lround((src.x + src.w) * (double) dst.w / src.w);
+	const int h = (int) std::lround((src.y + src.h) * (double) dst.h / src.h);
+	const SDL_Rect whole = {dst.x + dst.w - w, dst.y + dst.h - h, w, h};
+	SDL_RenderSetClipRect(TheRenderer, &dst);
+	atlas.DrawAtlasFramePart(frame, src.x + src.w, src.y + src.h, whole);
+	SDL_RenderSetClipRect(TheRenderer, nullptr);
+}
+
+/// A sprite of the widget atlas nine-sliced onto a logical rect (classichud::nineSlice).
+static void DrawClassicNineSlice(const CAtlasGraphic &atlas, const hdatlas::ClassicScreen &box,
+                                 const char *sprite, int spriteSize, int slice,
+                                 const classichud::Rect &dst)
+{
+	const int frame = atlas.FrameByName(sprite);
+	if (frame < 0) {
+		return;
+	}
+	classichud::SlicePiece pieces[9];
+	const int count = classichud::nineSlice(spriteSize, spriteSize, slice, dst, pieces);
+	for (int i = 0; i < count; ++i) {
+		DrawClassicFramePart(atlas, frame, pieces[i].src, ClassicScreenRect(box, pieces[i].dst));
+	}
+}
+
+/// The picture of an icon from Portrait-face: frame "<set>_<N>" (the forest picture where the
+/// set lacks the slot), N = the icon's frame, the set by the tileset directory of the icon's
+/// graphic (the rule of the Remastered icons, CGraphic::Load). Where Portrait-mask has
+/// "<set>_<N>_team" the picture takes the player's colour there: colour x the mask's grey / 255
+/// (o11_16, o11_84: greys 255 / 215 / 175 / 135 give 164 / 138 / 112 / 87 of red 164).
+static void DrawClassicPicture(const hdatlas::ClassicScreen &box, const CIcon &icon, int playerColor,
+                               const classichud::Rect &dst)
+{
+	const CAtlasGraphic *faces = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-face.json");
+	if (faces == nullptr || !icon.G) {
+		return;
+	}
+	const std::string path = icon.G->File.generic_string();
+	const char *set = path.find("/winter/") != std::string::npos ? "ice"
+	                  : path.find("/wasteland/") != std::string::npos ? "swamp"
+	                  : path.find("/swamp/") != std::string::npos ? "xswamp" : "forest";
+	std::string name = std::string(set) + "_" + std::to_string(icon.Frame);
+	int frame = faces->FrameByName(name.c_str());
+	if (frame < 0) {
+		name = "forest_" + std::to_string(icon.Frame);
+		frame = faces->FrameByName(name.c_str());
+	}
+	if (frame < 0) {
+		return;
+	}
+	const SDL_Rect r = ClassicScreenRect(box, dst);
+	// Black under the picture: where a picture has no pixel the original shows black
+	// (o11_16, "Repair": its 38 empty pixels).
+	Uint8 oldR;
+	Uint8 oldG;
+	Uint8 oldB;
+	Uint8 oldA;
+	SDL_GetRenderDrawColor(TheRenderer, &oldR, &oldG, &oldB, &oldA);
+	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
+	SDL_RenderFillRect(TheRenderer, &r);
+	SDL_SetRenderDrawColor(TheRenderer, oldR, oldG, oldB, oldA);
+	faces->DrawAtlasFramePart(frame, classichud::PictureW, classichud::PictureH, r);
+	if (playerColor < 0 || playerColor >= (int) PlayerColorsRGB.size()
+		|| PlayerColorsRGB[playerColor].empty()) {
+		return;
+	}
+	if (const CAtlasGraphic *masks = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-mask.json")) {
+		const int mask = masks->FrameByName((name + "_team").c_str());
+		if (mask >= 0) {
+			const CColor &c = PlayerColorsRGB[playerColor][0];
+			masks->DrawAtlasFrameClipScaled(mask, r.x, r.y, r.w, r.h, false, c.R, c.G, c.B);
+		}
+	}
+}
+
+static int ClassicPlayerColor(const CUnit &unit)
+{
+	const CPlayer *player = unit.RescuedFrom ? unit.RescuedFrom : unit.Player;
+	return player ? GameSettings.Presets[player->Index].PlayerColor : -1;
+}
+
+/// The widgets of the classic HUD that are art: header buttons, resource icons, the panel of one
+/// selected unit (frame, portrait, hit point bar) and the command card.
+static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::string &race)
+{
+	const CAtlasGraphic *widgets = ClassicHudAtlas("Data/skins/Classic_HUD_Widgets.json");
+	if (widgets == nullptr) {
+		return;
+	}
+	// Header: the F5 slot (its picture, then its frame) and the Pause button's face.
+	// At a step above 1 the picture is its logical pixels repeated: every one the middle pixel
+	// of its block of the art (classichud::f5InsetSample), not the art scaled.
+	const int inset = widgets->FrameByName(("f5_inset_" + race).c_str());
+	if (box.s <= 1) {
+		widgets->DrawAtlasFramePart(inset, classichud::F5InsetArtW, classichud::F5InsetArtH,
+		                            ClassicScreenRect(box, classichud::F5Inset));
+	} else {
+		for (int ly = 0; ly < classichud::F5Inset.h; ++ly) {
+			for (int lx = 0; lx < classichud::F5Inset.w; ++lx) {
+				const classichud::Rect pixel = {classichud::F5Inset.x + lx, classichud::F5Inset.y + ly, 1, 1};
+				DrawClassicFramePart(*widgets, inset, classichud::f5InsetSample(lx, ly),
+				                     ClassicScreenRect(box, pixel));
+			}
+		}
+	}
+	widgets->DrawAtlasFramePart(widgets->FrameByName("f5"), classichud::F5Face.w,
+	                            classichud::F5Face.h, ClassicScreenRect(box, classichud::F5Face));
+	widgets->DrawAtlasFramePart(widgets->FrameByName(("hud_" + race + "_small").c_str()),
+	                            classichud::PauseFace.w, classichud::PauseFace.h,
+	                            ClassicScreenRect(box, classichud::PauseFace));
+	// Resource row: the icons, about the middle of the logical screen.
+	for (int i = 0; i < classichud::ResourceIconCount; ++i) {
+		const std::string name = "icons_" + std::to_string(classichud::ResourceIconSprite[i]);
+		const classichud::Rect r = {classichud::resourceIconX(box.lw, i), classichud::ResourceIconY,
+		                            classichud::ResourceIconSize, classichud::ResourceIconSize};
+		widgets->DrawAtlasFramePart(widgets->FrameByName(name.c_str()), r.w, r.h,
+		                            ClassicScreenRect(box, r));
+	}
+	// One selected unit: panel, portrait, hit points.
+	if (Selected.size() == 1 && Selected[0] != nullptr && Selected[0]->Type != nullptr) {
+		const CUnit &unit = *Selected[0];
+		DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
+		                     classichud::CellSlice, classichud::InfoPanel);
+		DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
+		                     classichud::CellSlice, classichud::PortraitCell);
+		if (unit.Type->Icon.Icon) {
+			DrawClassicPicture(box, *unit.Type->Icon.Icon, ClassicPlayerColor(unit),
+			                   classichud::cellPicture(classichud::PortraitCell));
+		}
+		DrawClassicNineSlice(*widgets, box, "hp_bar", classichud::HitPointSprite,
+		                     classichud::HitPointSlice, classichud::HitPointBar);
+		int colour = 0;
+		const int fill = classichud::hitPointFill(unit.Variable[HP_INDEX].Value,
+		                                          unit.Variable[HP_INDEX].Max, colour);
+		if (fill > 0) {
+			const classichud::Rect r = {classichud::HitPointFill.x, classichud::HitPointFill.y, fill,
+			                            classichud::HitPointFill.h};
+			const char *sprite = colour == 0 ? "bar_green" : colour == 1 ? "bar_yellow" : "bar_red";
+			widgets->DrawAtlasFramePart(widgets->FrameByName(sprite), 1, 1, ClassicScreenRect(box, r));
+		}
+	}
+	// Command card.
+	if (!Selected.empty() && Selected[0] != nullptr) {
+		const int playerColor = ClassicPlayerColor(*Selected[0]);
+		for (int i = 0; i < classichud::CommandColumns * classichud::CommandRows; ++i) {
+			bool allowed = false;
+			bool marked = false;
+			if (!ClassicCommandButtonShown(i, allowed, marked)) {
+				continue;
+			}
+			const classichud::Rect cell = classichud::commandCell(i);
+			DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
+			                     classichud::CellSlice, cell);
+			DrawClassicPicture(box, *CurrentButtons[i].Icon.Icon, playerColor,
+			                   classichud::cellPicture(cell));
+			if (marked) {
+				DrawClassicNineSlice(*widgets, box, "portrait_button_highlight",
+				                     classichud::CellSprite, classichud::CellSlice, cell);
+			}
+			if (!allowed) {
+				// The whole cell at half brightness (o11_84, "Keep": frame 204 -> 102, 128 -> 64,
+				// picture 1461 of 1476 pixels = half of the art): black at 128 of 255 over it.
+				const SDL_Rect r = ClassicScreenRect(box, cell);
+				Uint8 oldR;
+				Uint8 oldG;
+				Uint8 oldB;
+				Uint8 oldA;
+				SDL_BlendMode oldMode = SDL_BLENDMODE_NONE;
+				SDL_GetRenderDrawColor(TheRenderer, &oldR, &oldG, &oldB, &oldA);
+				SDL_GetRenderDrawBlendMode(TheRenderer, &oldMode);
+				SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_BLEND);
+				SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 128);
+				SDL_RenderFillRect(TheRenderer, &r);
+				SDL_SetRenderDrawBlendMode(TheRenderer, oldMode);
+				SDL_SetRenderDrawColor(TheRenderer, oldR, oldG, oldB, oldA);
+			}
+		}
+	}
+}
+
+/// The HUD faces the classic text is drawn with and the height of a capital of each on this
+/// screen: `remaster_hud` 38.25 units of the HUD's art space (digit "0" of the resource row,
+/// c_k_2960x1848.png), `remaster_hud_small` 27 (the hit point figure, ink rows 990..1017).
+/// The faces exist at these sizes only; the nearest is drawn scaled (classichud::pickFace).
+static const CFont *ClassicTextFace(int capBox, const hdatlas::ClassicScreen &box, double &scale)
+{
+	static const char *const names[2] = {"remaster_hud", "remaster_hud_small"};
+	static const double capUnits[2] = {38.25, 27.0};
+	const CFont *faces[2] = {nullptr, nullptr};
+	double caps[2] = {0.0, 0.0};
+	for (int i = 0; i < 2; ++i) {
+		faces[i] = CFont::Get(names[i]);
+		if (faces[i] != nullptr && faces[i]->IsLoaded()) {
+			caps[i] = capUnits[i] * Video.HudCanvas.Scale;
+		}
+	}
+	const int face = classichud::pickFace(classichud::capOnScreen(capBox, box.s), caps, 2, scale);
+	return face < 0 ? nullptr : faces[face];
+}
+
+/// Draw a text of the classic HUD: a capital capBox logical pixels high (times the step on the
+/// screen), its middle row at the logical row midY, placed on the logical column anchorX by
+/// `align`. White with the face's own shadow; a tint colours the glyphs. The face is drawn
+/// through the renderer's scale, smooth, so it needs the GPU glyph path of the game's HUD pass.
+/// @return the width drawn, in logical pixels
+static double DrawClassicText(const hdatlas::ClassicScreen &box, int capBox, double anchorX, double midY,
+                              classichud::TextAlign align, std::string_view text,
+                              const SDL_Color *tint = nullptr)
+{
+	double scale = 1.0;
+	const CFont *font = ClassicTextFace(capBox, box, scale);
+	if (font == nullptr || text.empty() || !GpuFontToBackbuffer || scale <= 0.0) {
+		return 0.0;
+	}
+	const double k = box.s;
+	const double width = font->Width(text) * scale;
+	const auto tab = text.find("~|");
+	const double tabWidth = tab == std::string_view::npos ? 0.0 : font->Width(text.substr(0, tab)) * scale;
+	const double left = classichud::textLeft(align, box.box.x + anchorX * k, width, tabWidth);
+	const double top = box.box.y + midY * k - font->Height() * scale / 2.0;
+
+	float oldX = 1.0f;
+	float oldY = 1.0f;
+	SDL_RenderGetScale(TheRenderer, &oldX, &oldY);
+	SDL_RenderSetScale(TheRenderer, (float) (oldX * scale), (float) (oldY * scale));
+	if (tint != nullptr) {
+		SetGlyphTint(tint->r, tint->g, tint->b);
+	}
+	CLabel(*font).Draw((int) std::lround(left / scale), (int) std::lround(top / scale), text);
+	if (tint != nullptr) {
+		SetGlyphTint(255, 255, 255);
+	}
+	SDL_RenderSetScale(TheRenderer, oldX, oldY);
+	return k > 0.0 ? width / k : 0.0;
+}
+
+/// The texts of the classic HUD, at the places measured in the original (hd_classic_hud.h).
+static void DrawClassicHudTexts(const hdatlas::ClassicScreen &box)
+{
+	using classichud::TextAlign;
+	// Resource numbers, as the Remastered row prints them: plain digits; food "used/limit" with
+	// the used figure red (204, 0, 0) when it is over the limit (DrawResources; o11_16 "2/1").
+	if (ThisPlayer != nullptr) {
+		static const int costs[3] = {GoldCost, WoodCost, OilCost};
+		for (int i = 0; i < 3; ++i) {
+			DrawClassicText(box, classichud::TextCap,
+			                classichud::resourceIconX(box.lw, i) + classichud::ResourceTextDX,
+			                classichud::ResourceTextMidY, TextAlign::Left,
+			                std::to_string(ThisPlayer->Resources[costs[i]]));
+		}
+		const double x = classichud::resourceIconX(box.lw, 3) + classichud::ResourceTextDX;
+		const std::string used = std::to_string(ThisPlayer->Demand);
+		const std::string limit = "/" + std::to_string(ThisPlayer->Supply);
+		const SDL_Color red = {204, 0, 0, 255};
+		const double w = DrawClassicText(box, classichud::TextCap, x, classichud::ResourceTextMidY,
+		                                 TextAlign::Left, used,
+		                                 ThisPlayer->Supply < ThisPlayer->Demand ? &red : nullptr);
+		DrawClassicText(box, classichud::TextCap, x + w, classichud::ResourceTextMidY, TextAlign::Left,
+		                limit);
+	}
+	// Menu and Pause: the captions of the scripts' buttons (user buttons 0 and 1, the ones the
+	// Remastered header draws), centred in the faces.
+	if (UI.UserButtons.size() > 0) {
+		DrawClassicText(box, classichud::TextCap, hdatlas::ClassicMenuX + hdatlas::ClassicMenuW / 2.0,
+		                classichud::CaptionMidY, TextAlign::Centre, UI.UserButtons[0].Button.Text);
+	}
+	if (UI.UserButtons.size() > 1) {
+		DrawClassicText(box, classichud::TextCap,
+		                classichud::PauseFace.x + classichud::PauseFace.w / 2.0,
+		                classichud::CaptionMidY, TextAlign::Centre, UI.UserButtons[1].Button.Text);
+	}
+	// One selected unit: the texts of the Remastered info panel at their classic places
+	// (classichud::panelX / panelMidY). A unit that is built, trains, researches or upgrades has
+	// another panel in the original, which is not drawn.
+	if (Selected.size() == 1 && Selected[0] != nullptr && Selected[0]->Type != nullptr
+		&& Video.HudCanvas.Scale > 0.0) {
+		CUnit &unit = *Selected[0];
+		const UnitAction action = unit.CurrentAction();
+		if (action != UnitAction::Built && action != UnitAction::Train
+			&& action != UnitAction::Research && action != UnitAction::UpgradeTo) {
+			UpdateUnitVariables(unit);
+			std::vector<ClassicPanelText> texts;
+			ClassicInfoPanelTexts(unit, texts);
+			const CFont *small = CFont::Get("remaster_hud_small");
+			const CFont *main = CFont::Get("remaster_hud");
+			for (const ClassicPanelText &t : texts) {
+				const double unitsX = (t.x - Video.HudCanvas.X) / Video.HudCanvas.Scale;
+				const double unitsY = (t.y + t.font->Height() / 2.0 - Video.HudCanvas.Y) / Video.HudCanvas.Scale;
+				const bool tab = t.text.find("~|") != std::string::npos;
+				const bool smallFace = t.font == small && small != main;
+				const double x = classichud::panelX(unitsX);
+				const double midY = smallFace ? classichud::panelSmallMidY(unitsY)
+				                              : classichud::panelMidY(unitsY);
+				// A stat line: the label to the colon's column, the value from its own column.
+				std::string label;
+				std::string value;
+				if (!smallFace && x > classichud::PanelColonX - 8.0 && x <= classichud::PanelColonX
+					&& classichud::splitStatLine(t.text, label, value)) {
+					DrawClassicText(box, classichud::TextCap, x, midY, TextAlign::Tab, label);
+					DrawClassicText(box, classichud::TextCap, classichud::PanelValueX, midY, TextAlign::Left,
+					                value);
+					continue;
+				}
+				DrawClassicText(box, smallFace ? classichud::TextCapSmall : classichud::TextCap, x, midY,
+				                tab ? TextAlign::Tab : t.centred ? TextAlign::Centre : TextAlign::Left,
+				                t.text);
+			}
+		}
+	}
+	// Hotkey letters of the command card: the key the Remastered card prints, under the same
+	// preference (CButtonPanel::ShowCommandKey); at half brightness on a button that may not be
+	// used.
+	if (UI.ButtonPanel.ShowCommandKey && !Selected.empty() && Selected[0] != nullptr) {
+		const SDL_Color dim = {128, 128, 128, 255};
+		for (int i = 0; i < classichud::CommandColumns * classichud::CommandRows; ++i) {
+			bool allowed = false;
+			bool marked = false;
+			if (!ClassicCommandButtonShown(i, allowed, marked)) {
+				continue;
+			}
+			const std::string letter = classichud::hotkeyLetter(CurrentButtons[i].Key);
+			if (letter.empty()) {
+				continue;
+			}
+			const classichud::Rect cell = classichud::commandCell(i);
+			DrawClassicText(box, classichud::TextCap, classichud::hotkeyMidX(cell),
+			                classichud::hotkeyMidY(cell), TextAlign::Centre, letter,
+			                allowed ? nullptr : &dim);
+		}
+	}
+	// The command under the pointer: its hint, the first line of the Remastered tooltip.
+	if (ButtonAreaUnderCursor == ButtonArea::Button && ButtonUnderCursor >= 0
+		&& ButtonUnderCursor < (int) CurrentButtons.size()) {
+		bool allowed = false;
+		bool marked = false;
+		if (ClassicCommandButtonShown(ButtonUnderCursor, allowed, marked)) {
+			DrawClassicText(box, classichud::TextCap, classichud::TooltipX, classichud::tooltipMidY(box.lh),
+			                TextAlign::Left, CurrentButtons[ButtonUnderCursor].Hint);
+		}
+	}
+}
+
+/**
+**  Draw the classic HUD frame of the player's race into the box, the header buttons' faces and
+**  the widgets that are art (DrawClassicHudWidgets), then the texts (DrawClassicHudTexts).
+**
+**  Art: Data/Art/classic/HUD/BG_<Race> (frame), Data/skins/Classic_HUD_Widgets and
+**  Data/Art/classic/HUD/Portrait-face / Portrait-mask, read from the game folder, every pixel of
+**  the art drawn as step x step screen pixels (nearest sampling). The frame is laid out for the
+**  logical screen: the left column to its bottom, the strips on its right and bottom edges.
+*/
+void DrawClassicHud()
+{
+	if (!TheRenderer) {
+		return;
+	}
+	std::string race = ClassicRaceName();
+	if (race.empty()) {
+		return;
+	}
+	const hdatlas::ClassicScreen box = ClassicBoxOnScreen();
+
+	std::string raceCap = race;
+	raceCap[0] = (char) toupper((unsigned char) raceCap[0]);
+	if (const CAtlasGraphic *frame = ClassicHudAtlas("Data/Art/classic/HUD/BG_" + raceCap + ".json")) {
+		hdatlas::ClassicHudPiece pieces[hdatlas::ClassicHudPieceMax];
+		const int count = hdatlas::classicHudFramePieces(box.lw, box.lh, pieces);
+		for (int i = 0; i < count; ++i) {
+			const hdatlas::ClassicHudPiece &p = pieces[i];
+			const hdatlas::ClassicRect r = hdatlas::classicToScreen(box, p.x, p.y, p.w, p.h);
+			const SDL_Rect dst = {r.x, r.y, r.w, r.h};
+			frame->DrawAtlasFramePart(frame->FrameByName(p.frame), p.w, p.h, dst);
+		}
+	}
+	if (const CAtlasGraphic *widgets = ClassicHudAtlas("Data/skins/Classic_HUD_Widgets.json")) {
+		const std::string face = "hud_" + race + "_small";
+		const hdatlas::ClassicRect r = hdatlas::classicToScreen(
+			box, hdatlas::ClassicMenuX, hdatlas::ClassicMenuY, hdatlas::ClassicMenuW, hdatlas::ClassicMenuH);
+		const SDL_Rect dst = {r.x, r.y, r.w, r.h};
+		widgets->DrawAtlasFramePart(widgets->FrameByName(face.c_str()), hdatlas::ClassicMenuW,
+		                            hdatlas::ClassicMenuH, dst);
+	}
+	DrawClassicHudWidgets(box, race);
+	DrawClassicHudTexts(box);
 }
 
 /**

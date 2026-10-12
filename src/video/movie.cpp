@@ -277,13 +277,11 @@ int PlayMovie(const std::string &name)
 	const int videoHeight = Video.Height;
 	const std::string filename = LibraryFileName(name);
 
-	// NG67: a movie can now be asked for from the BOOT path (the "Play Introduction" option plays
+	// NG67: a movie can be asked for from the boot path (the "Play Introduction" option plays
 	// the Remastered intro before the main menu exists). Both movie players pump the GUI while they
-	// run, and guisan throws "No top widget set" (gui.cpp:133) when nothing is installed -- which
-	// took the process down the first time the option was switched on. StartMap already solves this
-	// the same way for CreateGame: install a blank top widget for the duration and put the old one
-	// back afterwards. Doing it here makes playback safe from ANY context, not just the one call
-	// site that happened to crash.
+	// run, and guisan throws "No top widget set" when nothing is installed. As StartMap does
+	// for CreateGame: install a blank top widget for the duration and put the old one back
+	// afterwards, so that playback is safe from any context.
 	struct GuiTopGuard {
 		std::unique_ptr<gcn::Container> temp;
 		explicit GuiTopGuard()
@@ -304,8 +302,8 @@ int PlayMovie(const std::string &name)
 	} guiTopGuard;
 
 	// MV1: the Remastered's cinematics are WebM (VP8/VP9), which this Theora decoder cannot open.
-	// Hand those to the platform decoder; a false return means "unsupported here", and we fall
-	// through to the old behaviour rather than pretending the clip played.
+	// Hand those to the platform decoder; a false return means "unsupported here" and falls
+	// through to the Theora path.
 	if (filename.size() > 5 && filename.compare(filename.size() - 5, 5, ".webm") == 0) {
 		return PlayWebMMovie(filename) ? 0 : -1;
 	}

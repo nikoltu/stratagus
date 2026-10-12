@@ -133,6 +133,20 @@ VisitResult NearReachableTerrainFinder::Visit(TerrainTraversal &terrainTraversal
 	}
 }
 
+/// A harvester that moves on a grid comes out on the building's own exit tile while that tile is free.
+static bool DropOutOnExitTile(CUnit &unit, const CUnit *container, EGridExit kind)
+{
+	if (container == nullptr) {
+		return false;
+	}
+	const auto pos = FindGridExitTile(unit, *container, kind);
+	if (!pos) {
+		return false;
+	}
+	unit.Place(*pos);
+	return true;
+}
+
 /* static */ std::unique_ptr<COrder> COrder::NewActionResource(CUnit &harvester, const Vec2i &pos)
 {
 	auto order = std::make_unique<COrder_Resource>(harvester);
@@ -355,6 +369,8 @@ void COrder_Resource::UpdatePathFinderData(PathFinderInput &input) /* override *
 	Vec2i tileSize;
 	if (this->HasGoal()) {
 		CUnit *goal = this->GetGoal();
+		// A unit on a grid goes in from the first tile of its grid within one step of the building.
+		input.SetMaxRange(std::max<int>(1, input.GetUnit()->Type->GridStep));
 		tileSize.x = goal->Type->TileWidth;
 		tileSize.y = goal->Type->TileHeight;
 		input.SetGoal(goal->tilePos, tileSize);
@@ -562,7 +578,7 @@ int COrder_Resource::StartGathering(CUnit &unit)
 	}
 
 	// FIXME: 0 can happen, if to near placed by map designer.
-	Assert(unit.MapDistanceTo(*goal) <= 1);
+	Assert(unit.MapDistanceTo(*goal) <= std::max<int>(1, unit.Type->GridStep));
 
 	// Update the heading of a harvesting unit to looks straight at the resource.
 	UnitHeadingFromDeltaXY(unit, goal->tilePos - unit.tilePos + goal->Type->GetHalfTileSize());
@@ -580,7 +596,12 @@ int COrder_Resource::StartGathering(CUnit &unit)
 	}
 
 	// Place unit inside the resource
-	if (!resinfo.HarvestFromOutside) {
+	if (unit.Container == goal) {
+		// its builder is inside already
+		unit.AssignWorkerToMine(*goal);
+		this->Resource.Mine = goal;
+		this->ClearGoal();
+	} else if (!resinfo.HarvestFromOutside) {
 		if (goal->Variable[MAXHARVESTERS_INDEX].Value == 0 || goal->Variable[MAXHARVESTERS_INDEX].Value > goal->InsideUnits.size()) {
 			this->ClearGoal();
 			int selected = unit.Selected;
@@ -661,7 +682,7 @@ void COrder_Resource::LoseResource(CUnit &unit, CUnit &source)
 
 	// If we are fully loaded first search for a depot.
 	if (unit.ResourcesHeld && (depot = FindDeposit(unit, 1000, unit.CurrentResource))) {
-		if (unit.Container) {
+		if (unit.Container && !DropOutOnExitTile(unit, &source, EGridExit::Resource)) {
 			DropOutNearest(unit, depot->tilePos + depot->Type->GetHalfTileSize(), &source);
 		}
 		// Remember where it mined, so it can look around for another resource.
@@ -679,7 +700,9 @@ void COrder_Resource::LoseResource(CUnit &unit, CUnit &source)
 	// Dump the unit outside and look for something to do.
 	if (unit.Container) {
 		Assert(!resinfo.HarvestFromOutside);
-		DropOutOnSide(unit, LookingW, &source);
+		if (!DropOutOnExitTile(unit, &source, EGridExit::Resource)) {
+			DropOutOnSide(unit, LookingW, &source);
+		}
 	}
 	this->goalPos.x = -1;
 	this->goalPos.y = -1;
@@ -938,12 +961,14 @@ int COrder_Resource::StopGathering(CUnit &unit)
 	// timfel: of course, maybe it's actually nice that workers drop out towards their last depot...
 	if (!depot && (!(resinfo.HarvestFromOutside || resinfo.TerrainHarvester)) && Depot && Depot->IsAlive()) {
 		Assert(unit.Container);
-		DropOutNearest(unit, Depot->tilePos + Depot->Type->GetHalfTileSize(), source);
+		if (!DropOutOnExitTile(unit, source, EGridExit::Resource)) {
+			DropOutNearest(unit, Depot->tilePos + Depot->Type->GetHalfTileSize(), source);
+		}
 	}
 	Depot = depot;
 	if (!depot || !unit.ResourcesHeld || this->Finished) {
 		if (!(resinfo.HarvestFromOutside || resinfo.TerrainHarvester)) {
-			if (unit.Container) {
+			if (unit.Container && !DropOutOnExitTile(unit, source, EGridExit::Resource)) {
 				DropOutOnSide(unit, LookingW, source);
 			}
 		}
@@ -962,7 +987,7 @@ int COrder_Resource::StopGathering(CUnit &unit)
 		return 0;
 	} else {
 		if (!(resinfo.HarvestFromOutside || resinfo.TerrainHarvester)) {
-			if (unit.Container) {
+			if (unit.Container && !DropOutOnExitTile(unit, source, EGridExit::Resource)) {
 				// may have dropped out above
 				DropOutNearest(unit, depot->tilePos + depot->Type->GetHalfTileSize(), source);
 			}
@@ -1143,7 +1168,7 @@ bool COrder_Resource::WaitInDepot(CUnit &unit)
 		}
 
 		if (newMine) {
-			if (depot) {
+			if (depot && !DropOutOnExitTile(unit, depot, EGridExit::Depot)) {
 				DropOutNearest(unit, newMine->tilePos + newMine->Type->GetHalfTileSize(), depot);
 			}
 
@@ -1168,7 +1193,7 @@ bool COrder_Resource::WaitInDepot(CUnit &unit)
 			           pos.x,
 			           pos.y);
 #endif // DEBUG
-			if (depot) {
+			if (depot && !DropOutOnExitTile(unit, depot, EGridExit::Depot)) {
 				DropOutOnSide(unit, LookingW, depot);
 			}
 			if (mine) {
@@ -1313,6 +1338,12 @@ void COrder_Resource::Execute(CUnit &unit)
 			ResourceGiveUp(unit);
 			return;
 		}
+	}
+
+	if (SUB_MOVE_TO_RESOURCE <= this->State && this->State < SUB_UNREACHABLE_RESOURCE
+		&& unit.Container != nullptr && unit.Container == this->GetGoal()) {
+		// The builder of the resource is inside it: it takes its first load without coming out.
+		this->State = SUB_START_GATHERING;
 	}
 
 	// Move to the resource location.

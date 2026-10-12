@@ -237,7 +237,11 @@ void COrder_Train::Execute(CUnit &unit) /* override */
 		AddToGroup(&newUnit, 1, num);
 	} */
 
-	DropOutOnSide(*newUnit, LookingW, &unit);
+	if (const auto exitPos = FindGridExitTile(*newUnit, unit, EGridExit::Trained)) {
+		newUnit->Place(*exitPos);
+	} else {
+		DropOutOnSide(*newUnit, LookingW, &unit);
+	}
 	// No text: the original prints no line for this event (time series of work/agent-orig-scenes2,
 	// SCENES2.md Q1: trainings, buildings and raids covered, none of message_training_complete,
 	// message_work_complete, message_under_attack seen). The minimap mark stays.

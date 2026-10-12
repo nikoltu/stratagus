@@ -583,6 +583,20 @@ extern void CycleViewportMode(int);
 /// Select viewport mode
 extern void SetViewportMode(ViewportModeType mode);
 extern void SetNewViewportMode(ViewportModeType mode);
+
+// Classic view: the picture is the original's 4:3 box (hdatlas::classicBox), the map view and the
+// minimap at their places inside it.
+/// Put the layout of the present view (IsClassicView) into UI.MapArea, UI.Minimap and the
+/// viewports of a running game. Called when the view is switched.
+extern void ApplyClassicViewLayout();
+/// True while UI.MapArea and UI.Minimap hold the classic rects.
+extern bool ClassicHudActive();
+/// Draw the classic frame of the player's race and the Menu button's face.
+extern void DrawClassicHud();
+/// True when the screen pixel is on the classic Menu button.
+extern bool ClassicMenuButtonContains(const PixelPos &screenPos);
+/// True when the screen pixel is inside the classic box.
+extern bool ClassicBoxContains(const PixelPos &screenPos);
 extern void CheckViewportMode();
 #ifdef __ANDROID__
 /// Set the magnification of all in-game map viewports and re-derive geometry

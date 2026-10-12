@@ -9,6 +9,8 @@
 //   Commit   player 1, flags 1, round 2, cycle 4, mask 2                                    14
 //   Cancel   player 1, round 2                                                               7
 //   Pause    player 1, flags 1, cycle 4                                                     10
+//   Chat     data 4, length 1, text 1..240 (SerializeChat, DeserializeChat)            10..249
+//   ChatAck  data 4                                                                          8
 //
 // Ranges: sender and player below kMaxPlayers; Cmd, Need and Pause flags 0 or 1; Commit flags a Reason;
 // cycles 0..kWireMaxCycle; every `have` -1..kWireMaxCycle. Masks are taken as they are: the model
@@ -33,6 +35,8 @@ size_t WireSize(Kind kind)
 	case Kind::Commit: return kWireCommitSize;
 	case Kind::Cancel: return kWireCancelSize;
 	case Kind::Pause: return kWirePauseSize;
+	case Kind::Chat: return 0; // not of one length: SerializeChat
+	case Kind::ChatAck: return kWireChatAckSize;
 	}
 	return 0;
 }
@@ -62,6 +66,10 @@ static bool Valid(const Msg &m, int from)
 		return m.player < kMaxPlayers;
 	case Kind::Pause:
 		return m.player < kMaxPlayers && m.flags <= 1 && cycle;
+	case Kind::Chat:
+		return false;
+	case Kind::ChatAck:
+		return true; // an answer to the number 0, which no line has, answers nothing
 	}
 	return false;
 }
@@ -117,6 +125,11 @@ size_t Serialize(const Msg &m, int from, unsigned char *buf, size_t cap)
 		p += serialize8(p, m.flags);
 		p += serialize32(p, m.cycle);
 		break;
+	case Kind::Chat:
+		break;
+	case Kind::ChatAck:
+		p += serialize32(p, m.data);
+		break;
 	}
 	return size;
 }
@@ -126,9 +139,9 @@ bool Deserialize(const unsigned char *buf, size_t len, Msg *m, int *from)
 	if (buf == nullptr || m == nullptr || from == nullptr) return false;
 	if (len < kWireHeaderSize || len > kWireMaxSize) return false;
 	if (buf[0] != uint8_t(MessageMesh) || buf[1] != kWireVersion) return false;
-	if (buf[2] > uint8_t(Kind::Pause)) return false;
+	if (buf[2] > uint8_t(Kind::ChatAck)) return false;
 	Msg r;
-	r.kind = Kind(buf[2]); // the probe, its answer and the relay are no kinds: their size is 0
+	r.kind = Kind(buf[2]); // the probe, its answer and the relay are no kinds, a chat line has its own parser: their size is 0
 	if (len != WireSize(r.kind)) return false; // from here every read below is inside the datagram
 	const int sender = buf[3];
 	const unsigned char *p = buf + kWireHeaderSize;
@@ -173,6 +186,11 @@ bool Deserialize(const unsigned char *buf, size_t len, Msg *m, int *from)
 		p += deserialize8(p, &r.player);
 		p += deserialize8(p, &r.flags);
 		p += deserialize32(p, &r.cycle);
+		break;
+	case Kind::Chat:
+		break;
+	case Kind::ChatAck:
+		p += deserialize32(p, &r.data);
 		break;
 	}
 	if (size_t(p - buf) != len || !Valid(r, sender)) return false;
@@ -226,6 +244,49 @@ bool DeserializeRelay(const unsigned char *buf, size_t len, int *from, const uns
 	*from = buf[3];
 	*packet = buf + kWireHeaderSize;
 	*packetLen = len - kWireHeaderSize;
+	return true;
+}
+
+static bool ChatTextValid(const unsigned char *text, size_t len)
+{
+	if (len == 0 || len > kWireChatMaxText) return false;
+	for (size_t i = 0; i < len; ++i) {
+		if (text[i] < 0x20) return false;
+	}
+	return true;
+}
+
+size_t SerializeChat(uint32_t number, const char *text, size_t textLen, int from, unsigned char *buf, size_t cap)
+{
+	if (buf == nullptr || text == nullptr || number == 0 || from < 0 || from >= kMaxPlayers) return 0;
+	if (!ChatTextValid(reinterpret_cast<const unsigned char *>(text), textLen)) return 0;
+	if (cap < kWireChatHeadSize + textLen) return 0;
+	unsigned char *p = buf;
+	p += serialize8(p, uint8_t(MessageMesh));
+	p += serialize8(p, kWireVersion);
+	p += serialize8(p, uint8_t(Kind::Chat));
+	p += serialize8(p, uint8_t(from));
+	p += serialize32(p, number);
+	p += serialize8(p, uint8_t(textLen));
+	std::memcpy(p, text, textLen);
+	return kWireChatHeadSize + textLen;
+}
+
+bool DeserializeChat(const unsigned char *buf, size_t len, int *from, uint32_t *number,
+                     const char **text, size_t *textLen)
+{
+	if (buf == nullptr || from == nullptr || number == nullptr || text == nullptr || textLen == nullptr) return false;
+	if (len <= kWireChatHeadSize || len > kWireChatMaxSize) return false;
+	if (buf[0] != uint8_t(MessageMesh) || buf[1] != kWireVersion || buf[2] != uint8_t(Kind::Chat)) return false;
+	if (buf[3] >= kMaxPlayers) return false;
+	uint32_t n = 0;
+	deserialize32(buf + kWireHeaderSize, &n);
+	const size_t size = buf[kWireHeaderSize + 4];
+	if (n == 0 || len != kWireChatHeadSize + size || !ChatTextValid(buf + kWireChatHeadSize, size)) return false;
+	*from = buf[3];
+	*number = n;
+	*text = reinterpret_cast<const char *>(buf + kWireChatHeadSize);
+	*textLen = size;
 	return true;
 }
 

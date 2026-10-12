@@ -196,7 +196,7 @@ final class LoadPage {
         c.save();
         c.clipRect(kit.rect(rowX(), listTop(), rowW(), listBottom(kit) - listTop()));
         if (saves.isEmpty()) {
-            // As the maps' list: one line in the middle (the owner's choice of 2026-10-06).
+            // As the maps' list: one line in the middle (owner's rule).
             kit.textCentre(c, kit.own("No saved games"), rowX(), listTop(), rowW(), listBottom(kit) - listTop(),
                            CAP_BODY, INK_MUTED, true);
         }

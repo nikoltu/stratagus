@@ -246,18 +246,16 @@ public:
 	const CInitMessage_Header &GetHeader() const { return header; }
 	std::vector<unsigned char> Serialize() const;
 	void Deserialize(const unsigned char *p);
-	static size_t Size() { return CInitMessage_Header::Size() + 1 + PlayerMax * CNetworkHost::Size() + 1; }
+	static size_t Size() { return CInitMessage_Header::Size() + 1 + PlayerMax * CNetworkHost::Size(); }
 private:
 	CInitMessage_Header header;
 public:
 	uint8_t clientIndex = 0; /// index of the receiving client in the compacted host array
 	CNetworkHost hosts[PlayerMax]; /// Participant information
-	uint8_t mesh = 0;        /// 1: the server wants the mesh, probe the other clients and report in the ack
 };
 
 /**
-**  The answer of a client to a Config which asks for the mesh (ICMConfig from the client).
-**  A Config without the mesh byte set is answered by the plain header, as ever.
+**  The answer of a client to a Config (ICMConfig from the client): the clients it reaches.
 */
 class CInitMessage_ConfigAck
 {
@@ -362,12 +360,11 @@ public:
 	const CInitMessage_Header &GetHeader() const { return header; }
 	std::vector<unsigned char> Serialize() const;
 	void Deserialize(const unsigned char *p);
-	static constexpr size_t Size() { return CInitMessage_Header::Size() + CServerSetup::Size() + 1; }
+	static constexpr size_t Size() { return CInitMessage_Header::Size() + CServerSetup::Size(); }
 private:
 	CInitMessage_Header header;
 public:
 	CServerSetup State;  /// Server Setup State information
-	uint8_t mesh = 0;    /// final state of the server only: 1 = the game runs as a mesh, 0 = over the server
 };
 
 class CInitMessage_Resync

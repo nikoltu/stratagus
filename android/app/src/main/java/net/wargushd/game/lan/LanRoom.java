@@ -428,11 +428,6 @@ public final class LanRoom {
             r.append("  tileset = ").append(tileset).append(",\n");
             r.append("  fog = ").append(fog).append(",\n");
             r.append("  reveal = ").append(reveal).append(",\n");
-            if (humans() > 1) {
-                // A game with other people: every device sends to every device (the engine
-                // falls back by itself when one device does not reach another).
-                r.append("  mesh = true,\n");
-            }
             return r.append(tail()).toString();
         }
 

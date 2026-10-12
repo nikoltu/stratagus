@@ -346,12 +346,10 @@ void InitVideoSdl()
 		// fire a duplicate left-button stream underneath us, so switch it off.
 		SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 		SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
-		// NG76: the game is landscape, like the Windows original -- there is no portrait layout to
-		// fall back to. The manifest already says sensorLandscape, but SDL overrides it at runtime
-		// (SDLActivity.setOrientation) from the surface it happens to be handed first: when that
-		// surface is portrait the app comes up portrait and, after the device rotates, keeps
-		// drawing into the old viewport -- pillarboxed world and HUD, briefing text clipped. Naming
-		// the orientations SDL is allowed to request keeps it landscape from the first surface on.
+		// The game is landscape, like the original: there is no portrait layout (NG76). The manifest
+		// says sensorLandscape, but SDL overrides it at runtime (SDLActivity.setOrientation) from
+		// the surface it is handed first. Naming the orientations SDL may request keeps it landscape
+		// from the first surface on.
 		SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
 		int res = SDL_Init(
@@ -528,8 +526,8 @@ void InitVideoSdl()
 			Video.Height = std::max(240, (int)lround(outH * (double)renderScale));
 			fprintf(stdout, "WargusHD: renderScale=%.2f -> framebuffer %dx%d, present %dx%d\n",
 			        renderScale, Video.Width, Video.Height, outW, outH);
-			// NG95/NG96: the framebuffer size is final here and the Lua UI is laid out right after,
-			// so the in-game reference canvas has to exist before any script runs.
+			// The framebuffer size is final here and the Lua UI is laid out right after, so the in-game
+			// reference canvas has to exist before any script runs (NG95, NG96).
 			Video.ComputeHudCanvas();
 			fprintf(stdout, "WargusHD: hud canvas %dx%d at (%d,%d), scale %.4f\n",
 			        Video.HudCanvas.W, Video.HudCanvas.H, Video.HudCanvas.X, Video.HudCanvas.Y,
@@ -630,9 +628,8 @@ void InitVideoSdl()
 	InitKey2Str();
 
 	ColorBlack = Video.MapRGB(TheScreen->format, 0, 0, 0);
-	// M666-9: the green of the original's health bars is (52, 112, 4) -- the portrait bar in 50
-	// captures of work/agent-orig-scenes (e.g. e01, hi10, b02) and the bar over a unit (k06, k20,
-	// k31); it was the classic (48, 100, 4).
+	// M666-9: the green of the original's health bars is (52, 112, 4) (captures e01, hi10, b02,
+	// k06, k20, k31).
 	ColorDarkGreen = Video.MapRGB(TheScreen->format, 52, 112, 4);
 	ColorLightBlue = Video.MapRGB(TheScreen->format, 52, 113, 166);
 	ColorBlue = Video.MapRGB(TheScreen->format, 0, 0, 252);
@@ -696,8 +693,8 @@ static bool isTextInput(int key) {
 //   * hold in place >= 0.3 s, then release        -> RIGHT click (order/cancel)
 //   * drag beyond DRAG_PX                          -> LEFT press..release (box-select / scroll)
 //
-// Touch routes for what a keyboard does in the original (owner decision 2026-10-08; the
-// original has no touch input, so none of these has an original counterpart):
+// Touch routes for what a keyboard does in the original (owner's rule; the original has no
+// touch input, so none of these has an original counterpart):
 //
 //   * TOUCH-R1  a touch that lands on a slot of the group strip belongs to the strip and never
 //               becomes a pointer event: tap = select the group, second tap = centre on it,
@@ -726,12 +723,11 @@ static Uint32       TouchDownTicks = 0;
 static int          TouchDownX     = 0;
 static int          TouchDownY     = 0;
 static bool         TouchDragging  = false;     // left button held for a drag
-// A tap's click is emitted one frame AFTER the motion that positions it. Measured on device: a
-// synthesised click is only honoured when the widget layer has consumed the positioning motion in an
-// EARLIER gcn::Gui::logic() pass -- and a quick tap puts motion and click in the same pass whenever no
-// frame boundary happens to fall between FINGERDOWN and FINGERUP. That made a single tap work or not
-// work purely by frame rate (~110 ms/frame: worked; ~410 ms/frame: silently did nothing). A real mouse
-// never produces that ordering, so the adapter must not either (rules 37, 40).
+// A tap's click is emitted one frame after the motion that positions it. A synthesised click
+// is only honoured when the widget layer has consumed the positioning motion in an earlier
+// gcn::Gui::logic() pass, and a quick tap would put motion and click in the same pass
+// whenever no frame boundary falls between FINGERDOWN and FINGERUP. A real mouse never
+// produces that ordering.
 static bool         TouchClickPending = false;
 static int          TouchClickX       = 0;
 static int          TouchClickY       = 0;
@@ -1221,9 +1217,8 @@ static void HandleFingerEvent(const SDL_Event &event)
 				if (!TouchLongFired && !TouchStripLost) {
 					const Uint32 now = event.tfinger.timestamp ? event.tfinger.timestamp : SDL_GetTicks();
 					if (UiTouchGroupSlotState(TouchStripSlot) == 1) {
-						// Owner decision 2026-10-08, Q2 = B: the free slot has nothing to
-						// recall and nothing to overwrite, so a tap stores the selection
-						// there. That tap is not the first of a centring pair.
+						// Owner's rule: the free slot has nothing to recall and nothing to overwrite, so a tap
+						// stores the selection there. That tap is not the first of a centring pair.
 						UiTouchGroupStore(TouchStripSlot);
 						TouchStripTapSlot = 0;
 					} else if (TouchStripTapSlot == TouchStripSlot
@@ -1247,12 +1242,9 @@ static void HandleFingerEvent(const SDL_Event &event)
 				if (TouchAddDrag) {
 					PushShiftKey(false);
 				}
-				// NG99: a drag ends here, not in FlushPendingTouchClick -- it never sets
-				// TouchClickPending -- so it needs its own "the finger is gone". Measured: without
-				// this, scrolling a list left 5167 hover-coloured pixels parked on the row the
-				// finger lifted from, exactly the defect the tap path was just fixed for.
-				// The release is pushed immediately here rather than deferred a frame, so the
-				// sentinel can follow it directly.
+				// A drag ends here, not in FlushPendingTouchClick -- it never sets TouchClickPending -- so
+				// it needs its own "the finger is gone" (NG99). The release is pushed immediately here
+				// rather than deferred a frame, so the sentinel can follow it directly.
 				if (GuichanOwnsInput()) {
 					PushMouseMotion(-1, -1);
 				}
@@ -1459,28 +1451,25 @@ static void FlushPendingTouchClick()
 	PushMouseButton(SDL_MOUSEBUTTONDOWN, TouchClickButton, TouchClickX, TouchClickY);
 	PushMouseButton(SDL_MOUSEBUTTONUP, TouchClickButton, TouchClickX, TouchClickY);
 
-	// NG99: the finger is gone, so nothing is under a pointer any more. Without this the synthetic
-	// pointer stays parked where the finger lifted and the widget layer keeps treating it as a
-	// hovering mouse -- a tapped list row held its hover plate indefinitely, outranking the real
-	// selection (ImageListBox::draw checks the hover before the selected/unselected branch).
-	// gcn dispatches mouseExited when the widget under the pointer changes, and ImageListBox
-	// already clears its hover index there; the signal simply never arrived.
+	// The finger is gone, so nothing is under a pointer any more (NG99). Without this the
+	// synthetic pointer stays parked where the finger lifted and the widget layer keeps treating
+	// it as a hovering mouse (ImageListBox::draw checks the hover before the selected /
+	// unselected branch). gcn dispatches mouseExited when the widget under the pointer changes.
 	//
-	// AFTER the click, never at SDL_FINGERUP: the click is deliberately deferred a frame so the
-	// widget layer sees move-then-click as it would with a mouse, and a motion pushed earlier
-	// would make the click land on the sentinel instead of the row.
+	// After the click, never at SDL_FINGERUP: the click is deferred a frame so the widget layer
+	// sees move-then-click as with a mouse, and a motion pushed earlier would make the click
+	// land on the sentinel instead of the row.
 	//
 	// Menus only. In game this pointer is the real cursor -- it is drawn and it drives build
-	// placement -- so that path is left alone. In a menu it is not drawn at all, so moving it is
-	// invisible.
+	// placement -- so that path is left alone.
 	if (GuichanOwnsInput()) {
 		PushMouseMotion(-1, -1);
 	}
 }
 
-/// IG-010 / HUD-029: in game the pointer is not parked after a touch (it is the real cursor), so a
-/// HUD button stayed "under the cursor" after the finger left: its popup and its lit state stood
-/// until the next touch. The original shows a tooltip only while the pointer is on the button.
+/// IG-010 / HUD-029: in game the pointer is not parked after a touch (it is the real cursor), so
+/// a HUD button would stay "under the cursor" after the finger left. The original shows a
+/// tooltip only while the pointer is on the button.
 /// Called once per frame after FlushPendingTouchClick. In a menu the parking above does the work.
 static void PollTouchHoverEnd()
 {
@@ -1865,10 +1854,9 @@ void WaitEventsOneFrame()
 	}
 	handleInput(nullptr);
 #ifdef __ANDROID__
-	// Fire a hold order mid-hold, not on release. AFTER this frame's events: polled before
-	// them, a quick tap whose lift was already waiting in the queue behind a slow frame
-	// (longer than the hold threshold) was taken for a hold and became a right click --
-	// the tapped button only lit up. With the lift handled first, a tap stays a tap.
+	// Fire a hold order mid-hold, not on release. After this frame's events: with the lift
+	// handled first, a quick tap whose lift was waiting in the queue behind a slow frame stays
+	// a tap and is not taken for a hold.
 	PollTouchLongPress();
 	FlushPendingTouchClick();
 	PollTouchHoverEnd();

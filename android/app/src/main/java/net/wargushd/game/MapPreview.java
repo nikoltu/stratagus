@@ -57,6 +57,36 @@ final class MapPreview {
         return made;
     }
 
+    /**
+     * The picture of a map that is in no file, coloured the same way; null when the tileset's
+     * table or the game's colour files cannot be read. Not kept: the caller holds it.
+     */
+    static synchronized Bitmap of(File gameFolder, File dataDir, net.wargushd.game.editor.MapModel m) {
+        if (gameFolder == null || m == null) {
+            return null;
+        }
+        try {
+            final int era = (m.tileset() >= 0 && m.tileset() <= 3) ? m.tileset() : 0;
+            final int[] table = table(dataDir, era);
+            final int[] colours = colours(gameFolder, era);
+            if (table == null || colours == null) {
+                return null;
+            }
+            final int w = m.width(), h = m.height();
+            final int[] px = new int[w * h];
+            for (int i = 0; i < px.length; ++i) {
+                final int tile = m.tileAt(i);
+                final int mega = (tile >= 0 && tile < table.length) ? table[tile] - FIRST_MEGATILE : -1;
+                px[i] = (mega >= 0 && mega < colours.length) ? colours[mega] : 0xFF000000;
+            }
+            return Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
+        } catch (Exception e) {
+            return null;
+        } catch (OutOfMemoryError e) {
+            return null;
+        }
+    }
+
     private static Bitmap make(File gameFolder, File dataDir, File pud) throws Exception {
         int w = 0, h = 0, era = 0;
         byte[] tiles = null;

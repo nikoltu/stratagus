@@ -127,7 +127,7 @@ void COrder_Move::UpdatePathFinderData(PathFinderInput &input) /* override */
 	input.SetMinRange(0);
 }
 
-static inline void applyResidualDisplacementCorrection(signed char *id, int move) {
+static inline void applyResidualDisplacementCorrection(short *id, int move) {
 	// in case of residual displacement due to non-tile
 	// aligned movement, apply correction at movement speed
 	if (*id > 0) {
@@ -239,6 +239,11 @@ int DoActionMove(CUnit &unit)
 			}
 		}
 
+		if (unit.ZDisplaced) {
+			// A hovering flyer leaves its height in IY; from here on IY is the way to the next tile.
+			unit.IY = 0;
+			unit.ZDisplaced = 0;
+		}
 		unit.IX += -posd.x * PixelTileSize.x;
 		unit.IY += -posd.y * PixelTileSize.y;
 		unit.Frame = unit.Type->StillFrame;
@@ -246,8 +251,9 @@ int DoActionMove(CUnit &unit)
 	} else {
 		const auto direction =
 			unit.pathFinderData->output.Path[unit.pathFinderData->output.Length - 1];
-		posd.x = Heading2X[direction];
-		posd.y = Heading2Y[direction];
+		const int length = PathElementLength(direction, unit.Type->GridStep);
+		posd.x = Heading2X[PathElementHeading(direction)] * length;
+		posd.y = Heading2Y[PathElementHeading(direction)] * length;
 		d = unit.pathFinderData->output.Length;
 	}
 
@@ -261,14 +267,15 @@ int DoActionMove(CUnit &unit)
 	move = move * PixelTileSize.x / 32;
 
 	bool reached_next_tile = false;
+	// posd may span several tiles (GridStep); the speed per tile stays the same.
 	if (posd.x) {
-		unit.IX += posd.x * move;
+		unit.IX += posd.x > 0 ? move : -move;
 		reached_next_tile = ((posd.x < 0) == (unit.IX < 0));
 	} else {
 		applyResidualDisplacementCorrection(&unit.IX, move);
 	}
 	if (posd.y) {
-		unit.IY += posd.y * move;
+		unit.IY += posd.y > 0 ? move : -move;
 		reached_next_tile = (reached_next_tile || ((posd.y < 0) == (unit.IY < 0)));
 	} else {
 		applyResidualDisplacementCorrection(&unit.IY, move);
@@ -305,10 +312,13 @@ void COrder_Move::Execute(CUnit &unit) /* override */
 
 		case PF_WAIT:
 		{
-			const CUnit *blocker = UnitOnMapTile(this->goalPos, unit.Type->MoveType);
+			// A unit on a grid aims at the grid tile of the goal and is next to it one step away.
+			const int step = unit.Type->GridStep;
+			const Vec2i goalTile(this->goalPos.x - this->goalPos.x % step, this->goalPos.y - this->goalPos.y % step);
+			const CUnit *blocker = UnitOnMapTile(goalTile, unit.Type->MoveType);
 			if (blocker) {
 				const int distToBlocker = MapDistanceBetweenTypes(*(unit.Type), unit.tilePos, *(blocker->Type), blocker->tilePos);
-				if (distToBlocker == 1 && (unit.IsEnemy(*blocker) || blocker->Moving == 0)) {
+				if (distToBlocker == step && (unit.IsEnemy(*blocker) || blocker->Moving == 0)) {
 					unit.Wait = 0;
 					this->Finished = true;
 				}

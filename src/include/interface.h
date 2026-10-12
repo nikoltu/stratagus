@@ -300,7 +300,7 @@ extern void HandleMouseExit();
 extern void UIClearButtonHover();
 
 //
-// Touch routes (TOUCH-R1, R2, R4, R5, R7: owner decision 2026-10-08). The original has no
+// Touch routes (TOUCH-R1, R2, R4, R5, R7: owner's rule). The original has no
 // touch input, so none of this has an original counterpart.
 //
 /// True where the pointer is a finger: a building is placed by a confirming tap on its

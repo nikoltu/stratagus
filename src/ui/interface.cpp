@@ -291,12 +291,11 @@ static void UiAddToGroup(unsigned group)
 //  TOUCH-R1: control groups on a touch screen
 //-----------------------------------------------------------------------------
 //
-//  Owner decision 2026-10-08, option A of TOUCH_ROUTES_OPTIONS (R1): a strip of group slots
-//  on the right edge of the map view. Tap = select the group, second tap = centre the view
-//  on it, hold = the selection becomes the group. Only stored groups and the next free slot
-//  are drawn. The original has no such element: the slots are drawn by code, no art is used.
-//  Owner's answers of 2026-10-08 to the open details: Q1 = A (dark plate, thin frame),
-//  Q2 = B (a tap on the free slot stores the selection there; video/sdl.cpp, SDL_FINGERUP).
+//  Owner's rule: a strip of group slots on the right edge of the map view. Tap = select the
+//  group, second tap = centre the view on it, hold = the selection becomes the group; a tap
+//  on the free slot stores the selection there (video/sdl.cpp, SDL_FINGERUP). Only stored
+//  groups and the next free slot are drawn. The original has no such element: the slots are
+//  drawn by code, no art is used.
 //
 //  Sizes are in HUD units. One unit is one pixel of the original's 640x480 layout at the
 //  HUD's present scale, which is the whole number CVideo::HudCanvas.Step (3 on a 2960x1848
@@ -326,7 +325,7 @@ static int TouchGroupPressed = 0;     /// slot under a finger, 0 for none
 
 /// One HUD unit in pixels: the step k of the classic 640x480 layout (video/video.cpp,
 /// CVideo::ComputeHudCanvas). Not UI.MapArea.X / 176: the map area's left edge is the
-/// canvas's left edge plus 176 units, and the canvas is centred on a screen wider than 16:9.
+/// canvas's left edge plus 176 units, and the canvas is centred on a screen narrower than 4:3.
 static int TouchHudUnit()
 {
 	return Video.HudCanvas.Step;
@@ -470,8 +469,8 @@ void DrawTouchGroupStrip()
 	if (!UiTouchGroupStripShown()) {
 		return;
 	}
-	// The look is the owner's choice Q1 = A (TOUCH_OPEN_QUESTIONS.html): dark plate, thin
-	// frame, yellow when the group is the selection, dashed for the free slot.
+	// The look (owner's rule): dark plate, thin frame, yellow when the group is the selection,
+	// dashed for the free slot.
 	const int t = std::max(1, (TouchHudUnit() + 1) / 2); // frame: half a unit, rounded up
 	const CFont &font = ResourcesFont ? *ResourcesFont : GetGameFont();
 	const CLabel label(font);
@@ -504,7 +503,7 @@ void DrawTouchGroupStrip()
 			// the number above, the unit count below
 			Video.FillTransRectangleClip(ColorBlack, x, y, w, h, 160);
 			TouchGroupFrame(state == 3 ? ColorYellow : ColorGray, 255, x, y, w, h, t);
-			// Owner, 2026-10-08: the number large, the unit count small. The count takes the
+			// Owner's rule: the number large, the unit count small. The count takes the
 			// HUD's small face (scripts/fonts.lua "remaster_hud_small") when it is defined.
 			static CFont *countFont = CFont::Get("remaster_hud_small");
 			const std::string count = std::to_string(GetUnitsOfGroup(group).size());
@@ -1130,7 +1129,9 @@ static void InputKey(int key)
 				FastForwardCycle = atoi(&Input[4]);
 			}
 
-			if (Input[0]) {
+			if (Input[0] && NetworkChatIsDirect()) {
+				NetworkChat(Input.data()); // beside the command stream: it arrives in a pause too
+			} else if (Input[0]) {
 				auto escapedInput = ReplaceTildeBy2Tilde(Input.data());
 				std::string chatMessage = "~" + PlayerColorNames[ThisPlayer->Index] + "~<"
 				                        + ThisPlayer->Name + ">~> " + escapedInput;

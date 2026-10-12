@@ -30,9 +30,17 @@ enum class Kind : uint8_t {
 	Commit,  // player, cycle C, alive mask, reason (B.5 rules 5, 6, 10)
 	Cancel,  // player, round (B.5 rule 7)
 	// NET_PAUSE_SPEC.md. The values 7, 8 and 9 are the probe, its answer and the relay of the wire.
-	Pause = 10 // cycle P of a pause. flags 1: the sender stands after P, player = who paused.
-	           // flags 0: that pause is over, player = who let the game go on
+	Pause = 10, // cycle P of a pause. flags 1: the sender stands after P, player = who paused.
+	            // flags 0: that pause is over, player = who let the game go on
+	// LAN_CHAT_NOTE.md. A chat line is no part of the game: it has no cycle and is shown on arrival.
+	Chat = 11,   // one chat line of the sender; data = its number. The text is not the model's: it
+	             // travels with the message (the caller keeps it by the number)
+	ChatAck = 12 // data = the number of a line of the receiver that the sender has taken
 };
+
+// A device makes no new chat line while its oldest unanswered one is this many numbers back; so
+// a receiver that remembers the last 32 numbers of a sender never takes a line for an old one.
+constexpr uint32_t kChatWindow = 16;
 
 enum class Reason : uint8_t {
 	Lost,           // removed by a removal round (B.5)
@@ -48,7 +56,8 @@ struct Msg {
 	uint8_t flags = 0;    // Cmd: 1 = quit. Need: 1 = relay. Commit: Reason. Pause: 1 = stands, 0 = over
 	uint16_t round = 0;   // Commit / Cancel
 	int32_t cycle = 0;    // Cmd, Need, Commit (C), Pause (P)
-	uint32_t data = 0;    // Cmd: the opaque command. Status: sequence number of the view
+	uint32_t data = 0;    // Cmd: the opaque command. Status: sequence number of the view.
+	                      // Chat, ChatAck: number of the line
 	uint16_t mask = 0;    // Loaded: seen. Need: who. Status: alive. Commit: alive set of the commit
 	uint16_t removed = 0; // Status: players the sender has removed
 	uint16_t want = 0;    // Status: peers whose current view the sender lacks (asks for a relay)
@@ -62,9 +71,11 @@ struct Out {
 };
 
 struct Event {
-	enum Type : uint8_t { Started, Waiting, PlayerRemoved, SelfOut, Paused, Resumed } type;
-	int player;     // Waiting, PlayerRemoved. Paused: who paused. Resumed: who let the game go on
-	int32_t cycle;  // PlayerRemoved: the removal cycle C. Paused, Resumed: the pause cycle P
+	enum Type : uint8_t { Started, Waiting, PlayerRemoved, SelfOut, Paused, Resumed, ChatLine } type;
+	int player;     // Waiting, PlayerRemoved. Paused: who paused. Resumed: who let the game go on.
+	                // ChatLine: who said it
+	int32_t cycle;  // PlayerRemoved: the removal cycle C. Paused, Resumed: the pause cycle P.
+	                // ChatLine: the number of the line (a new one of that player, told once)
 	Reason reason;  // PlayerRemoved, SelfOut
 	int32_t msLeft; // Waiting: time to the bound
 };
@@ -83,6 +94,7 @@ struct Params {
 	int64_t statusMs = 250;          // B.5 rule 2: Status interval while a round is open
 	int64_t lingerQuietMs = 500;     // B.6 step 2
 	int64_t lingerCapMs = 2000;      // B.6 step 2
+	int64_t chatMs = 250;            // a chat line is sent again at this interval until it is answered
 };
 
 class Mesh
@@ -103,6 +115,10 @@ public:
 	// or less) - the same answer on every device.
 	bool Pause(int by, int64_t now);
 	void Resume(int64_t now);                            // the local player lets the game go on
+	// The local player says a chat line: it goes to every peer now and again until each has
+	// answered or is removed. Returns its number (from 1), or 0 if no line is taken: this device
+	// is out or has left, or kChatWindow lines back one is still unanswered.
+	uint32_t Chat(int64_t now);
 
 	// --- output: the caller drains both ---
 	std::vector<Out> out;
@@ -154,6 +170,7 @@ private:
 	void SendCommit(int to, int p);
 	void AnswerNeed(int from, const Msg &m);
 	void EndPause(int32_t cycle, int by);
+	bool TakeChat(int from, uint32_t number);
 
 	const int n_;
 	const int me_;
@@ -213,6 +230,17 @@ private:
 	int32_t ended_ = -1;       // every pause that began at or before this cycle is over
 	int endedBy_ = 0;
 	int64_t lastPauseSent_ = 0;
+
+	// chat (LAN_CHAT_NOTE.md)
+	struct ChatOut {
+		uint32_t number;
+		uint16_t left;  // peers that have not answered yet
+		int64_t sent;
+	};
+	std::vector<ChatOut> chatOut_;         // own lines not answered by everybody, oldest first
+	uint32_t chatMade_ = 0;                // number of the last own line
+	uint32_t chatTop_[kMaxPlayers] = {};   // highest number taken from each player, 0 = none
+	uint32_t chatSeen_[kMaxPlayers] = {};  // bit i: the number chatTop_ - 1 - i was taken too
 
 	// leaving
 	bool lingering_ = false;

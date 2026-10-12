@@ -375,8 +375,6 @@ void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos)
 	const PixelPos startPixelPos = from->GetMapPixelPosCenter()
 								   + unit.Type->MissileOffsets[dir][0];
 
-	Vec2i dpos;
-	bool divisionOffset = false;
 	if (goal) {
 		Assert(goal->Type);  // Target invalid?
 		// Moved out of attack range?
@@ -388,6 +386,42 @@ void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos)
 			// FIXME: do something other?
 			return;
 		}
+	}
+
+	bool overshot = false;
+	const PixelPos destPixelPos = MissileImpactPoint(unit, goal, newgoalPos, overshot);
+	Missile *missile = MakeMissile(*unit.Type->Missile.Missile, startPixelPos, destPixelPos);
+	//
+	// Damage of missile
+	//
+	// A missile that flies over its goal is a missile at a point: it hits what is there.
+	if (goal && !overshot) {
+		missile->TargetUnit = goal;
+	}
+	missile->SourceUnit = &unit;
+}
+
+/**
+**  The point a missile of the unit flies to.
+**
+**  It is the centre of the goal (its nearest tile for a unit firing from inside
+**  a container) or of the tile. A unit type with a MinImpactRange does not bring
+**  its missile down nearer than that: a nearer point is moved out along the line
+**  from the centre of the firing unit (of its container) to the point until the
+**  larger axis offset is MinImpactRange tiles.
+**
+**  @param unit      Unit that fires.
+**  @param goal      Goal unit, or nullptr.
+**  @param goalPos   Goal tile when there is no goal unit.
+**  @param overshot  Set when the point was moved out.
+**
+**  @return          the map pixel position of the impact.
+*/
+PixelPos MissileImpactPoint(const CUnit &unit, const CUnit *goal, const Vec2i &goalPos, bool &overshot)
+{
+	Vec2i dpos;
+	bool divisionOffset = false;
+	if (goal) {
 		// Fire to nearest point of the unit!
 		// If Firing from inside a Bunker
 		if (unit.Container) {
@@ -398,21 +432,24 @@ void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos)
 			dpos = goal->tilePos + goal->Type->GetHalfTileSize();
 		}
 	} else {
-		dpos = newgoalPos;
+		dpos = goalPos;
 		// FIXME: Can this be too near??
 	}
 
 	PixelPos destPixelPos = Map.TilePosToMapPixelPos_Center(dpos);
 	if (divisionOffset)
 		destPixelPos -= PixelTileSize/2;
-	Missile *missile = MakeMissile(*unit.Type->Missile.Missile, startPixelPos, destPixelPos);
-	//
-	// Damage of missile
-	//
-	if (goal) {
-		missile->TargetUnit = goal;
+
+	overshot = false;
+	if (unit.Type->MinImpactRange > 0) {
+		const CUnit &from = *GetFirstContainer(unit);
+		const PixelPos centre = Map.TilePosToMapPixelPos_TopLeft(from.tilePos) + from.Type->GetPixelSize() / 2;
+		const PixelPos pushed = PushOutToRange(centre, destPixelPos, unit.Type->MinImpactRange, PixelTileSize);
+
+		overshot = pushed != destPixelPos;
+		destPixelPos = pushed;
 	}
-	missile->SourceUnit = &unit;
+	return destPixelPos;
 }
 
 /**
@@ -484,8 +521,7 @@ static void LoadHDMissileMap()
 		return;
 	}
 	g_hdMissileMapTried = true;
-	// HD-MISS-MISSILES: every early return here used to be silent, so a map that failed to load
-	// looked exactly like one that loaded. Same treatment as the unit map (unittype.cpp).
+	// HD-MISS-MISSILES: every early return here reports, as for the unit map (unittype.cpp).
 	// ErrorPrint, not DebugPrint: this must be visible without a runtime flag.
 	const fs::path resolved = LibraryFileName("hd_missiles_map.json");
 	if (resolved.empty()) {
@@ -656,7 +692,7 @@ void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 			// PixelTileSize * zoom / HdNativeTilePx with its own canvas centred on the centre of
 			// the logical box. `pos` is the screen position of the box's top-left and the box is
 			// size * zoom on screen, hence the centre pos + size * zoom / 2. The Lua `Size` stays
-			// the logical box (start point, flight, visibility); it no longer sizes the picture.
+			// the logical box (start point, flight, visibility); it does not size the picture.
 			const float z = GpuWorldDrawZoom;
 			const float s = PixelTileSize.x * z / HdNativeTilePx;
 			const float cx = pos.x + this->size.x * z / 2.0f;

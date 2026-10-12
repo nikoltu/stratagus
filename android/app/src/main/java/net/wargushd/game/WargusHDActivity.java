@@ -68,6 +68,10 @@ public class WargusHDActivity extends SDLActivity {
      * in the loading file); 0 = nobody any more.
      */
     static final int MSG_LOADING_WAIT = 5;
+    /** A chat line was added in a game with other people; the value is how many were added in all. */
+    static final int MSG_CHAT_LINE = 6;
+    /** A game with other people can be talked in (1) or no longer (0). */
+    static final int MSG_CHAT = 7;
     /** Debuggable builds: show the value in a label above the engine. */
     static final int MSG_TEST = 0x7F00;
 
@@ -87,6 +91,82 @@ public class WargusHDActivity extends SDLActivity {
 
     /** Tells the engine that this activity draws the loading screen. */
     private static native void nativeLauncherHost(boolean hosted);
+
+    /** Leaves a chat line the player has typed (UTF-8) for the engine; it says it in its next frame. */
+    private static native void nativeChatSend(byte[] text);
+
+    /** The chat lines the engine keeps (UTF-8): one a line, "rrggbb<tab>name<tab>text". */
+    private static native byte[] nativeChatLines();
+
+    /** The chat control of a game with other people; null in every other game. */
+    private ChatView chatView;
+
+    /** Put the chat control above the game, or take it away. */
+    private void showChat(boolean show) {
+        if (!show) {
+            if (chatView != null) {
+                chatView.close();
+                if (overlayHost != null) {
+                    overlayHost.removeView(chatView);
+                }
+                chatView = null;
+            }
+            return;
+        }
+        if (chatView != null || overlayHost == null) {
+            return;
+        }
+        // The keyboard comes over the game: the engine's surface is neither moved nor resized.
+        getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+        if (loadingKit == null) {
+            loadingKit = new SkinKit(this);
+        }
+        chatView = new ChatView(this, loadingKit, new ChatView.Listener() {
+            @Override
+            public void onSend(String text) {
+                nativeChatSend(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+
+            @Override
+            public void onClosed() {
+                // The keys are the game's again.
+                final View surface = (View) (Object) mSurface;
+                if (surface != null) {
+                    surface.requestFocus();
+                }
+                Screen.hideBars(WargusHDActivity.this);
+            }
+        });
+        overlayHost.addView(chatView, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        readChatLines(0);
+    }
+
+    /** Take the engine's chat lines for the control. */
+    private void readChatLines(int total) {
+        if (chatView == null) {
+            return;
+        }
+        final java.util.ArrayList<ChatView.Line> lines = new java.util.ArrayList<ChatView.Line>();
+        final byte[] bytes = nativeChatLines();
+        if (bytes != null && bytes.length > 0) {
+            final String all = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            for (String line : all.split("\n")) {
+                final String[] parts = line.split("\t", 3);
+                if (parts.length != 3) {
+                    continue;
+                }
+                int colour = -1;
+                try {
+                    colour = parts[0].equals("-") ? -1 : Integer.parseInt(parts[0], 16) & 0xFFFFFF;
+                } catch (NumberFormatException e) {
+                    colour = -1;
+                }
+                lines.add(new ChatView.Line(colour, parts[1], parts[2]));
+            }
+        }
+        chatView.setLines(lines, total);
+    }
 
     /** The loading screen above the whole window while the engine starts or loads. */
     private LoadingView loadingView;
@@ -180,10 +260,18 @@ public class WargusHDActivity extends SDLActivity {
         if (what == MSG_LOADING_WAIT) {
             showLoadingWait(value);
         }
+        if (what == MSG_CHAT) {
+            showChat(value != 0);
+        }
+        if (what == MSG_CHAT_LINE) {
+            readChatLines(value);
+        }
         if (what == MSG_GAME_ENDED) {
+            showChat(false);
             takeLastFrame();
         }
         if (what == MSG_RESULT_READY) {
+            showChat(false);
             showResult();
         }
         if (what == MSG_TEST

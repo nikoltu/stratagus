@@ -473,11 +473,9 @@ void CIcon::DrawUnitIcon(const ButtonStyle &style, unsigned flags,
 			}
 		}
 	} else if (pictureW > 0) {
-		// PANEL-A: a narrow cell shows the MIDDLE of the picture at the picture's own size, it is
+		// PANEL-A: a narrow cell shows the middle of the picture at the picture's own size, it is
 		// not squeezed: the 96 px inside a 4-column cell are columns 21..116 of the 138-px
-		// picture (work/agent-orig-scenes captures u11 against u07 and u09, Grunt and
-		// Axethrower: mean difference 3.9 and 1.5 of 255 at 21, 7.2 / 11.9 at 20 / 22;
-		// squeezed 30; work/agent-prep-panels/tools/squeeze.py).
+		// picture (measured: capture u11 against u07 and u09).
 		ButtonStyle pic(s);
 		pic.Width = pictureW;
 		pic.Default.BorderSize = pic.Hover.BorderSize = pic.Clicked.BorderSize = 0;

@@ -99,6 +99,8 @@ void SetClassicView(bool on)
 	if (on && Map.HDTileAtlasTried && !Map.ClassicTileAtlas) {
 		ErrorPrint("ClassicView: no classic terrain for this map, the terrain stays Remastered\n");
 	}
+	// The picture's layout follows the view: the 4:3 box, or the Remastered rects back.
+	ApplyClassicViewLayout();
 }
 
 bool IsClassicView()
@@ -572,6 +574,11 @@ CAtlasGraphic::~CAtlasGraphic()
 	pages.clear();
 	frames.clear();
 	byHash.clear();
+	classicGroups.clear(); // the cut groups own their textures
+	if (classicPage) {
+		SDL_FreeSurface(classicPage);
+		classicPage = nullptr;
+	}
 }
 
 // Load <path>.hdatlas + its page PNGs. See video/hd_atlas.h for the on-disk layout. Any failure
@@ -854,7 +861,8 @@ static bool UploadPalettedFrames(SDL_Surface *indexed, const uint8_t rgba[256][4
 // name (e.g. "Forest/forest_0"). Single page (meta.image). Returns false on any failure.
 bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask, bool fogMask,
                                       const unsigned char *palette, bool nearest,
-                                      const char *framePrefix, const char *maskPrefix)
+                                      const char *framePrefix, const char *maskPrefix,
+                                      const char *groupMark)
 {
 	if (!pages.empty()) {
 		return true; // already loaded; single-shot
@@ -998,7 +1006,11 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 	for (const auto &kv : *framesNode->object) {
 		const std::string &name = kv.first;
 		const bool isMask = maskPrefixLen && name.compare(0, maskPrefixLen, maskPrefix) == 0;
-		if (!isMask && framePrefixLen && name.compare(0, framePrefixLen, framePrefix) != 0) {
+		std::string groupName;
+		int groupFrame = -1;
+		const bool isGroup = palette && groupMark && !isMask
+		                     && hdatlas::classicSplitGroupFrame(name, groupMark, groupName, groupFrame);
+		if (!isMask && !isGroup && framePrefixLen && name.compare(0, framePrefixLen, framePrefix) != 0) {
 			continue;
 		}
 		const content::JsonValue &f = kv.second;
@@ -1011,6 +1023,31 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		const content::JsonValue *rot = f.find("rotated");
 		if (rot && rot->asBool(false)) {
 			continue; // rotated frames unsupported (parity with P0)
+		}
+		if (isGroup) {
+			// A sprite cell: listed under its group, cut only when the group is first drawn. The
+			// cell is taken whole; a trimmed cell is not a classic sprite cell and is left out.
+			const content::JsonValue *trim = f.find("trimmed");
+			if ((trim && trim->asBool(false)) || fx < 0 || fy < 0 || fw <= 0 || fh <= 0
+				|| fx + fw > pageSurface->w || fy + fh > pageSurface->h) {
+				continue;
+			}
+			std::string lower = groupName;
+			for (char &c : lower) { c = (char) std::tolower((unsigned char) c); }
+			auto git = classicGroupByName.find(lower);
+			if (git == classicGroupByName.end()) {
+				git = classicGroupByName.emplace(lower, (int) classicGroups.size()).first;
+				classicGroups.emplace_back();
+				classicGroups.back().name = groupName;
+			}
+			std::vector<hdatlas::HdFrameRecord> &cells = classicGroups[git->second].cells;
+			if ((size_t) groupFrame >= cells.size()) {
+				cells.resize((size_t) groupFrame + 1, hdatlas::HdFrameRecord{});
+			}
+			hdatlas::HdFrameRecord &cell = cells[groupFrame];
+			cell.sx = (uint16_t) fx; cell.sy = (uint16_t) fy; cell.sw = (uint16_t) fw; cell.sh = (uint16_t) fh;
+			cell.cw = (uint16_t) fw; cell.ch = (uint16_t) fh;
+			continue;
 		}
 		int offx = 0, offy = 0;
 		if (const content::JsonValue *sss = f.find("spriteSourceSize")) {
@@ -1145,7 +1182,17 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 			SDL_FreeSurface(page);
 		}
 	}
-	SDL_FreeSurface(pageSurface);
+	if (uploadOk && !classicGroups.empty()) {
+		// Classic view: the indexed page and the palette stay for ClassicGroup().
+		static unsigned serial = 0;
+		classicPage = pageSurface;
+		classicPalette.assign(palette, palette + 768);
+		classicSerial = ++serial;
+	} else {
+		SDL_FreeSurface(pageSurface);
+		classicGroups.clear();
+		classicGroupByName.clear();
+	}
 	if (!uploadOk) {
 		for (SDL_Texture *tex : pages) {
 			if (tex) { SDL_DestroyTexture(tex); }
@@ -1163,6 +1210,71 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 		}
 	}
 	return true;
+}
+
+int CAtlasGraphic::ClassicGroupByName(const std::string &group) const
+{
+	std::string lower = group;
+	for (char &c : lower) { c = (char) std::tolower((unsigned char) c); }
+	const auto it = classicGroupByName.find(lower);
+	return it != classicGroupByName.end() ? it->second : -1;
+}
+
+const CAtlasGraphic *CAtlasGraphic::ClassicGroup(int group, int rampStart)
+{
+	if (!classicPage || group < 0 || group >= (int) classicGroups.size()
+		|| rampStart < 0 || rampStart + hdatlas::ClassicTeamCount > 256) {
+		return nullptr;
+	}
+	ClassicGroupData &data = classicGroups[group];
+	if (data.hasTeam < 0) {
+		// Team-colour pixels in any cell? Without them one cut serves every player colour.
+		data.hasTeam = 0;
+		SDL_LockSurface(classicPage);
+		const Uint8 *base = static_cast<const Uint8 *>(classicPage->pixels);
+		for (size_t i = 0; !data.hasTeam && i < data.cells.size(); ++i) {
+			const hdatlas::HdFrameRecord &cell = data.cells[i];
+			for (int y = 0; !data.hasTeam && y < cell.sh; ++y) {
+				const Uint8 *row = base + (cell.sy + y) * classicPage->pitch + cell.sx;
+				for (int x = 0; x < cell.sw; ++x) {
+					if (row[x] >= hdatlas::ClassicTeamFirst
+						&& row[x] < hdatlas::ClassicTeamFirst + hdatlas::ClassicTeamCount) {
+						data.hasTeam = 1;
+						break;
+					}
+				}
+			}
+		}
+		SDL_UnlockSurface(classicPage);
+	}
+	const int key = data.hasTeam ? rampStart : hdatlas::ClassicTeamFirst;
+	const auto it = data.byRamp.find(key);
+	if (it != data.byRamp.end()) {
+		return it->second.get();
+	}
+	std::unique_ptr<CAtlasGraphic> &slot = data.byRamp[key]; // stays null when the cut fails
+	int maxDim = 4096;
+	{
+		SDL_RendererInfo info;
+		if (TheRenderer && SDL_GetRendererInfo(TheRenderer, &info) == 0
+			&& info.max_texture_width > 0 && info.max_texture_height > 0) {
+			maxDim = std::min(info.max_texture_width, info.max_texture_height);
+		}
+	}
+	uint8_t rgba[256][4];
+	hdatlas::expandPalette6(classicPalette.data(), true, rgba);
+	hdatlas::classicApplyRamp(rgba, key);
+	auto cut = std::make_unique<CAtlasGraphic>();
+	cut->frames = data.cells;
+	if (!UploadPalettedFrames(classicPage, rgba, maxDim, cut->frames, cut->pages, {})) {
+		for (SDL_Texture *tex : cut->pages) {
+			if (tex) { SDL_DestroyTexture(tex); }
+		}
+		cut->pages.clear();
+		return nullptr;
+	}
+	slot = std::move(cut);
+	return slot.get();
 }
 
 // FNV-1a of the key -> frame index (or -1). Hash matches the importer and hd_atlas.h.
@@ -1308,6 +1420,20 @@ void CAtlasGraphic::DrawAtlasFrameFullAlpha(int frame, const SDL_Rect &dst, uint
 	SDL_Rect src = {rec.sx, rec.sy, rec.sw, rec.sh};
 	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 	SDL_SetTextureAlphaMod(pages[rec.page], 255);
+}
+
+void CAtlasGraphic::DrawAtlasFramePart(int frame, int srcW, int srcH, const SDL_Rect &dst) const
+{
+	if (pages.empty() || frame < 0 || frame >= (int) frames.size() || srcW <= 0 || srcH <= 0) {
+		return;
+	}
+	const hdatlas::HdFrameRecord &rec = frames[frame];
+	Assert(rec.rotated == 0);
+	if (rec.page >= pages.size() || !pages[rec.page]) {
+		return;
+	}
+	SDL_Rect src = {rec.sx, rec.sy, std::min<int>(srcW, rec.sw), std::min<int>(srcH, rec.sh)};
+	SDL_RenderCopy(TheRenderer, pages[rec.page], &src, &dst);
 }
 
 /**
@@ -2363,12 +2489,9 @@ void CGraphic::Load(bool grayscale)
 	// graphics return nullptr and stay fully on the CPU path.
 	// ICON-TEAM-KEY: the icon strip that carries the team key (v, 0, v) gets no sheet texture.
 	// Every HUD draw of it then takes a per-frame texture (GetHudFrameTexture), and a draw in a
-	// player's colour the recoloured one (GetHudFrameColorTexture) -- the path written for a GL
-	// size cap below the strip's 24304 px, where the upload fails by itself. With a cap above that
-	// (32768 on the emulator, EVIDENCE-F2-001) the upload succeeded, both `!mTexture` gates of
-	// DrawPlayerColorFrameClip[Scaled] were shut and the sheet went to the screen as stored: the
-	// team region of the portrait and of the command icons showed the key itself, 1393 px of
-	// exact (v, 0, v) in the worker's portrait of work/c671_e.png.
+	// player's colour the recoloured one (GetHudFrameColorTexture). With a sheet texture the
+	// `!mTexture` gates of DrawPlayerColorFrameClip[Scaled] would be shut and the sheet would go
+	// to the screen as stored, the key itself showing in the team region.
 	if (teamKeyedStrip) {
 		static bool logged = false;
 		if (!logged) {

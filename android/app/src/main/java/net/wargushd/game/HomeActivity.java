@@ -34,7 +34,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private static final float RAIL_W = 720f, EDGE_W = 6f, PAD = 48f;
     private static final float LOGO_W = 624f, LOGO_H = 416f;
     private static final float ROW_X = 48f, ROW_W = 618f, ROW_H = 132f, ROW_Y0 = 512f, ROW_PITCH = 144f;
-    private static final float ROW_INSET = 36f, ROW_RADIUS = 10f;
+    private static final float ROW_INSET = 36f, ROW_RADIUS = 10f, RAIL_FOOT_GAP = 12f;
     private static final float FOOT_H = 96f, FILES_UP = 324f, MUSIC_UP = 216f, VERSION_UP = 84f;
     private static final float CAP_TITLE = 60f, CAP_BODY = 44f, CAP_MID = 36f, CAP_SMALL = 30f;
 
@@ -65,6 +65,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private static final int ENTRY_SCENARIO = 1;
     private static final int ENTRY_MULTIPLAYER = 2;
     private static final int ENTRY_LOAD = 3;
+    private static final int ENTRY_EDITOR = 5;
     private static final int ENTRY_OPTIONS = 6;
     private static final int PAGE_NONE = -1;
 
@@ -76,6 +77,12 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     /** Where the pending game was started from: the rail entry and, on Missions, the campaign. */
     private static final String PREF_ORIGIN = "originPage";
     private static final String PREF_ORIGIN_CAMPAIGN = "originCampaign";
+    /**
+     * Set while the pending game is a test game of the Map Editor: the path of the map being
+     * edited. Such a game is the launcher's own affair: its record is taken and dropped, nothing
+     * of it is counted, and the shell comes back to the editor's map view.
+     */
+    private static final String PREF_TEST = "pendingTestMap";
 
     private SkinKit kit;
     private HomeView view;
@@ -92,7 +99,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     // Custom Scenario state.
     private final List<File> maps = new ArrayList<File>();
     private final List<PudInfo> mapInfo = new ArrayList<PudInfo>();
-    // The owner's choice of 2026-10-06 (option D): All / Remastered / My maps.
+    // Owner's rule: All / Remastered / My maps.
     private int source = 1;          // 0 all, 1 the game folder's maps, 2 the player's imported maps
     private int selectedMap = 0;
     private float listScroll;        // logical units
@@ -107,6 +114,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private final LoadPage load = new LoadPage();
     private final OptionsPage options = new OptionsPage();
     private final LanPage lan = new LanPage();
+    private final EditorPage editor = new EditorPage();
     /** The gate was opened from Options: what the pages show of the folder is read again after it. */
     private boolean folderVisit;
     /** This resume follows a game whose record was just read. */
@@ -140,6 +148,67 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private File sheetMap;
     /** The map the name sheet renames, or null when it names a profile. */
     private File renamingMap;
+    /** Who takes the name typed in the name sheet when the Map Editor page asked for it; else null. */
+    private EditorPage.Named nameThen;
+    /** What the Map Editor page asks of the shell. */
+    private final EditorPage.Shell editorShell = new EditorPage.Shell() {
+        @Override
+        public void click() {
+            menuAudio.play(MenuAudio.BUTTON);
+        }
+
+        @Override
+        public void error() {
+            menuAudio.play(MenuAudio.ERROR);
+        }
+
+        @Override
+        public void redraw() {
+            if (view != null) {
+                view.invalidate();
+            }
+        }
+
+        @Override
+        public void askName(String title, String initial, EditorPage.Named then) {
+            nameThen = then;
+            nameSheet = new NameSheet(title, initial);
+            view.requestFocus();
+            final InputMethodManager keys = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            keys.restartInput(view);
+            keys.showSoftInput(view, 0);
+            view.invalidate();
+        }
+
+        @Override
+        public void later(Runnable r, long millis) {
+            view.postDelayed(r, millis);
+        }
+
+        @Override
+        public void forget(Runnable r) {
+            view.removeCallbacks(r);
+        }
+
+        @Override
+        public boolean test(File pud, File map) {
+            if (profile == null || !GateActivity.isSatisfied(HomeActivity.this)) {
+                return false;
+            }
+            // An ordinary scenario request on the written map: the first playable slot is the
+            // player's, the others are computers, and race, resources and units are the map's
+            // own. No result window is asked for.
+            final StringBuilder r = new StringBuilder();
+            r.append("  mode = \"scenario\",\n");
+            r.append("  map = ").append(luaString(MapList.path(HomeActivity.this, pud))).append(",\n");
+            testMap = map.getPath();
+            final boolean started = launch(r.toString(), profile.name);
+            testMap = null;
+            return started;
+        }
+    };
+    /** The map a test game is being started for; null for every other start. */
+    private String testMap;
     /** True when the typed name is for a new profile, false when it renames the active one. */
     private boolean nameIsNew;
     /** The first profile has just been made and its step has not been shown yet. */
@@ -190,6 +259,14 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
         view = new HomeView(this);
         setContentView(view);
+        final Runnable pagePictures = new Runnable() {
+            @Override
+            public void run() {
+                view.postInvalidate();
+            }
+        };
+        campaign.redraw = pagePictures;
+        missions.redraw = pagePictures;
         Screen.useWhole(this);
     }
 
@@ -248,8 +325,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         } else if ("net_left".equals(netReason)) {
             tell(kit.own("The game ended"), kit.own("You left the game. It is counted as a defeat."));
         } else if ("net_lost".equals(netReason)) {
-            tell(kit.own("The game ended"),
-                 kit.own("The connection to the game was lost. The game is not counted."));
+            tell(kit.own("The game ended"), kit.own("The connection to the game was lost."));
         } else if ("net_no_result".equals(netReason)) {
             tell(kit.own("The game ended"),
                  kit.own("No other team started. The game has no result and is not counted."));
@@ -283,6 +359,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             words = "The other players did not answer in time.";
         } else if ("net_unreachable".equals(reason) || "net_server_gone".equals(reason)) {
             words = "The host could not be reached.";
+        } else if ("net_no_path".equals(reason)) {
+            words = "Two of the devices cannot reach each other on this network.";
         } else if ("net_bad_map".equals(reason)) {
             words = "This device does not have the same map as the host.";
         } else if ("net_version".equals(reason)) {
@@ -341,6 +419,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             inMissions = false;
             view.invalidate();
         } else if (page == ENTRY_MULTIPLAYER && lan.back()) {
+            view.invalidate();
+        } else if (page == ENTRY_EDITOR && editor.back()) {
             view.invalidate();
         } else if (page != PAGE_NONE) {
             page = PAGE_NONE;
@@ -442,8 +522,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         switch (race) {
             case 1: return kit.string("customscenario_race_human", "Human");
             case 2: return kit.string("customscenario_race_orc", "Orc");
-            // The original's list is Random, Human, Orc; it has no "Map Default"
-            // (work/agent-orig-7/ORIG7.md item 4).
+            // The original's list is Random, Human, Orc; it has no "Map Default".
             default: return kit.string("customscenario_random", "Random");
         }
     }
@@ -462,12 +541,12 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             case 2: return kit.string("customscenario_resources_medium", "Medium");
             case 3: return kit.string("customscenario_resources_high", "High");
             // The original's list is Random, Low, Medium, High and opens on Random; it has no
-            // "Map Default" (work/agent-orig-3/ORIG3.md item 2).
+            // "Map Default".
             default: return kit.string("customscenario_random", "Random");
         }
     }
 
-    /** The original's list: Map Default, Forest, Winter, Wasteland, Orc Swamp (work/agent-orig-7). */
+    /** The original's list: Map Default, Forest, Winter, Wasteland, Orc Swamp. */
     private String tilesetText() {
         final String[] keys = { "customscenario_tileset_forest", "customscenario_tileset_winter",
                                 "customscenario_tileset_wasteland", "customscenario_tileset_orcswamp" };
@@ -680,7 +759,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         if (name.isEmpty() || target.equals(map)) {
             return;
         }
-        if (target.exists() || !map.renameTo(target)) {
+        if (!MapStore.rename(this, map, target)) {
             tell(kit.own("The map was not renamed"), kit.own("{0} is already there.", name));
             return;
         }
@@ -700,7 +779,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         sheetAction = new Runnable() {
             @Override
             public void run() {
-                if (map.delete()) {
+                if (MapStore.remove(HomeActivity.this, map)) {
                     android.util.Log.i("WargusHD", "LAUNCHER map removed " + map.getName());
                 }
                 loadMaps();
@@ -715,6 +794,16 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         nameSheet = null;
         ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
             .hideSoftInputFromWindow(view.getWindowToken(), 0);
+        if (nameThen != null) {
+            final EditorPage.Named then = nameThen;
+            nameThen = null;
+            if (use && done != null) {
+                then.named(done.name());
+            }
+            Screen.useWhole(this);
+            view.invalidate();
+            return;
+        }
         if (renamingMap != null) {
             final File map = renamingMap;
             renamingMap = null;
@@ -846,6 +935,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             // Without it the window shows the game alone.
         }
         prefs().edit().putString(PREF_PENDING, token)
+            .putString(PREF_TEST, testMap)
             .putInt(PREF_ORIGIN, page)
             .putString(PREF_ORIGIN_CAMPAIGN,
                        (inMissions && missions.campaign() != null) ? missions.campaign().key : null)
@@ -885,6 +975,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             if (page == ENTRY_SCENARIO) {
                 openScenario();
             }
+            if (page == ENTRY_EDITOR) {
+                editor.open(this, kit, editorShell);
+            }
             final String key = prefs().getString(PREF_ORIGIN_CAMPAIGN, null);
             inMissions = false;
             for (CampaignPage.Campaign k : campaign.campaigns) {
@@ -899,7 +992,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         if (!f.exists() && !GameLaunch.gameRunning(this)) {
             prefs().edit().remove(PREF_PENDING).apply();
             android.util.Log.i("WargusHD", "LAUNCH pending game left no record");
-            return true;
+            // A test game's end is told by the editor, over its map view.
+            return !endTest("closed");
         }
         return false;
     }
@@ -931,9 +1025,39 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
     }
 
+    /**
+     * The pending game was a test game of the Map Editor and is over: forget that, remove the
+     * map file written for it, and show the editor's map view again.
+     *
+     * @param failure the reason of a failed start, "closed" for a game that left no record, or
+     *                null for a game that ran
+     * @return true when the game was a test game
+     */
+    private boolean endTest(String failure) {
+        final String map = prefs().getString(PREF_TEST, null);
+        if (map == null) {
+            return false;
+        }
+        prefs().edit().remove(PREF_TEST).apply();
+        final File pud = MapStore.testFile(this);
+        if (pud.isFile() && !pud.delete()) {
+            android.util.Log.i("WargusHD", "LAUNCHER editor test map not removed");
+        }
+        android.util.Log.i("WargusHD", "LAUNCHER editor test over, nothing counted");
+        if (page == ENTRY_EDITOR) {
+            editor.afterTest(new File(map), failure);
+        }
+        return true;
+    }
+
     private void collectResult() {
         final String pending = prefs().getString(PREF_PENDING, null);
         if (pending == null || profile == null) {
+            return;
+        }
+        if (GameLaunch.gameRunning(this)) {
+            // A network game leaves a record already at its start (should its process be
+            // killed, that record stands); while the game runs it is not this shell's to take.
             return;
         }
         final File f = GameLaunch.resultFile(this, Profiles.directory(this, profile));
@@ -943,6 +1067,21 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
         f.delete();
         prefs().edit().remove(PREF_PENDING).apply();
+        if (prefs().getString(PREF_TEST, null) != null) {
+            // Of a test game only a failed start is told; nothing is counted and the profile
+            // is not written.
+            String failure = null;
+            try {
+                final JSONObject record = new JSONObject(text);
+                if (pending.equals(record.optString("token")) && "error".equals(record.optString("exit"))) {
+                    failure = record.optString("error", "unknown");
+                }
+            } catch (Exception e) {
+                // A record that cannot be read says nothing.
+            }
+            endTest(failure);
+            return;
+        }
         cameBack = true;
         try {
             final JSONObject record = new JSONObject(text);
@@ -956,10 +1095,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             final JSONArray games = record.optJSONArray("games");
             for (int i = 0; games != null && i < games.length(); ++i) {
                 final JSONObject game = games.getJSONObject(i);
-                // A network game this device was cut off from, or one no other team started,
-                // is not counted at all. One the player left is recorded as a defeat.
+                // A network game no other team started is not counted at all. One the player
+                // left, or was cut off from, is recorded as a defeat (owner's rule).
                 final String net = game.optString("net");
-                if ("net_lost".equals(net) || "net_no_result".equals(net)) {
+                if ("net_no_result".equals(net)) {
                     continue;
                 }
                 ++profile.games;
@@ -1054,6 +1193,18 @@ public class HomeActivity extends Activity implements LanPage.Starter {
 
         private float filesY() { return kit.height - FILES_UP; }
         private float musicY() { return kit.height - MUSIC_UP; }
+        /**
+         * The rail's row pitch. The authored pitch wherever the entries end above the chips at the
+         * rail's foot (every screen of 16:9 and taller); on a lower screen the entries share the
+         * room between their first row and the chips.
+         */
+        private float railPitch() {
+            final float room = filesY() - RAIL_FOOT_GAP - ROW_Y0;
+            final float gap = ROW_PITCH - ROW_H;
+            return Math.min(ROW_PITCH, (room + gap) / entries.length);
+        }
+        /** A rail row's height: the pitch less the authored gap between two rows. */
+        private float railRowH() { return railPitch() - (ROW_PITCH - ROW_H); }
         private float contentBottom() { return kit.height - CONTENT_BOTTOM_UP; }
         private float listTop() { return CONTENT_TOP + LIST_ROWS_DY; }
         private float listBottom() { return contentBottom() - 24f; }
@@ -1061,8 +1212,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         private float actionY() { return kit.height - ACTION_UP; }
         private float valueX() { return INFO_X + INFO_W - 60f - VALUE_W; }
         /**
-         * The owner's choice of 2026-10-06 (preview, option C): the map's picture has a panel of
-         * its own under the facts; the settings stand at the foot of the page.
+         * Owner's rule: the map's picture has a panel of its own under the facts; the settings
+         * stand at the foot of the page.
          */
         private float setTop() { return contentBottom() - (SET_ROW_DY + SET_PITCH * 5f); }
         private float setRowY(int i) { return setTop() + SET_ROW_DY + SET_PITCH * i; }
@@ -1241,6 +1392,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 kit.textTop(c, kit.string("campaign", "Campaign"), CONTENT_X, TITLE_Y, CAP_TITLE,
                             INK_TITLE, false);
                 campaign.draw(c, kit);
+            } else if (page == ENTRY_EDITOR) {
+                editor.draw(c, kit);
             }
             if (galleryOpen) {
                 gallery.draw(c, kit);
@@ -1277,23 +1430,24 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             kit.fill(c, RAIL_W - EDGE_W, 0f, EDGE_W, kit.height, LINE, 0f);
             kit.picture(c, logo, PAD, PAD, LOGO_W, LOGO_H);
 
+            final float pitch = railPitch(), rowH = railRowH();
             for (int i = 0; i < entries.length; ++i) {
-                final float y = ROW_Y0 + i * ROW_PITCH;
+                final float y = ROW_Y0 + i * pitch;
                 final boolean selected = (i == page);
                 if (selected || i == pressed) {
-                    kit.fill(c, ROW_X, y, ROW_W, ROW_H, ROW_SELECTED, ROW_RADIUS);
+                    kit.fill(c, ROW_X, y, ROW_W, rowH, ROW_SELECTED, ROW_RADIUS);
                 }
                 if (selected) {
-                    kit.fill(c, ROW_X, y, 10f, ROW_H, GOLD, 0f);
+                    kit.fill(c, ROW_X, y, 10f, rowH, GOLD, 0f);
                 }
                 // The campaign's entry shares its row with the count at the right.
                 final float room = ROW_W - 2f * ROW_INSET - (i == ENTRY_CAMPAIGN ? 200f : 0f);
-                kit.textMiddle(c, kit.fit(entries[i], CAP_BODY, room), ROW_X + ROW_INSET, y, ROW_H, CAP_BODY,
+                kit.textMiddle(c, kit.fit(entries[i], CAP_BODY, room), ROW_X + ROW_INSET, y, rowH, CAP_BODY,
                                selected ? GOLD : INK, true);
                 if (i == ENTRY_CAMPAIGN) {
                     // Missions completed in all four campaigns.
                     kit.textMiddleRight(c, campaign.completedTotal() + " / " + campaign.missionsTotal(),
-                                        ROW_X + ROW_W - 36f, y, ROW_H, CAP_SMALL, INK_MUTED, true);
+                                        ROW_X + ROW_W - 36f, y, rowH, CAP_SMALL, INK_MUTED, true);
                 }
             }
 
@@ -1359,7 +1513,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             c.save();
             c.clipRect(kit.rect(sx, listTop(), LIST_ROW_W, listBottom() - listTop()));
             if (maps.isEmpty()) {
-                // The owner's choice of 2026-10-06 (option B): one line in the middle of the list.
+                // Owner's rule: one line in the middle of the list.
                 kit.textCentre(c, kit.own("No maps here"), sx, listTop(), LIST_ROW_W, listBottom() - listTop(),
                                CAP_BODY, INK_MUTED, true);
             }
@@ -1383,25 +1537,34 @@ public class HomeActivity extends Activity implements LanPage.Starter {
 
             // Right: the selected map, then the settings.
             panel(c, INFO_X, CONTENT_TOP, INFO_W, INFO_H);
+            final float picH = setTop() - 48f - SET_Y;
+            // A low screen has no room for the picture's own panel: it goes into the map's panel.
+            final boolean picInside = picH < 240f;
+            final float insideSide = INFO_H - 48f;
             if (selectedMap < maps.size()) {
-                kit.textTop(c, kit.fit(mapName(maps.get(selectedMap)), CAP_BODY, INFO_W - 120f),
+                kit.textTop(c, kit.fit(mapName(maps.get(selectedMap)), CAP_BODY,
+                                       INFO_W - 120f - (picInside ? insideSide + 24f : 0f)),
                             INFO_X + 60f, CONTENT_TOP + 66f, CAP_BODY, GOLD, true);
                 kit.textTop(c, factsText(mapInfo.get(selectedMap)), INFO_X + 60f,
                             CONTENT_TOP + 66f + LINE_PITCH, CAP_MID, INK_MUTED, true);
             }
 
-            final float picH = setTop() - 48f - SET_Y;
-            panel(c, INFO_X, SET_Y, INFO_W, picH);
+            if (!picInside) {
+                panel(c, INFO_X, SET_Y, INFO_W, picH);
+            }
             if (selectedMap < maps.size()) {
                 final String folder = GateActivity.rememberedFolder(HomeActivity.this);
                 final Bitmap preview = MapPreview.of(folder != null ? new File(folder) : null,
                     Provision.dataDir(HomeActivity.this), maps.get(selectedMap));
                 if (preview != null) {
                     // The whole map, its sides kept, centred in the panel with 48 units around.
-                    final float room = picH - 96f;
-                    final float k = Math.min(room / preview.getHeight(), (INFO_W - 96f) / preview.getWidth());
+                    final float room = picInside ? insideSide : picH - 96f;
+                    final float k = Math.min(room / preview.getHeight(),
+                                             (picInside ? insideSide : INFO_W - 96f) / preview.getWidth());
                     final float pw = preview.getWidth() * k, ph = preview.getHeight() * k;
-                    final float px = INFO_X + (INFO_W - pw) / 2f, py = SET_Y + (picH - ph) / 2f;
+                    final float px = picInside ? INFO_X + INFO_W - 24f - (insideSide + pw) / 2f
+                                               : INFO_X + (INFO_W - pw) / 2f;
+                    final float py = picInside ? CONTENT_TOP + (INFO_H - ph) / 2f : SET_Y + (picH - ph) / 2f;
                     kit.pictureSharp(c, preview, px, py, pw, ph);
                     kit.outline(c, px, py, pw, ph, LINE, 0f);
                 }
@@ -1426,7 +1589,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             if (plainButton == null) {
                 plainButton = kit.atlasFrame("Modern_Widgets_Orc", "large", 1008, 126);
             }
-            // The owner's choice of 2026-10-06 (option C): the import at the left of the row.
+            // Owner's rule: the import at the left of the row.
             kit.nine(c, plainButton, CONTENT_X, actionY(), ACTION_W, ACTION_H, 14);
             kit.textCentre(c, kit.own("Import a Map"), CONTENT_X, actionY(), ACTION_W, ACTION_H, CAP_BODY, INK, true);
             // With no map to start, the button is drawn as the Load page draws its disabled ones.
@@ -1445,8 +1608,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 return -1;
             }
             for (int i = 0; i < entries.length; ++i) {
-                final float top = ROW_Y0 + i * ROW_PITCH;
-                if (y >= top && y < top + ROW_H) {
+                final float top = ROW_Y0 + i * railPitch();
+                if (y >= top && y < top + railRowH()) {
                     return i;
                 }
             }
@@ -1658,6 +1821,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 invalidate();
                 return true;
             }
+            if (page == ENTRY_EDITOR && editor.touch(e.getAction(), x, y, kit)) {
+                invalidate();
+                return true;
+            }
             if (e.getAction() == MotionEvent.ACTION_UP && profile != null
                 && in(x, y, Screen.CANVAS_W - CHIP_RIGHT - CHIP_W, CHIP_Y, CHIP_W, CHIP_H)
                 && in(downX, downY, Screen.CANVAS_W - CHIP_RIGHT - CHIP_W, CHIP_Y, CHIP_W, CHIP_H)) {
@@ -1720,7 +1887,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 case MotionEvent.ACTION_UP:
                     removeCallbacks(held);
                     if (x < RAIL_W) {
-                        // The game-files row is a line of text only (owner, 2026-10-06): the folder
+                        // The game-files row is a line of text only (owner's rule): the folder
                         // is reached through Options, Game Files.
                         if (in(x, y, ROW_X, musicY(), ROW_W, FOOT_H)) {
                             music = !music;
@@ -1731,9 +1898,14 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         } else if (pressed >= 0 && entryAt(x, y) == pressed
                                    && pressed != ENTRY_SCENARIO && pressed != ENTRY_CAMPAIGN
                                    && pressed != ENTRY_OPTIONS && pressed != ENTRY_LOAD
+                                   && pressed != ENTRY_EDITOR
                                    && !(pressed == ENTRY_MULTIPLAYER && lanPreview())) {
                             // A section that is not built yet.
                             menuAudio.play(MenuAudio.ERROR);
+                        } else if (pressed == ENTRY_EDITOR && entryAt(x, y) == ENTRY_EDITOR) {
+                            menuAudio.play(MenuAudio.BUTTON);
+                            page = ENTRY_EDITOR;
+                            editor.open(HomeActivity.this, kit, editorShell);
                         } else if (pressed == ENTRY_MULTIPLAYER && entryAt(x, y) == ENTRY_MULTIPLAYER) {
                             menuAudio.play(MenuAudio.BUTTON);
                             page = ENTRY_MULTIPLAYER;

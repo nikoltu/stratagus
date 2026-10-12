@@ -51,6 +51,7 @@ constexpr size_t kWireStatusSize = kWireHeaderSize + 1 + 4 + 2 + 2 + 2 // player
 constexpr size_t kWireCommitSize = kWireHeaderSize + 1 + 1 + 2 + 4 + 2; // player, flags, round, cycle, mask
 constexpr size_t kWireCancelSize = kWireHeaderSize + 1 + 2;          // player, round
 constexpr size_t kWirePauseSize = kWireHeaderSize + 1 + 1 + 4;       // player, flags, cycle
+constexpr size_t kWireChatAckSize = kWireHeaderSize + 4;             // data
 
 constexpr size_t kWireMaxSize = kWireStatusSize; // 63: the longest datagram of any kind
 
@@ -95,5 +96,22 @@ size_t SerializeRelay(const unsigned char *packet, size_t len, int from, unsigne
 // Reads a relay. Returns false, leaving the output arguments as they were, unless the datagram is
 // one; on success [*packet, *packet + *len) lies inside the datagram.
 bool DeserializeRelay(const unsigned char *buf, size_t len, int *from, const unsigned char **packet, size_t *packetLen);
+
+// A chat line (Kind::Chat): the head, the number of the line (4), the length of the text (1) and
+// the text. The one kind whose length is not fixed, so it has its own two functions; Serialize
+// and Deserialize refuse it. The text is 1..kWireChatMaxText bytes, none of them below 0x20
+// (no line ends, no controls); what the bytes mean (UTF-8) is not the wire's business.
+constexpr size_t kWireChatMaxText = 240;
+constexpr size_t kWireChatHeadSize = kWireHeaderSize + 4 + 1;
+constexpr size_t kWireChatMaxSize = kWireChatHeadSize + kWireChatMaxText;
+
+// Writes the chat line `number` of host slot `from`. Returns the length, or 0 and writes
+// nothing when `cap` is too small, the number is 0, `from` is no slot or the text is not valid.
+size_t SerializeChat(uint32_t number, const char *text, size_t textLen, int from, unsigned char *buf, size_t cap);
+
+// Reads a chat line. Returns false, leaving the output arguments as they were, unless the
+// datagram is one; on success [*text, *text + *textLen) lies inside the datagram.
+bool DeserializeChat(const unsigned char *buf, size_t len, int *from, uint32_t *number,
+                     const char **text, size_t *textLen);
 
 } // namespace mesh

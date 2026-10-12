@@ -251,6 +251,13 @@ bool CheckedCanMoveToMask(const Vec2i &pos, int mask)
 */
 bool UnitTypeCanBeAt(const CUnitType &type, const Vec2i &pos)
 {
+	if (type.GridStep > 1 && (pos.x % type.GridStep || pos.y % type.GridStep)) {
+		// off the unit's grid: it neither rests nor is placed there,
+		// but for a transporter on a coast tile
+		if (!type.CanTransport() || !Map.Info.IsPointOnMap(pos) || !Map.Field(pos)->CoastOnMap()) {
+			return false;
+		}
+	}
 	const int mask = type.MovementMask;
 	unsigned int index = pos.y * Map.Info.MapWidth;
 

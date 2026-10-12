@@ -41,11 +41,16 @@
 
 class CUnit;
 class CFont;
+struct ClassicPanelText;
 class ConditionPanel;
 
 /**
 **  Infos to display the contents of panel.
 */
+class CContentType;
+extern bool ClassicContentText(const CContentType &content, const CUnit &unit, CFont *defaultFont,
+                               ClassicPanelText &out);
+
 class CContentType
 {
 public:
@@ -67,6 +72,9 @@ public:
 */
 class CContentTypeText : public CContentType
 {
+	/// Classic view: reads what Draw prints (hd_classic_hud.h).
+	friend bool ClassicContentText(const CContentType &content, const CUnit &unit, CFont *defaultFont,
+	                               ClassicPanelText &out);
 public:
 	CContentTypeText() = default;
 
@@ -88,6 +96,9 @@ private:
 */
 class CContentTypeFormattedText : public CContentType
 {
+	/// Classic view: reads what Draw prints (hd_classic_hud.h).
+	friend bool ClassicContentText(const CContentType &content, const CUnit &unit, CFont *defaultFont,
+	                               ClassicPanelText &out);
 public:
 	CContentTypeFormattedText() = default;
 
@@ -107,6 +118,9 @@ private:
 */
 class CContentTypeFormattedText2 : public CContentType
 {
+	/// Classic view: reads what Draw prints (hd_classic_hud.h).
+	friend bool ClassicContentText(const CContentType &content, const CUnit &unit, CFont *defaultFont,
+	                               ClassicPanelText &out);
 public:
 	CContentTypeFormattedText2() = default;
 

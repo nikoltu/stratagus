@@ -138,6 +138,9 @@ extern CFieldOfView FieldOfView;
 --  Functions
 ----------------------------------------------------------------------------*/
 
+/// Half width of the lit row `dy` tiles above / below the sight centre tile, -1 for an unlit row
+extern int SightHalfWidth(int range, int dy);
+
 inline bool CFieldOfView::SetCurrentTile(const int16_t col, const int16_t row)
 {
 	ProjectCurrentTile(col, row);

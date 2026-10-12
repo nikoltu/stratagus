@@ -28,11 +28,9 @@
 **  109 `upgrade_*`, 52 `spell_*`, 63 `tips_*`, 43 `rank_txt_*`, 26 `clan_*`, 22 `message_*`,
 **  72 `option_*`, the campaign text and the classic `stat_txt_*` set.
 **
-**  Until now WargusHD extracted only the campaign keys into a generated Lua table, so every other
-**  caption, tooltip and message in the game was Wargus's own wording rather than the original's
-**  (audit AUDIT_ORIGINAL_VS_OURS_2026-08-21, items TX1..TX9). This module makes the WHOLE file
-**  available at runtime, read from the player's own installation through the normal library search
-**  path (so it resolves out of the folder chosen at the first-run gate).
+**  This module makes the whole file available at runtime (TX1..TX9), read from the player's own
+**  installation through the normal library search path (so it resolves out of the folder chosen
+**  at the first-run gate).
 */
 
 /// Load Data/Strings/<language>.json. Safe to call repeatedly; a failed load leaves the table empty.
@@ -52,6 +50,30 @@ extern int GetWC2StringCount();
 **  because a name that does not match exactly is a mapping question, not something to guess at.
 */
 extern int GetWC2Id(const std::string &family, const std::string &displayName);
+
+/**
+**  The id of a game object by its IDENT ("unit-orc-shipyard", "upgrade-sword1", "spell-healing")
+**  within a numbered family. The families repeat a display name for the human / orc pair and for
+**  the two levels of an upgrade, so a name cannot select one of two records; the ident can. The
+**  scripts fill the registry (RM_SetId). It holds idents and numbers only and does not depend on
+**  the loaded language.
+**  A negative id removes the entry.
+*/
+extern void SetWC2IdForIdent(const std::string &family, const std::string &ident, int id);
+
+/// The registered id of `ident` in `family`, or -1. Does not read the string file.
+extern int GetWC2IdForIdent(const std::string &family, const std::string &ident);
+
+/// The registered id of `ident` when there is one, otherwise GetWC2Id(family, displayName).
+extern int ResolveWC2Id(const std::string &family, const std::string &ident,
+						const std::string &displayName);
+
+/**
+**  Fill the table from the text of a flat JSON object instead of a file (LoadWC2Strings reads the
+**  file and passes it here). A text that is not a JSON object leaves the table as it was and
+**  gives false; an object without a single string empties the table and gives false.
+*/
+extern bool LoadWC2StringsFromText(const std::string &jsonText);
 
 /**
 **  TX8 convenience: the original's message text for `key`, or `fallback` when the player's string

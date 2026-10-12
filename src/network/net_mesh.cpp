@@ -247,6 +247,43 @@ void Mesh::EndPause(int32_t cycle, int by)
 	}
 }
 
+// A chat line of the local player. Sent directly to every peer; Tick repeats it.
+uint32_t Mesh::Chat(int64_t now)
+{
+	if (out_ || lingering_) return 0;
+	if (!chatOut_.empty() && chatMade_ + 1 - chatOut_.front().number >= kChatWindow) return 0;
+	ChatOut c{++chatMade_, 0, now};
+	Msg m;
+	m.kind = Kind::Chat;
+	m.player = uint8_t(me_);
+	m.data = c.number;
+	for (int p = 0; p < n_; ++p) {
+		if (p == me_ || removedAt_[p] != kNever) continue;
+		c.left |= uint16_t(1u << p);
+		if (!suspected_[p]) Send(p, m); // a frozen peer gets it when it is taken back
+	}
+	if (c.left) chatOut_.push_back(c);
+	return c.number;
+}
+
+// A chat line of `from` has arrived. True if it is a new one (first arrival).
+bool Mesh::TakeChat(int from, uint32_t number)
+{
+	uint32_t &top = chatTop_[from], &seen = chatSeen_[from];
+	if (number > top) {
+		const uint32_t shift = number - top;
+		seen = shift >= 32 ? 0 : seen << shift;
+		if (top != 0 && shift <= 32) seen |= 1u << (shift - 1);
+		top = number;
+		return true;
+	}
+	if (number == top) return false;
+	const uint32_t back = top - number - 1;
+	if (back >= 32 || (seen >> back) & 1) return false; // kChatWindow: nothing new can be that old
+	seen |= 1u << back;
+	return true;
+}
+
 bool Mesh::Pause(int by, int64_t now)
 {
 	if (out_ || lingering_ || !released_ || by < 0 || by >= n_) return false;
@@ -378,7 +415,7 @@ void Mesh::OnMessage(int from, const Msg &m, int64_t now)
 		// Changed by the model: the `seen` mask is taken as second-hand knowledge, so that two
 		// devices that cannot reach each other directly still learn that the other has loaded.
 		loadedFrom_ |= uint16_t((m.mask & ((1u << n_) - 1)) | (1u << from));
-		if (loaded_ && (loadedFrom_ & ~m.mask) != 0) { // B.4 step 3: the peer lacks ours, or one this device knows of
+		if (loaded_ && (loadedFrom_ & ~m.mask) != 0) { // B.4 step 3: the peer lacks this device's, or one this device knows of
 			Msg a;
 			a.kind = Kind::Loaded;
 			a.mask = loadedFrom_;
@@ -404,7 +441,7 @@ void Mesh::OnMessage(int from, const Msg &m, int64_t now)
 				if (!theyRemoved) SendCommit(o, q); // rule 6: who applied a commit re-announces it
 				continue;
 			}
-			if (theyRemoved) { // they know a removal this device does not: show them our view
+			if (theyRemoved) { // they know a removal this device does not: show them this device's view
 				reply = true;
 				continue;
 			}
@@ -481,6 +518,25 @@ void Mesh::OnMessage(int from, const Msg &m, int64_t now)
 			EndPause(m.cycle, m.player);
 		}
 		break;
+	case Kind::Chat: {
+		// Only from the player himself. Every arrival is answered: the answer to the first one
+		// may have been lost.
+		if (m.player != from || m.data == 0) break;
+		Msg a;
+		a.kind = Kind::ChatAck;
+		a.data = m.data;
+		Send(from, a);
+		if (TakeChat(from, m.data)) events.push_back({Event::ChatLine, from, int32_t(m.data), Reason::Lost, 0});
+		break;
+	}
+	case Kind::ChatAck:
+		for (size_t i = 0; i < chatOut_.size(); ++i) {
+			if (chatOut_[i].number != m.data) continue;
+			chatOut_[i].left &= uint16_t(~(1u << from));
+			if (!chatOut_[i].left) chatOut_.erase(chatOut_.begin() + i);
+			break;
+		}
+		break;
 	case Kind::Cancel: {
 		const int p = m.player;
 		if (p >= n_ || p == me_ || removedAt_[p] != kNever) break;
@@ -511,6 +567,30 @@ void Mesh::Tick(int64_t now)
 		m.flags = 1;
 		m.cycle = pauseCycle_;
 		SendPeers(m, true);
+	}
+
+	// --- chat: a line is repeated to who has not answered; a removed peer is not waited for ---
+	for (size_t i = 0; i < chatOut_.size();) {
+		ChatOut &c = chatOut_[i];
+		const bool again = now - c.sent >= P.chatMs;
+		Msg m;
+		m.kind = Kind::Chat;
+		m.player = uint8_t(me_);
+		m.data = c.number;
+		for (int p = 0; p < n_; ++p) {
+			if (!Bit(c.left, p)) continue;
+			if (removedAt_[p] != kNever) {
+				c.left &= uint16_t(~(1u << p));
+			} else if (again && !suspected_[p]) {
+				Send(p, m);
+			}
+		}
+		if (again) c.sent = now;
+		if (!c.left) {
+			chatOut_.erase(chatOut_.begin() + i);
+		} else {
+			++i;
+		}
 	}
 
 	// --- B.4 start barrier ---

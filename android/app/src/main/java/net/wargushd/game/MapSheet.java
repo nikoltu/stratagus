@@ -5,7 +5,7 @@ import android.graphics.Canvas;
 
 /**
  * What can be done with one of the player's own maps: rename it, remove it, or nothing.
- * Opened by a long press on the map's row (the owner's choice of 2026-10-06, option C).
+ * Opened by a long press on the map's row (owner's rule).
  */
 final class MapSheet {
     static final int NONE = 0, RENAME = 1, REMOVE = 2, CANCEL = 3;
@@ -20,11 +20,17 @@ final class MapSheet {
 
     private static final String[] CAPTIONS = { "Rename", "Remove" };
 
-    private final String name;
+    private final String name, line;
     private Bitmap buttonPlain, buttonMarked;
 
     MapSheet(String name) {
+        this(name, "An imported map");
+    }
+
+    /** With the line under the name, in English (one of the launcher's own). */
+    MapSheet(String name, String line) {
         this.name = name;
+        this.line = line;
     }
 
     private float x() { return (Screen.CANVAS_W - W) / 2f; }
@@ -44,7 +50,7 @@ final class MapSheet {
 
         final float tw = W - PAD * 2f;
         kit.textTop(c, kit.fit(name, CAP_BODY, tw), x + PAD, y + PAD, CAP_BODY, GOLD, true);
-        kit.textTop(c, kit.fit(kit.own("An imported map"), CAP_MID, tw), x + PAD, y + PAD + LINE_PITCH * 1.2f,
+        kit.textTop(c, kit.fit(kit.own(line), CAP_MID, tw), x + PAD, y + PAD + LINE_PITCH * 1.2f,
                     CAP_MID, INK, true);
 
         final float by = buttonY(kit);

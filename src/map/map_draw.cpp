@@ -120,7 +120,9 @@ static void LoadClassicTileAtlas(const char *atlasName, const char *nativePrefix
 	const std::string prefix = std::string(nativePrefix) + "_";
 	auto atlas = std::make_shared<CAtlasGraphic>();
 	const std::string fogPrefix = "fog_of_war_masks/mask_";
-	if (!atlas->LoadTexturePacker(jsonPath, false, false, ppl, true, prefix.c_str(), fogPrefix.c_str())) {
+	// The sprite groups ("<Group>/<name>.grp/indexed_N") are listed and cut when first drawn.
+	if (!atlas->LoadTexturePacker(jsonPath, false, false, ppl, true, prefix.c_str(), fogPrefix.c_str(),
+	                              "/indexed_")) {
 		ErrorPrint("Classic terrain: '%s' not readable, no classic terrain for this map\n", jsonPath.c_str());
 		return;
 	}

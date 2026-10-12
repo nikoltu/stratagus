@@ -26,6 +26,16 @@ final class PudInfo {
 
     private PudInfo() {}
 
+    /** Facts that were not read from a file: those of a map that is not written yet. */
+    static PudInfo of(int width, int height, int tileset, int players) {
+        final PudInfo info = new PudInfo();
+        info.width = width;
+        info.height = height;
+        info.tileset = tileset;
+        info.players = players;
+        return info;
+    }
+
     /** Facts already read in this process, by path, size and time of change. */
     private static final java.util.Map<String, PudInfo> KNOWN = new java.util.HashMap<String, PudInfo>();
 

@@ -206,6 +206,12 @@
 **
 **    Minimal attack range
 **
+**  CUnitType::MinImpactRange
+**
+**    Nearest distance (tiles, larger axis offset) at which the unit's
+**    missile comes down. The unit attacks a nearer target from where it
+**    stands; its missile flies over it to that distance.
+**
 **  CUnitType::ReactRangeComputer
 **
 **    Reacts on enemy for computer
@@ -839,10 +845,15 @@ static bool g_hdUnitMapTried = false;
 // ART-CYCLES: families whose picture moves while the unit stands (Dark Portal and Runestone glow,
 // winter Church / Goblin Alchemist, sunk-ship rings, Circle of Power). Keyed by frame prefix; the
 // numbers are optional keys of hd_units_map.json: "cycle_frames" (pictures in the loop) and
-// "cycle_step10" (game cycles per picture, times ten) as measured on the original
-// (work/agent-orig-art/ORIG_ART.md). No key, no cycle.
+// "cycle_step10" (game cycles per picture, times ten) as measured on the original.
+// No key, no cycle.
 struct HDCycle { int frames = 0; int step10 = 0; };
 static std::unordered_map<std::string, HDCycle> g_hdCycle;
+// SKELETON-SIZE: families whose sheet is stored reduced (Skeleton, Eye of Kilrogg). Keyed by frame
+// prefix; the number is the optional key "canvas" of hd_units_map.json: the canvas the family has
+// by the rule 6.75 * classic cell + 122, to which the frame's own canvas is stretched at draw time.
+// No key, no stretch.
+static std::unordered_map<std::string, int> g_hdCanvas;
 
 static void LoadHDUnitMap()
 {
@@ -850,11 +861,10 @@ static void LoadHDUnitMap()
 		return;
 	}
 	g_hdUnitMapTried = true;
-	// HD-MISS-INVISIBLE: this map is the single point of failure for ALL unit rendering -- 0 of its
-	// mapped paths has a classic PNG to fall back to, so anything that does not resolve renders
-	// NOTHING. Every early return below used to be silent, which made a half-loaded map
-	// indistinguishable from a loaded one. ErrorPrint, not DebugPrint: this has to be visible
-	// without a runtime flag.
+	// HD-MISS-INVISIBLE: this map is the single point of failure for all unit rendering -- none of
+	// its mapped paths has a classic PNG to fall back to, so anything that does not resolve renders
+	// nothing. Every early return below reports with ErrorPrint, not DebugPrint: it has to be
+	// visible without a runtime flag.
 	const fs::path resolved = LibraryFileName("hd_units_map.json");
 	if (resolved.empty()) {
 		ErrorPrint("hd_units_map.json NOT FOUND -- no unit will draw its HD sprite\n");
@@ -901,6 +911,10 @@ static void LoadHDUnitMap()
 			const content::JsonValue *cs = kv.second.find("cycle_step10");
 			if (cf && cs && cf->asInt() > 1 && cs->asInt() > 0) {
 				g_hdCycle[p->asString()] = { (int) cf->asInt(), (int) cs->asInt() };
+			}
+			const content::JsonValue *cv = kv.second.find("canvas");
+			if (cv && cv->asInt() > 0) {
+				g_hdCanvas[p->asString()] = (int) cv->asInt();
 			}
 		} else {
 			++skipped;
@@ -1121,25 +1135,18 @@ std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building,
 	return GetSharedNativeAtlas("units_common_" + biome + "_sprites");
 }
 
-// NG82: a FLYING unit's ground shadow. Only the eight airborne types declare a shadow
+// NG82: a flying unit's ground shadow. Only the eight airborne types declare a shadow
 // (units.lua ShadowDefinition), and the art ships as shadow_0/1/2 in every per-tileset common
-// atlas. Ground units are untouched: their shadow is baked into their own sprite, so a second one
-// would double it.
+// atlas. Ground units are untouched: their shadow is baked into their own sprite.
 //
 // The construction-site trick above (take the building's own atlas and swap the race token for
-// "common") does NOT work here and was the first attempt's defect: buildings live in
-// units_<race>_<biome>, but MOBILE units live in units_<race>_common, where "common" is the
-// tileset-independent slot rather than a biome. Swapping tokens produced
-// "units_common_common_sprites", which does not exist -- the atlas silently failed to load, so
-// nothing drew and nothing was reported. The shadow is cast on the map, so it takes the MAP's
-// tileset, resolved by the one shared CurrentEffectTileset() (missile.h) rather than a second copy.
+// "common") does not work here: buildings live in units_<race>_<biome>, but mobile units live
+// in units_<race>_common, where "common" is the tileset-independent slot rather than a biome.
+// The shadow is cast on the map, so it takes the map's tileset, resolved by the one shared
+// CurrentEffectTileset() (missile.h).
 //
-// AMEND B reverses AMEND A's per-unit derivation. The original client was captured with a Dragon,
-// a Gryphon Rider and a Gnomish Flying Machine in ONE frame: their shadows measure 59x62, 59x63 and
-// 60x62, FWHM 45/46/45 px -- identical to 1-2 px despite wildly different sprite sizes. The original
-// gives every flying unit the SAME shadow, so a footprint derived from each unit's own art scale
-// cannot reproduce it. The size is a single measured world constant instead; this function now
-// returns only the atlas.
+// The original gives every flying unit the same shadow, so its size is a single measured
+// world constant (unit_draw.cpp); this function returns only the atlas.
 std::shared_ptr<CAtlasGraphic> GetHDShadowAtlas(const CUnitType &type)
 {
 	// Every exit reports ONCE per type. Two cycles were spent on this path reading silence as
@@ -1172,8 +1179,165 @@ std::shared_ptr<CAtlasGraphic> GetHDShadowAtlas(const CUnitType &type)
 	return atlas;
 }
 
+// Classic view: the group of a sprite file in the classic atlas, or -1. The file is looked up in the
+// HD sprite map (read only) and its entry gives the names to try (hdatlas::classicGroupNames).
+static int ResolveClassicGroup(const std::string &file, const CAtlasGraphic &atlas)
+{
+	LoadHDUnitMap();
+	std::string key = file;
+	for (char &c : key) { c = (char) std::tolower((unsigned char) c); }
+	const auto mit = g_hdUnitMap.find(key);
+	if (mit == g_hdUnitMap.end()) {
+		return -1;
+	}
+	for (const std::string &name : hdatlas::classicGroupNames(mit->second.atlas, mit->second.prefix)) {
+		const int group = atlas.ClassicGroupByName(name);
+		if (group >= 0) {
+			return group;
+		}
+	}
+	return -1;
+}
+
+// Classic view: draw the body from the classic 8-bit art of the map's classic atlas. The cell is
+// centred on the unit's tile box, one classic pixel = PixelTileSize * zoom / ClassicTilePx screen
+// pixels (the density of the classic terrain), team-colour pixels through the player's palette run,
+// negative frames mirrored. False when anything is missing: the caller then draws the Remastered art.
+static bool DrawClassicUnitType(const CUnitType &type, const CPlayerColorGraphic *sprite, int colorIndex,
+                                int frame, const PixelPos &screenPos)
+{
+	static std::set<std::string> reportedClassicMiss; // own set: an HD miss must not silence a classic one
+	CAtlasGraphic *atlas = Map.ClassicTileAtlas.get();
+	if (!atlas || !atlas->ClassicSerial()) {
+		return false;
+	}
+	int group;
+	const std::string *file = &type.File;
+	if (sprite && !sprite->File.empty() && sprite->File != type.File) {
+		// A carry sprite (worker with gold / lumber) has its own entry, as in the HD branch.
+		static std::map<std::string, std::pair<unsigned, int>> carry;
+		static std::string carryFile;
+		carryFile = sprite->File.string();
+		file = &carryFile;
+		auto it = carry.find(carryFile);
+		if (it == carry.end() || it->second.first != atlas->ClassicSerial()) {
+			it = carry.insert_or_assign(carryFile, std::make_pair(atlas->ClassicSerial(),
+			                                                      ResolveClassicGroup(carryFile, *atlas))).first;
+		}
+		group = it->second.second;
+	} else {
+		if (type.ClassicSpriteSerial != atlas->ClassicSerial() || type.ClassicSpriteFile != type.File) {
+			type.ClassicSpriteSerial = atlas->ClassicSerial();
+			type.ClassicSpriteFile = type.File;
+			type.ClassicSpriteGroup = ResolveClassicGroup(type.File, *atlas);
+		}
+		group = type.ClassicSpriteGroup;
+	}
+	if (group < 0) {
+		if (reportedClassicMiss.insert("group|" + *file).second) {
+			ErrorPrint("Classic sprite: '%s' has no classic group, it stays Remastered\n", file->c_str());
+		}
+		return false;
+	}
+	const int rampStart = (colorIndex >= 0 && colorIndex < (int) PlayerColorNames.size())
+	                          ? hdatlas::classicRampStart(PlayerColorNames[colorIndex].c_str()) : -1;
+	if (rampStart < 0) {
+		if (reportedClassicMiss.insert("colour|" + std::to_string(colorIndex)).second) {
+			ErrorPrint("Classic sprite: player colour %d has no palette run, its units stay Remastered\n",
+			           colorIndex);
+		}
+		return false;
+	}
+	const CAtlasGraphic *cells = atlas->ClassicGroup(group, rampStart);
+	bool mirror = false;
+	const int n = hdatlas::classicFrame(frame, mirror);
+	if (!cells || n >= cells->NumFrames() || cells->Frame(n).sw == 0) {
+		if (reportedClassicMiss.insert("frame|" + *file + "#" + std::to_string(n)).second) {
+			ErrorPrint("Classic sprite: '%s' frame %d is not in its classic group, it stays Remastered\n",
+			           file->c_str(), n);
+		}
+		return false;
+	}
+	const float z = GpuWorldDrawZoom;
+	const float s = PixelTileSize.x * z / ClassicTilePx;
+	const float cx = screenPos.x + (type.TileWidth * PixelTileSize.x / 2.0f + type.Offset.x) * z;
+	const float cy = screenPos.y + (type.TileHeight * PixelTileSize.y / 2.0f + type.Offset.y) * z;
+	cells->DrawAtlasFrameCentred(n, cx, cy, s, mirror && type.Flip);
+	return true;
+}
+
+bool DrawClassicLandSite(const CUnitType &building, int frame, const PixelPos &centre)
+{
+	CAtlasGraphic *atlas = Map.ClassicTileAtlas.get();
+	if (!atlas || !atlas->ClassicSerial() || !building.Construction) {
+		return false;
+	}
+	const char *name = hdatlas::classicLandSiteGroup(building.Construction->File.File, CurrentEffectTileset());
+	if (!name) {
+		return false;
+	}
+	static unsigned serial = 0;
+	static const char *latchedName = nullptr;
+	static int group = -1;
+	if (serial != atlas->ClassicSerial() || latchedName != name) {
+		serial = atlas->ClassicSerial();
+		latchedName = name;
+		group = atlas->ClassicGroupByName(name);
+	}
+	bool mirror = false;
+	const int n = hdatlas::classicFrame(frame, mirror);
+	// The site has no team-colour pixels, so any run gives the same cut.
+	const CAtlasGraphic *cells = group >= 0 ? atlas->ClassicGroup(group, hdatlas::ClassicTeamFirst) : nullptr;
+	if (!cells || n >= hdatlas::ClassicLandSiteFrames || n >= cells->NumFrames() || cells->Frame(n).sw == 0) {
+		static std::set<std::string> reported;
+		if (reported.insert(std::string(name) + "#" + std::to_string(n)).second) {
+			ErrorPrint("Classic sprite: construction site '%s' frame %d is missing, it stays Remastered\n",
+			           name, n);
+		}
+		return false;
+	}
+	const float z = GpuWorldDrawZoom;
+	cells->DrawAtlasFrameCentred(n, centre.x + building.Offset.x * z, centre.y + building.Offset.y * z,
+	                             PixelTileSize.x * z / ClassicTilePx, false);
+	return true;
+}
+
+bool DrawClassicFlyerShadow(const CUnitType &type, const PixelPos &screenPos, int zDisplacement)
+{
+	CAtlasGraphic *atlas = Map.ClassicTileAtlas.get();
+	if (!atlas || !atlas->ClassicSerial()) {
+		return false;
+	}
+	static unsigned serial = 0;
+	static int group = -1;
+	if (serial != atlas->ClassicSerial()) {
+		serial = atlas->ClassicSerial();
+		group = atlas->ClassicGroupByName(hdatlas::ClassicFlyerShadowGroup);
+	}
+	const int n = hdatlas::ClassicFlyerShadowFrame;
+	// The disc has no team-colour pixels, so any run gives the same cut.
+	const CAtlasGraphic *cells = group >= 0 ? atlas->ClassicGroup(group, hdatlas::ClassicTeamFirst) : nullptr;
+	if (!cells || n >= cells->NumFrames() || cells->Frame(n).sw == 0) {
+		static unsigned reported = 0;
+		if (reported != serial) {
+			reported = serial;
+			ErrorPrint("Classic sprite: flyer shadow '%s' frame %d is missing, it stays Remastered\n",
+			           hdatlas::ClassicFlyerShadowGroup, n);
+		}
+		return false;
+	}
+	const hdatlas::ClassicFlyerShadowPlace p =
+		hdatlas::classicFlyerShadowPlace(type.TileWidth, type.TileHeight, PixelTileSize.x, PixelTileSize.y,
+		                                 type.Offset.x, type.Offset.y, zDisplacement, GpuWorldDrawZoom);
+	cells->DrawAtlasFrameCentred(n, screenPos.x + p.cx, screenPos.y + p.cy, p.scale, false);
+	return true;
+}
+
 void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorIndex, int frame, const PixelPos &screenPos)
 {
+	if (IsClassicView() && DrawClassicUnitType(type, sprite, colorIndex, frame, screenPos)) {
+		return;
+	}
 	PixelPos pos = screenPos;
 	// FIXME: move this calculation to high level.
 	// These are NATIVE-pixel offsets that centre the sprite over the unit's tile footprint. On the
@@ -1268,19 +1432,32 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 		}
 		if (f >= 0) {
 			const bool flip = (frame < 0) && type.Flip;
-			// SPRITE-SCALE-TRUE (SPEC_SPRITE_SCALE_TRUE.md sections 1 and 4): the original draws
-			// every sheet frame at one density -- HdNativeTilePx native pixels per map tile -- with
-			// the frame's own canvas centred on the unit's tile footprint. The Lua `Image size`
-			// (type.Width / type.Height) no longer sizes HD art; it stays the logical sprite box
-			// (culling, classic branch below). `screenPos` is the footprint's top-left on screen,
-			// as every caller passes it; `pos` above is used by the classic branch only.
+			// SPRITE-SCALE-TRUE: the original draws every sheet frame at one density -- HdNativeTilePx
+			// native pixels per map tile -- with the frame's own canvas centred on the unit's tile
+			// footprint. The Lua `Image size` (type.Width / type.Height) does not size HD art; it stays
+			// the logical sprite box (culling, classic branch below). `screenPos` is the footprint's
+			// top-left on screen, as every caller passes it; `pos` above is used by the classic branch only.
 			const float z = GpuWorldDrawZoom;
 			const float s = PixelTileSize.x * z / HdNativeTilePx;
 			const float cx = screenPos.x + (type.TileWidth * PixelTileSize.x / 2.0f + type.Offset.x) * z;
 			const float cy = screenPos.y + (type.TileHeight * PixelTileSize.y / 2.0f + type.Offset.y) * z;
-			hdSprite->DrawAtlasFrameCentred(f, cx, cy, s, flip);
+			// SKELETON-SIZE: a family stored reduced is stretched from its own canvas to its rule
+			// canvas; the body and the mask each by their own frame record (the Eye of Kilrogg's mask
+			// is stored at full size, its body is not). Every other family: `s`, as it was.
+			int ruleCanvas = 0;
+			if (!hdPrefix.empty()) {
+				const auto cv = g_hdCanvas.find(hdPrefix);
+				if (cv != g_hdCanvas.end()) {
+					ruleCanvas = cv->second;
+				}
+			}
+			hdSprite->DrawAtlasFrameCentred(f, cx, cy,
+			                                hdatlas::hdStoredCanvasScale(s, ruleCanvas, hdSprite->Frame(f).cw), flip);
 			if (overlayFrame >= 0) {
-				hdSprite->DrawAtlasFrameCentred(overlayFrame, cx, cy, s, flip);
+				hdSprite->DrawAtlasFrameCentred(overlayFrame, cx, cy,
+				                                hdatlas::hdStoredCanvasScale(s, ruleCanvas,
+				                                                             hdSprite->Frame(overlayFrame).cw),
+				                                flip);
 			}
 			// Team-colour overlay: tint the `_team` mask to the player's canonical ramp colour
 			// (ramp[0], matching CPlayerColorGraphic::DrawPlayerColorFrameClipTex) and draw it over
@@ -1303,7 +1480,9 @@ void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite, int colorI
 						g = c.G;
 						b = c.B;
 					}
-					type.HDSpriteTeam->DrawAtlasFrameCentred(tf, cx, cy, s, flip, r, g, b);
+					type.HDSpriteTeam->DrawAtlasFrameCentred(
+						tf, cx, cy, hdatlas::hdStoredCanvasScale(s, ruleCanvas, type.HDSpriteTeam->Frame(tf).cw),
+						flip, r, g, b);
 				}
 			}
 			return; // HD drawn; skip the classic blit for this unit
@@ -1494,11 +1673,9 @@ void LoadUnitTypes()
 
 /**
 **  STUTTER-FIRST-DRAW-LOAD: load the native HD atlases this map will draw from while the loading
-**  screen is up. Without it each atlas (a whole race's units, a race's buildings of one biome,
-**  the biome's common art) was decoded and uploaded in the middle of a frame at the first draw of
-**  a unit of that family: measured on a tablet as a stop of about 2 s, once 5-7 s (the first enemy
-**  unit of the other race). Loaded: for every race that has units on the map its unit atlas and
-**  its building atlas of the map's biome, each with the player-colour masks, and the biome's
+**  screen is up, so that no atlas is decoded and uploaded in the middle of a frame at the first
+**  draw of a unit of its family. Loaded: for every race that has units on the map its unit atlas
+**  and its building atlas of the map's biome, each with the player-colour masks, and the biome's
 **  common atlas. The cache is the shared one, so nothing is loaded twice.
 */
 void PreloadHDArtForMap()

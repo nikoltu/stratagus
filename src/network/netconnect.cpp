@@ -63,6 +63,7 @@
 #include "player.h"
 #include "script.h"
 #include "settings.h"
+#include "unit.h"
 #include "version.h"
 #include "video.h"
 
@@ -79,7 +80,7 @@
 // received nothing from client for xx ms while the game is started?
 #define CLIENT_START_TIMEOUT 15000
 
-// the clients probe each other for at most xx ms before the server decides against the mesh
+// the clients probe each other for at most xx ms before the server gives the start up
 #define MESH_PROBE_TIMEOUT 2000
 // a client repeats its probes every xx ms
 #define MESH_PROBE_INTERVAL 100
@@ -113,10 +114,9 @@ int NetConnectRunning = 0;             /// Network menu: Setup mode active
 int NetConnectType = 0;             /// Network menu: Setup mode active
 int NetLocalHostsSlot;                 /// Network menu: Slot # in Hosts array of local client
 int NetLocalPlayerNumber;              /// Player number of local client
-bool NetMesh = false;                  /// This game: every device sends to every device, nobody forwards
 
-static bool NetMeshWanted = false;     /// Server: ask for the mesh at the start of a game
-static uint16_t NetMeshProbeMask;      /// Client: bit n = the peer in host slot n answered our probe
+static std::string NetStartFailure;    /// Server: why the last start was given up ("" = it was not)
+static uint16_t NetMeshProbeMask;      // Client: bit n = the peer in host slot n answered this device's probe
 static std::vector<std::pair<int, int>> NetMeshProbeFailed; /// Server: (a, b) = slot a got no answer from slot b
 
 int NetPlayers;                         /// How many network players
@@ -229,7 +229,6 @@ private:
 	CUDPSocket *socket;
 	CServerSetup *serverSetup;
 	CServerSetup *localSetup;
-	bool meshProbe = false;         /// The Config asked for the mesh: probe the other clients
 	unsigned long lastProbeTick = 0; /// Tick (ms) of the last probes, 0 = none sent
 };
 
@@ -394,7 +393,6 @@ void CClient::Init(const std::string &name, CUDPSocket *socket, CServerSetup *se
 	this->localSetup = localSetup;
 	this->name = name;
 	this->socket = socket;
-	meshProbe = false;
 	lastProbeTick = 0;
 }
 
@@ -588,9 +586,7 @@ bool CClient::Update_goahead(unsigned long tick)
 	Assert(networkState.State == ccs_goahead);
 
 	if (networkState.MsgCnt < 50) { // 50 retries
-		if (meshProbe) {
-			Send_Probes(tick);
-		}
+		Send_Probes(tick);
 		Send_Config(tick);
 		return true;
 	} else {
@@ -621,14 +617,8 @@ void CClient::Send_Go(unsigned long tick)
 
 void CClient::Send_Config(unsigned long tick)
 {
-	if (meshProbe) {
-		// the server waits for the peers we reach
-		const CInitMessage_ConfigAck message(NetMeshProbeMask);
-
-		SendRateLimited(message, tick, 250);
-		return;
-	}
-	const CInitMessage_Header message(MessageInit_FromClient, ICMConfig);
+	// the server waits for the peers this device reaches
+	const CInitMessage_ConfigAck message(NetMeshProbeMask);
 
 	SendRateLimited(message, tick, 250);
 }
@@ -646,7 +636,7 @@ void CClient::Send_Probes(unsigned long tick)
 	unsigned char buf[mesh::kWireProbeSize];
 	const size_t size = mesh::SerializeProbe(false, NetLocalHostsSlot, buf, sizeof(buf));
 	if (size == 0) {
-		return; // our slot does not fit on the wire, the server will not start a mesh
+		return; // this device's slot does not fit on the wire, the server gives the start up
 	}
 	for (int i = 1; i < mesh::kMaxPlayers; ++i) {
 		if (i == NetLocalHostsSlot || !Hosts[i].IsValid() || (NetMeshProbeMask & (1 << i))) {
@@ -764,9 +754,6 @@ void CClient::SetConfig(const CInitMessage_Config &msg)
 	Hosts[NetLocalHostsSlot].Host = INADDR_LOOPBACK; // FIXME: use CNetworkParameter::Instance.localHost, but also in InitNetwork1
 	Hosts[NetLocalHostsSlot].Port = CNetworkParameter::Instance.localPort;
 	const std::string serverHostStr = serverHost.toString();
-	// the mesh is on only when the final state of the server says so
-	NetMesh = false;
-	meshProbe = msg.mesh != 0;
 	NetMeshProbeMask = 0;
 	lastProbeTick = 0;
 }
@@ -1035,7 +1022,6 @@ void CClient::Parse_State(const unsigned char *buf)
 	} else if (networkState.State == ccs_goahead) {
 		// Server has sent final state info
 		*serverSetup = msg.State;
-		NetMesh = meshProbe && msg.mesh != 0;
 		networkState.State = ccs_started;
 		networkState.MsgCnt = 0;
 	}
@@ -1043,7 +1029,11 @@ void CClient::Parse_State(const unsigned char *buf)
 
 void CClient::Parse_Config(const unsigned char *buf)
 {
-	if (networkState.State != ccs_synced) {
+	// The start has begun on the server. A client that still waits for the answer to its last
+	// resync or change (that answer can be lost, and the server sends none once it starts) takes
+	// the start too: this message carries the hosts, the final setup follows with ICMState.
+	if (networkState.State != ccs_synced && networkState.State != ccs_async
+	    && networkState.State != ccs_changed) {
 		return;
 	}
 	CInitMessage_Config msg;
@@ -1849,7 +1839,6 @@ void NetworkInitClientConnect()
 {
 	NetConnectRunning = 2;
 	NetConnectType = 2;
-	NetMesh = false;
 
 	for (int i = 0; i < PlayerMax; ++i) {
 		Hosts[i].Clear();
@@ -2027,12 +2016,13 @@ bool NetworkServerStartGame()
 	}
 
 	const std::vector<int> remoteHostIndices = NetworkRemoteHostIndices();
-	// The mesh counts host slots, and its wire has room for mesh::kMaxPlayers of them.
-	const bool meshAsked = NetMeshWanted
-	                       && (remoteHostIndices.empty() || remoteHostIndices.back() < mesh::kMaxPlayers);
-	message.mesh = meshAsked ? 1 : 0;
-	NetMesh = false;
+	NetStartFailure.clear();
 	NetMeshProbeFailed.clear();
+	// The game counts host slots, and its wire has room for mesh::kMaxPlayers of them.
+	if (!remoteHostIndices.empty() && remoteHostIndices.back() >= mesh::kMaxPlayers) {
+		ErrorPrint("NETWORK: more than %d devices, start aborted\n", mesh::kMaxPlayers);
+		NetStartFailure = "too_many";
+	}
 
 	printf("FINAL ServerSetupState:\n");
 	ServerSetupState.Save(+[](std::string f) { printf("%s", f.c_str()); });
@@ -2044,16 +2034,15 @@ bool NetworkServerStartGame()
 	DebugPrint("Ready, sending InitConfig to %d host(s)\n", hostsToAck);
 	unsigned long lastAnswer[PlayerMax];
 	std::fill_n(lastAnswer, PlayerMax, GetTicks());
-	bool clientTimedOut = false;
 	// The clients probe each other after the config; the final state waits for the result.
 	uint16_t probeMask[PlayerMax];
 	std::fill_n(probeMask, PlayerMax, 0);
-	bool meshDecided = !meshAsked;
+	bool probed = false;
 	unsigned long probeStart = 0; // tick of the last config ack, 0 = still waiting for one
 	// Send all clients host:ports to all clients.
-	while (hostsToAck) {
+	while (hostsToAck && NetStartFailure.empty()) {
 breakout:
-		if (!meshDecided
+		if (!probed
 		    && std::none_of(remoteHostIndices.begin(), remoteHostIndices.end(),
 		                    [&](const int i) { return waitingForConfigAck[i]; })) {
 			if (!probeStart) {
@@ -2068,18 +2057,18 @@ breakout:
 					}
 				}
 			}
-			if (NetMeshProbeFailed.empty() || GetTicks() - probeStart >= MESH_PROBE_TIMEOUT) {
-				meshDecided = true;
-				NetMesh = NetMeshProbeFailed.empty();
-				statemsg.mesh = NetMesh ? 1 : 0;
+			if (NetMeshProbeFailed.empty()) {
+				probed = true;
+			} else if (GetTicks() - probeStart >= MESH_PROBE_TIMEOUT) {
+				// Nobody passes packets on: a game needs every pair.
 				for (const auto &[a, b] : NetMeshProbeFailed) {
-					ErrorPrint("NETWORK: mesh: client %d [%s] got no answer from client %d [%s]\n",
+					ErrorPrint("NETWORK: client %d [%s] got no answer from client %d [%s]\n",
 					           a, Hosts[a].PlyName, b, Hosts[b].PlyName);
 				}
-				if (!NetMesh) {
-					ErrorPrint("NETWORK: mesh: not every pair of devices is reachable after %d ms,"
-					           " the game runs over the server\n", MESH_PROBE_TIMEOUT);
-				}
+				ErrorPrint("NETWORK: not every pair of devices is reachable after %d ms, start aborted\n",
+				           MESH_PROBE_TIMEOUT);
+				NetStartFailure = "no_path";
+				break;
 			}
 		}
 		// A client which stopped answering must not keep us here forever.
@@ -2088,10 +2077,10 @@ breakout:
 			    && GetTicks() - lastAnswer[i] >= CLIENT_START_TIMEOUT) {
 				ErrorPrint("NETWORK: No answer from client %d [%s] for %d ms, start aborted\n",
 				           i, Hosts[i].PlyName, CLIENT_START_TIMEOUT);
-				clientTimedOut = true;
+				NetStartFailure = "timeout";
 			}
 		}
-		if (clientTimedOut) {
+		if (!NetStartFailure.empty()) {
 			break;
 		}
 		// Send to all clients
@@ -2102,7 +2091,7 @@ breakout:
 					DebugPrint("Sending InitConfig to %s\n", host.toString().c_str());
 					message.clientIndex = i;
 					NetworkSendICMessage_Log(NetworkFildes, host, message);
-				} else if (waitingForInitAck[i] && meshDecided) {
+				} else if (waitingForInitAck[i] && probed) {
 					DebugPrint("Sending InitState to %s\n", host.toString().c_str());
 					NetworkSendICMessage_Log(NetworkFildes, host, statemsg);
 				}
@@ -2111,7 +2100,7 @@ breakout:
 
 		// Wait for acknowledge
 		std::array<unsigned char, CInitMessage_State::Size()> buf;
-		while (hostsToAck && NetworkFildes.HasDataToRead(probeStart && !meshDecided ? MESH_PROBE_INTERVAL : 1000)) {
+		while (hostsToAck && NetworkFildes.HasDataToRead(probeStart && !probed ? MESH_PROBE_INTERVAL : 1000)) {
 			CHost host;
 			const int len = NetworkFildes.Recv(buf.data(), buf.size(), &host);
 			if (len < 0) {
@@ -2132,7 +2121,7 @@ breakout:
 						const int index = FindHostIndexBy(host);
 						if (index != -1) {
 							lastAnswer[index] = GetTicks();
-							if (meshAsked && len >= int(CInitMessage_ConfigAck::Size())) {
+							if (len >= int(CInitMessage_ConfigAck::Size())) {
 								CInitMessage_ConfigAck ack;
 
 								ack.Deserialize(buf.data());
@@ -2170,9 +2159,9 @@ breakout:
 		}
 	}
 
-	if (clientTimedOut) {
-		// The clients hold the timed out client in their host table and cannot play
-		// without it, so nobody starts: tell them and remove them here.
+	if (!NetStartFailure.empty()) {
+		// The clients hold every client in their host table and cannot play without
+		// one of them, so nobody starts: tell them and remove them here.
 		const CInitMessage_Header message_quit(MessageInit_FromServer, ICMServerQuit);
 		for (const int i : remoteHostIndices) {
 			const CHost host(Hosts[i].Host, Hosts[i].Port);
@@ -2183,7 +2172,6 @@ breakout:
 			Hosts[i].Clear();
 		}
 		NetPlayers = 0;
-		NetMesh = false;
 		return false;
 	}
 
@@ -2240,7 +2228,6 @@ void NetworkInitServerConnect(int openslots)
 {
 	NetConnectRunning = 1;
 	NetConnectType = 1;
-	NetMesh = false;
 
 	for (int i = 0; i < PlayerMax; ++i) {
 		Hosts[i].Clear();
@@ -2270,23 +2257,18 @@ void NetworkInitServerConnect(int openslots)
 }
 
 /**
-** Server: ask for the mesh in the games started from now on.
-** The game runs as a mesh only if every client reached every other client at the start.
+** Server: why the last start was given up.
 **
-** @param mesh  true: every device sends to every device; false: all goes over the server.
+** @return  "timeout" (a client stopped answering), "no_path" (a pair of clients does not
+**          reach each other), "too_many" (more devices than a game has room for), "" otherwise.
 */
-void SetNetMesh(bool mesh)
+const std::string &NetworkServerStartFailure()
 {
-	NetMeshWanted = mesh;
-}
-
-bool GetNetMesh()
-{
-	return NetMeshWanted;
+	return NetStartFailure;
 }
 
 /**
-** Client: a peer answered our probe.
+** Client: a peer answered this device's probe.
 **
 ** @param hostIndex  host slot of the peer.
 */
@@ -2534,6 +2516,7 @@ bool NetworkWaitScripted()
 */
 void NetworkWaitFrame()
 {
+	NetworkChatFrame(); // the chat of a game with other people; nothing in any other game
 	if (!IsNetworkGame() && !FakeWaitViewSet && !WaitScripted) {
 		return;
 	}
@@ -2549,24 +2532,12 @@ void NetworkWaitFrame()
 }
 
 /**
-**  Server: ask for the mesh in the games started from now on.
-**
-**  @param l  Lua state: one boolean.
+**  Server: why the last start was given up (NetworkServerStartFailure).
 */
-static int CclSetNetMesh(lua_State *l)
-{
-	LuaCheckArgs(l, 1);
-	SetNetMesh(LuaToBoolean(l, 1));
-	return 0;
-}
-
-/**
-**  Does this game run as a mesh? The answer after the probe of the start.
-*/
-static int CclNetIsMesh(lua_State *l)
+static int CclNetStartFailure(lua_State *l)
 {
 	LuaCheckArgs(l, 0);
-	lua_pushboolean(l, NetMesh);
+	lua_pushstring(l, NetworkServerStartFailure().c_str());
 	return 1;
 }
 
@@ -2666,6 +2637,53 @@ static int CclNetTogglePause(lua_State *l)
 }
 
 /**
+**  This device only watches the network game from now on: its player is defeated and the
+**  others play on. See NetworkSetWatching. What the player held on the screen is let go.
+**
+**  @param l  Lua state: one boolean. Returns false if nothing was done (no network game runs).
+*/
+static int CclSetNetWatching(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const bool on = LuaToBoolean(l, 1);
+
+	if (on && (!IsNetworkGame() || !GameRunning || !ThisPlayer)) {
+		lua_pushboolean(l, 0);
+		return 1;
+	}
+	if (on && !NetworkIsWatching()) {
+		CancelBuildingMode();
+		UnSelectAll();
+		SelectionChanged();
+	}
+	NetworkSetWatching(on);
+	lua_pushboolean(l, 1);
+	return 1;
+}
+
+/**
+**  This device only watches the network game.
+*/
+static int CclNetIsWatching(lua_State *l)
+{
+	LuaCheckArgs(l, 0);
+	lua_pushboolean(l, NetworkIsWatching());
+	return 1;
+}
+
+/**
+**  Say a chat line to everybody in a network game (mesh: also while the game is paused).
+**
+**  @param l  Lua state: one string. Returns false if nothing was sent.
+*/
+static int CclNetChat(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	lua_pushboolean(l, NetworkChat(std::string(LuaToString(l, 1))));
+	return 1;
+}
+
+/**
 **  Why a player is out of the game: 0 he left, 1 the connection to him was lost,
 **  2 he never started; nil while he has not quit.
 */
@@ -2697,12 +2715,14 @@ static int CclNetHasLink(lua_State *l)
 void NetworkCclRegister()
 {
 	lua_register(Lua, "NetHasLink", CclNetHasLink);
-	lua_register(Lua, "SetNetMesh", CclSetNetMesh);
-	lua_register(Lua, "NetIsMesh", CclNetIsMesh);
+	lua_register(Lua, "NetStartFailure", CclNetStartFailure);
 	lua_register(Lua, "SetNetTimeouts", CclSetNetTimeouts);
 	lua_register(Lua, "NetWaitState", CclNetWaitState);
 	lua_register(Lua, "NetQuitReason", CclNetQuitReason);
 	lua_register(Lua, "NetTogglePause", CclNetTogglePause);
+	lua_register(Lua, "NetChat", CclNetChat);
+	lua_register(Lua, "SetNetWatching", CclSetNetWatching);
+	lua_register(Lua, "NetIsWatching", CclNetIsWatching);
 	lua_register(Lua, "SetNetWaitPlate", CclSetNetWaitPlate);
 	lua_register(Lua, "NoRandomPlacementMultiplayer", CclNoRandomPlacementMultiplayer);
 	lua_register(Lua, "UsesRandomPlacementMultiplayer", CclUsesRandomPlacementMultiplayer);

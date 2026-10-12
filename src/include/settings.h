@@ -69,15 +69,15 @@ constexpr unsigned char PlayerNumNeutral = PlayerMax - 1;  /// this is the neutr
 constexpr unsigned char CYCLES_PER_SECOND = 30;  // 1/30s 0.33ms
 
 // GAME-TIME-UNITS: game cycles per unit of a data time cost, as measured on the original client at
-// its own frame counter (work/agent-orig-timing/TIMING.md, 38.4..38.6 frames per second held):
+// its own frame counter (38.4..38.6 frames per second held):
 //   training, research, upgrading to another type: 10.02 frames per unit (Peasant 45 -> 451,
 //     Footman 60 -> 601, Archer 70 -> 701, Arrow 1 and Town Hall -> Keep 200 -> 2004);
 //   construction: about 12 frames per unit from the site's start to the finished building
 //     (Farm 100 -> 1197..1214, Scout Tower 60 -> 728..735; Barracks not timed).
-// The engine's own value was 6 for all of them.
+// The engine's own value is 6 for all of them.
 constexpr int WC2_FRAMES_PER_TIME_UNIT = 10;        /// training, research, upgrade-to
 constexpr int WC2_BUILD_FRAMES_PER_TIME_UNIT = 12;  /// construction
-// Second measurement (work/agent-orig-3/ORIG3.md):
+// Second measurement:
 //   research and upgrading to another type show their bar for time x 10 + about 15 frames
 //     (Arrow 1, 200 -> 2014.5; Arrow 2, 250 -> 2514.5; Town Hall -> Keep, 200 -> 2015.0). The engine
 //     counts its first unit at once, so the whole work was 199 x 10 + 1 = 1991 cycles for 200;
@@ -91,8 +91,7 @@ constexpr int WC2_BUILD_EXTRA_TIME_UNITS = 1;       /// construction: time units
 constexpr unsigned long WC2_MESSAGE_LIFE_MS = 6700;
 
 // WORKER-EXIT-STAND: a worker of the original stands 28..31 frames beside the gold mine after coming
-// out of it and beside the hall after coming out of it, before its first step or swing
-// (work/agent-orig-timing2/TIMING2.md 1.1 and 1.3: 28, 29, 31, 31).
+// out of it and beside the hall after coming out of it, before its first step or swing.
 constexpr int WC2_WORKER_EXIT_STAND_FRAMES = 29;
 
 /*----------------------------------------------------------------------------

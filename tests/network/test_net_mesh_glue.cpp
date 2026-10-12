@@ -27,6 +27,7 @@
 #include "stratagus.h"
 #include "net_mesh_glue.h"
 
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -52,6 +53,11 @@ public:
 		quits.emplace_back(player, cycle, reason);
 	}
 	void SetPaused(bool paused, int player) override { pauses.emplace_back(paused, player); }
+	void SendChat(int hostSlot, uint32_t number, const std::string &text) override
+	{
+		chatsSent.emplace_back(hostSlot, number, text);
+	}
+	void ShowChat(int player, const std::string &text) override { chatsShown.emplace_back(player, text); }
 
 	/// Number of messages of a kind sent to a host slot
 	int Count(mesh::Kind kind, int hostSlot) const
@@ -78,6 +84,8 @@ public:
 	std::vector<std::tuple<int, int, unsigned long>> packets;
 	std::vector<std::tuple<int, unsigned long, mesh::Reason>> quits;
 	std::vector<std::pair<bool, int>> pauses;
+	std::vector<std::tuple<int, uint32_t, std::string>> chatsSent;
+	std::vector<std::pair<int, std::string>> chatsShown;
 };
 
 mesh::Params ShortBounds()
@@ -157,7 +165,7 @@ public:
 			glue.Tick(now);
 		}
 	}
-	/// The view the device in `hostSlot` would send if it saw what we see
+	/// The view the device in `hostSlot` would send if it saw what this device sees
 	mesh::Msg SameView(int hostSlot)
 	{
 		const mesh::Msg *mine = engine.Last(mesh::Kind::Status, hostSlot);
@@ -295,12 +303,12 @@ TEST_CASE("mesh glue: a request is answered to the asker with the packets held")
 	mesh::Msg need;
 	need.kind = mesh::Kind::Need;
 	need.cycle = mesh::kLag;
-	need.mask = uint16_t(1u << 1); // our packets
+	need.mask = uint16_t(1u << 1); // this device's packets
 	rig.glue.OnMeshMessage(0, need, rig.now);
 	REQUIRE(rig.engine.packets.size() >= 3);
 	for (size_t i = 0; i != rig.engine.packets.size(); ++i) {
 		CHECK(std::get<0>(rig.engine.packets[i]) == 0);                 // to the asker only
-		CHECK(std::get<1>(rig.engine.packets[i]) == 2);                 // our player number
+		CHECK(std::get<1>(rig.engine.packets[i]) == 2);                 // this device's player number
 		CHECK(std::get<2>(rig.engine.packets[i]) == mesh::kLag + i);    // from the asked cycle on
 	}
 
@@ -586,16 +594,16 @@ TEST_CASE("mesh glue: commits which are not for this device")
 	// from a device which has no host slot
 	rig.glue.OnMeshMessage(3, rig.Commit(2, cycle, 0x3), rig.now);
 	rig.glue.OnMeshMessage(-1, rig.Commit(2, cycle, 0x3), rig.now);
-	// from our own slot
+	// from this device's own slot
 	rig.glue.OnMeshMessage(1, rig.Commit(2, cycle, 0x3), rig.now);
-	// decided by a group we are not part of
+	// decided by a group this device is not part of
 	rig.glue.OnMeshMessage(0, rig.Commit(2, cycle, 0x1), rig.now);
 	// about a player who does not exist
 	rig.glue.OnMeshMessage(0, rig.Commit(5, cycle, 0x3), rig.now);
 	CHECK(rig.engine.quits.empty());
 	CHECK(rig.glue.WaitState(rig.now).SelfOut == false);
 
-	// a commit about ourselves: we are out, nothing runs any more, nothing is written
+	// a commit about this device: it is out, nothing runs any more, nothing is written
 	rig.glue.OnMeshMessage(0, rig.Commit(1, cycle, 0x5), rig.now);
 	const CNetworkWaitState state = rig.glue.WaitState(rig.now);
 	CHECK(state.SelfOut);
@@ -709,7 +717,7 @@ TEST_CASE("mesh glue: the game is held until every device has loaded")
 	CHECK(state.Player == -1);
 	CHECK(rig.engine.quits.empty());
 
-	// a device which has not got our report says its own again and is answered; one which has, is not
+	// a device which has not got this device's report says its own again and is answered; one which has, is not
 	rig.engine.meshes.clear();
 	rig.glue.OnMeshMessage(2, rig.LoadedBy(0x4), rig.now);
 	CHECK(rig.engine.Count(mesh::Kind::Loaded, 2) == 1);
@@ -943,6 +951,66 @@ TEST_CASE("mesh glue: a pause for everybody: no cycle runs, nobody heard is wait
 	CHECK(answer->flags == 0);
 	CHECK(answer->cycle == 5);
 	CHECK(answer->player == 2);
+}
+
+TEST_CASE("mesh glue: a chat line goes to every device with its text until each has answered")
+{
+	GlueRig rig(1);
+	rig.RunTo(5, {0, 2});
+	rig.glue.OnPause(SlotPlayer[0], rig.now); // a standing game: the line travels all the same
+	REQUIRE(rig.glue.Paused());
+	REQUIRE(rig.glue.OnChat("go on?", rig.now));
+	REQUIRE(rig.engine.chatsSent.size() == 2);
+	CHECK(rig.engine.chatsSent[0] == std::make_tuple(0, uint32_t(1), std::string("go on?")));
+	CHECK(rig.engine.chatsSent[1] == std::make_tuple(2, uint32_t(1), std::string("go on?")));
+	CHECK(rig.engine.chatsShown.empty()); // the own line is shown by who said it
+	CHECK(rig.engine.Count(mesh::Kind::Chat, 0) == 0); // never as a message without its text
+
+	// the device in host slot 0 answers; the one in slot 2 gets the line again, with the text
+	mesh::Msg answer;
+	answer.kind = mesh::Kind::ChatAck;
+	answer.data = 1;
+	rig.glue.OnMeshMessage(0, answer, rig.now);
+	rig.engine.chatsSent.clear();
+	rig.now += 300;
+	rig.glue.Tick(rig.now);
+	REQUIRE(rig.engine.chatsSent.size() == 1);
+	CHECK(rig.engine.chatsSent[0] == std::make_tuple(2, uint32_t(1), std::string("go on?")));
+	rig.glue.OnMeshMessage(2, answer, rig.now);
+	rig.engine.chatsSent.clear();
+	rig.now += 300;
+	rig.glue.Tick(rig.now);
+	CHECK(rig.engine.chatsSent.empty());
+	CHECK(rig.glue.Paused());
+}
+
+TEST_CASE("mesh glue: a chat line of another player is shown once and always answered")
+{
+	GlueRig rig(0);
+	rig.RunTo(5, {1, 2});
+	rig.glue.OnChatMessage(2, 1, "ready", rig.now);
+	REQUIRE(rig.engine.chatsShown.size() == 1);
+	CHECK(rig.engine.chatsShown[0] == std::make_pair(SlotPlayer[2], std::string("ready")));
+	CHECK(rig.engine.Count(mesh::Kind::ChatAck, 2) == 1);
+	// the same line again (its answer was lost): answered, not shown
+	rig.glue.OnChatMessage(2, 1, "ready", rig.now);
+	CHECK(rig.engine.chatsShown.size() == 1);
+	CHECK(rig.engine.Count(mesh::Kind::ChatAck, 2) == 2);
+	REQUIRE(rig.engine.Last(mesh::Kind::ChatAck, 2) != nullptr);
+	CHECK(rig.engine.Last(mesh::Kind::ChatAck, 2)->data == 1);
+	// a line from no device of the game, and the bare message of the model, are nothing
+	rig.glue.OnChatMessage(5, 1, "who", rig.now);
+	mesh::Msg bare;
+	bare.kind = mesh::Kind::Chat;
+	bare.player = 1;
+	bare.data = 9;
+	rig.glue.OnMeshMessage(1, bare, rig.now);
+	CHECK(rig.engine.chatsShown.size() == 1);
+	CHECK(rig.engine.Count(mesh::Kind::ChatAck, 1) == 0);
+	// a second line of the same player
+	rig.glue.OnChatMessage(2, 2, "now", rig.now);
+	REQUIRE(rig.engine.chatsShown.size() == 2);
+	CHECK(rig.engine.chatsShown[1].second == "now");
 }
 
 TEST_CASE("mesh glue: the local player lets a paused game go on")

@@ -117,6 +117,10 @@ extern void NetworkOnStartGame();  /// Initialise network data for ingame commun
 extern void NetworkLoadingPing();  /// A game loads: tell the other devices that this one is alive (mesh)
 extern void NetworkGameLoaded();   /// The own load of the game is done (mesh: the others are told, the wait for them begins)
 extern bool NetworkIsHeld();       /// Mesh: the game has not begun on every device, no cycle runs and no command is taken
+/// This device only watches the game from now on (its player is defeated): no order and no
+/// diplomacy leaves it, the whole map is drawn. Nothing of the game's state is changed.
+extern void NetworkSetWatching(bool on);
+extern bool NetworkIsWatching();   /// This device only watches the game
 extern void NetworkEvent();  /// Handle network events
 extern void NetworkSync();   /// Hold in sync
 extern void NetworkQuitGame();  /// Quit game: warn other users
@@ -203,6 +207,14 @@ extern void NetworkExecPause(int player);
 extern bool NetworkTogglePause();
 /// Mesh: the game is paused for everybody
 extern bool NetworkIsPaused();
+/// A chat line as it may travel: no controls, no spaces at its ends, at most 120 characters; empty = no line
+extern std::string NetworkChatText(const std::string &raw);
+/// The local player says a chat line to everybody. Mesh: at once, also in a pause. False if nothing was sent
+extern bool NetworkChat(const std::string &raw);
+/// Chat lines go beside the command stream (a mesh game)
+extern bool NetworkChatIsDirect();
+/// Once per drawn frame of a game: tell the host whether there is a chat, take what its player typed
+extern void NetworkChatFrame();
 
 extern void NetworkCclRegister();
 

@@ -55,7 +55,8 @@ extern void FreeAStar();
 /// Find and a* path for a unit
 extern int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPos, int gw, int gh,
 						 int tilesizex, int tilesizey, int minrange,
-						 int maxrange, char *path, int pathlen, const CUnit &unit);
+						 int maxrange, char *path, int pathlen, const CUnit &unit,
+						 bool squareRange = false);
 
 /*----------------------------------------------------------------------------
 --  Variables
@@ -183,7 +184,7 @@ void FreePathfinder()
 **
 **  @return          Distance to place.
 */
-int PlaceReachable(const CUnit &src, const Vec2i &goalPos, int w, int h, int minrange, int range, bool from_outside_container)
+int PlaceReachable(const CUnit &src, const Vec2i &goalPos, int w, int h, int minrange, int range, bool from_outside_container, bool squareRange)
 {
 	SetAStarFixedEnemyUnitsUnpassable(true); /// change Path Finder setting to don't count tiles with enemy units as passable
 	int i;
@@ -193,7 +194,7 @@ int PlaceReachable(const CUnit &src, const Vec2i &goalPos, int w, int h, int min
 	if (!from_outside_container || !src.Container) {
 		i = AStarFindPath(srcTilePos, goalPos, w, h,
 						  srcTW, srcTH,
-						  minrange, range, nullptr, 0, src);
+						  minrange, range, nullptr, 0, src, squareRange);
 	} else {
 		const CUnit *first_container = GetFirstContainer(src);
 
@@ -220,7 +221,7 @@ int PlaceReachable(const CUnit &src, const Vec2i &goalPos, int w, int h, int min
 
 				i = AStarFindPath(tile_pos, goalPos, w, h,
 					srcTW, srcTH,
-					minrange, range, nullptr, 0, src);
+					minrange, range, nullptr, 0, src, squareRange);
 
 				switch (i) {
 					case PF_FAILED:
@@ -257,14 +258,14 @@ finished:
 **
 **  @return       Distance to place.
 */
-int UnitReachable(const CUnit &src, const CUnit &dst, int range, bool from_outside_container)
+int UnitReachable(const CUnit &src, const CUnit &dst, int range, bool from_outside_container, bool squareRange)
 {
 	//  Find a path to the goal.
 	if (src.Type->Building) {
 		return 0;
 	}
 	const int depth = PlaceReachable(src, dst.tilePos,
-									 dst.Type->TileWidth, dst.Type->TileHeight, 0, range, from_outside_container);
+									 dst.Type->TileWidth, dst.Type->TileHeight, 0, range, from_outside_container, squareRange);
 	if (depth <= 0) {
 		return 0;
 	}
@@ -282,14 +283,14 @@ int UnitReachable(const CUnit &src, const CUnit &dst, int range, bool from_outsi
 **  @return       path length to dst or error code
 */
 
-int CalcPathLengthToUnit(const CUnit &src, const CUnit &dst, const int minrange, const int range)
+int CalcPathLengthToUnit(const CUnit &src, const CUnit &dst, const int minrange, const int range, bool squareRange)
 {
 	SetAStarFixedEnemyUnitsUnpassable(true); /// change Path Finder setting to don't count tiles with enemy units as passable
 	int length = AStarFindPath(src.tilePos, dst.tilePos,
 							   dst.Type->TileWidth, dst.Type->TileHeight,
 							   src.Type->TileWidth, src.Type->TileHeight,
 							   minrange, range,
-							   nullptr, 0, src);
+							   nullptr, 0, src, squareRange);
 	SetAStarFixedEnemyUnitsUnpassable(false); /// restore Path Finder setting
 	switch (length) {
 		case PF_FAILED:
@@ -349,10 +350,11 @@ void PathFinderInput::SetMinRange(int range)
 	}
 }
 
-void PathFinderInput::SetMaxRange(int range)
+void PathFinderInput::SetMaxRange(int range, bool squareRange)
 {
-	if (maxRange != range) {
+	if (maxRange != range || this->squareRange != squareRange) {
 		maxRange = range;
+		this->squareRange = squareRange;
 		isRecalculatePathNeeded = true;
 	}
 }
@@ -393,7 +395,7 @@ static int NewPath(PathFinderInput &input, PathFinderOutput &output)
 						  input.GetUnitSize().x, input.GetUnitSize().y,
 						  input.GetMinRange(), input.GetMaxRange(),
 						  path, PathFinderOutput::MAX_PATH_LENGTH,
-						  *input.GetUnit());
+						  *input.GetUnit(), input.IsSquareRange());
 	input.PathRecalculated();
 	if (i == PF_FAILED) {
 		i = PF_UNREACHABLE;
@@ -425,6 +427,16 @@ static int NewPath(PathFinderInput &input, PathFinderOutput &output)
 **  @return >0 remaining path length, 0 wait for path, -1
 **  reached goal, -2 can't reach the goal.
 */
+/// Can the unit take the path element that ends on pos now. On a one-tile step a transporter may
+/// cross a tile it could not rest on (water off its grid), so only the tile itself is tested.
+static bool CanStepTo(const CUnit &unit, const Vec2i &pos, int element)
+{
+	if (!(element & PathShortStep) || unit.Type->GridStep == 1) {
+		return UnitCanBeAt(unit, pos);
+	}
+	return Map.Info.IsPointOnMap(pos) && !Map.Field(pos)->CheckMask(unit.Type->MovementMask);
+}
+
 std::pair<int, Vec2i> NextPathElement(CUnit &unit)
 {
 	PathFinderInput &input = unit.pathFinderData->input;
@@ -449,10 +461,13 @@ std::pair<int, Vec2i> NextPathElement(CUnit &unit)
 		output.Length--;
 	}
 
-	Vec2i dir(Heading2X[(int) output.Path[output.Length - 1]],
-	          Heading2Y[(int) output.Path[output.Length - 1]]);
+	// A path element is one heading; the unit covers GridStep tiles in it. Only the end tile of the
+	// step is tested: the tile passed between need not be enterable.
+	int element = output.Path[output.Length - 1];
+	int step = PathElementLength(element, unit.Type->GridStep);
+	Vec2i dir(Heading2X[PathElementHeading(element)] * step, Heading2Y[PathElementHeading(element)] * step);
 	int result = output.Length;
-	if (!UnitCanBeAt(unit, unit.tilePos + dir)) {
+	if (!CanStepTo(unit, unit.tilePos + dir, element)) {
 		// If obstructing unit is moving, wait for a bit.
 		if (output.Fast) {
 			output.Fast--;
@@ -467,9 +482,11 @@ std::pair<int, Vec2i> NextPathElement(CUnit &unit)
 			AstarDebugPrint("WAIT expired\n");
 			result = NewPath(input, output);
 			if (result > 0) {
-				dir.x = Heading2X[(int)output.Path[output.Length - 1]];
-				dir.y = Heading2Y[(int)output.Path[output.Length - 1]];
-				if (!UnitCanBeAt(unit, unit.tilePos + dir)) {
+				element = output.Path[output.Length - 1];
+				step = PathElementLength(element, unit.Type->GridStep);
+				dir.x = Heading2X[PathElementHeading(element)] * step;
+				dir.y = Heading2Y[PathElementHeading(element)] * step;
+				if (!CanStepTo(unit, unit.tilePos + dir, element)) {
 					// There may be unit in the way, Astar may allow you to walk onto it.
 					result = PF_UNREACHABLE;
 					dir = {0, 0};

@@ -41,8 +41,7 @@
 //
 // The bit -> ident tables below were derived from the consumer side of the same binary: each sidebar
 // button record carries an icon id and a requirement predicate, the predicate names the bit it tests,
-// and the icon id names the unit or upgrade. The derivation, its evidence and its remaining unknowns
-// are recorded in .wargushd/FORENSICS_NG23_NG28_ROUTEA_2026-08-20.md.
+// and the icon id names the unit or upgrade (NG23, NG28).
 
 #include "stratagus.h"
 
@@ -54,6 +53,7 @@
 #include "pud.h"
 #include "script.h"
 #include "unit.h"
+#include "unit_manager.h"
 #include "unittype.h"
 #include "upgrade.h"
 #include "upgrade_structs.h"
@@ -260,8 +260,8 @@ struct PeImage {
 };
 
 /// Find `pattern` (with 0xFF-marked wildcard bytes in `mask`) inside .text. Returns the file offset
-/// only when the match is unique -- more than one match means the signature is not the anchor we
-/// think it is, and the caller must give up rather than pick one.
+/// only when the match is unique -- more than one match means the signature is not the expected
+/// anchor, and the caller must give up rather than pick one.
 size_t findUniqueInText(const std::string &d, const PeImage &pe,
                         const uint8_t *pattern, const char *mask, size_t len)
 {
@@ -315,11 +315,6 @@ bool readTable(const std::string &d, const PeImage &pe, uint32_t va, std::vector
 // ("atoms") are collected here from the user's executable; RuleShape() below only says which atom
 // plays which role for a rule id and refuses any handler whose atoms do not fit. No unit type, count
 // or slot number of a mission is written in this file.
-//
-// Forensics and the per-id decode this follows: .wargushd/work/agent-missions/
-// HOW_ORIGINAL_ENCODES_RULES.md section 5 and .wargushd/work/agent-mission-rules/MISSION_RULES_P1.md.
-// Reference model, checked instruction by instruction against a disassembler:
-// .wargushd/work/agent-mission-rules/tools/mission_rules_reader.py.
 
 /// One decoded x86-32 instruction: only the fields the reader looks at.
 struct X86Ins {
@@ -787,8 +782,8 @@ RuleWho WhoAny()
 }
 
 /// Assign the atoms of a handler to their roles. The shape of each rule id follows the decode of its
-/// handler (agent-missions/HOW_ORIGINAL_ENCODES_RULES.md section 5; the handler's address is read
-/// from the dispatcher at run time). Returns false when the atoms do not fit: the rule stays off.
+/// handler (the handler's address is read from the dispatcher at run time). Returns false when the
+/// atoms do not fit: the rule stays off.
 bool RuleShape(const RuleCode &c, int id, const HandlerAtoms &a, RuleDef &r)
 {
 	const std::vector<CensusAtom> &C = a.census;
@@ -1452,7 +1447,7 @@ std::vector<const CUnit *> Circles()
 
 /// Count the player's units that stand on a circle; a unit counts once and stays counted (the
 /// original bumps a counter and clears the unit's flag, VA 0x4A7732). The original scans the
-/// circle's own tiles; where our circle type cannot be entered the tiles next to it count instead.
+/// circle's own tiles; where the circle type cannot be entered the tiles next to it count instead.
 int Arrivals(const RuleTerm &t)
 {
 	if (!ThisPlayer) {
@@ -1651,7 +1646,7 @@ void InstallRule(const fs::path &mapPath)
 			return;
 		}
 	}
-	// A type the rule names but our data does not define would make "none of them" true at once.
+	// A type the rule names but the data does not define would make "none of them" true at once.
 	ResolveRuleTypes();
 	for (const std::vector<RuleTerm> *list : {&def.win, &def.winAlt, &def.lose, &def.gate}) {
 		for (const RuleTerm &t : *list) {
@@ -1722,6 +1717,35 @@ int CclMissionRuleOutcome(lua_State *l)
 		g_live.lastOutcome = EvaluateRule();
 	}
 	lua_pushnumber(l, g_live.on ? g_live.lastOutcome : 0);
+	return 1;
+}
+
+/// Lua: MissionCircleArrivals([needHero]) -> how many of the player's units taken over from a
+/// rescue slot have stood on a Circle of Power (counted once each, as Arrivals does). With needHero
+/// the count is 0 until one of them is of a hero type (parameter bit 0x1000 of the generic rule,
+/// VA 0x4A7711; "hero" is the unit type's own flag). A summoned unit was never taken over and
+/// does not count.
+int CclMissionCircleArrivals(lua_State *l)
+{
+	const bool needHero = lua_gettop(l) >= 1 && LuaToBoolean(l, 1);
+	RuleTerm any;
+	const int n = Arrivals(any);
+	if (needHero) {
+		const int flag = UnitTypeVar.BoolFlagNameLookup["hero"];
+		bool hero = false;
+		if (flag != -1) {
+			for (const int id : g_live.arrived) {
+				const CUnit &u = UnitManager->GetSlotUnit(id);
+				if (u.Type != nullptr && u.Type->BoolFlag[flag].value) {
+					hero = true;
+					break;
+				}
+			}
+		}
+		lua_pushnumber(l, hero ? n : 0);
+		return 1;
+	}
+	lua_pushnumber(l, n);
 	return 1;
 }
 
@@ -1842,7 +1866,7 @@ bool MissionAllowsDamage(const CUnit *attacker, const CUnit &target)
 		return true;
 	}
 	// Rule 0x08 (Tides of Darkness, Human XIV): the portal is the target and takes ordinary damage
-	// (Gryphon Riders took it from 5000 to its destruction, work/agent-orig-5/ORIG5.md).
+	// (measured on the original: Gryphon Riders took it from 5000 to its destruction).
 	// Rule 0x13 (Beyond the Dark Portal, Orc XII) is LOST when the portal is gone, so it can be
 	// destroyed there; not measured on the original - left as it was (ordinary damage).
 	if (rules.victoryId == 0x08 || rules.victoryId == 0x13) {
@@ -1868,6 +1892,7 @@ void WC2MissionCclRegister()
 {
 	lua_register(Lua, "GetMissionRules", CclGetMissionRules);
 	lua_register(Lua, "MissionRuleOutcome", CclMissionRuleOutcome);
+	lua_register(Lua, "MissionCircleArrivals", CclMissionCircleArrivals);
 }
 
 //@}

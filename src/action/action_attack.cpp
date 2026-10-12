@@ -281,7 +281,8 @@ void COrder_Attack::UpdatePathFinderData(PathFinderInput &input) /* override */
 	if (GameSettings.Inside) {
 		CheckObstaclesBetweenTiles(input.GetUnitPos(), this->HasGoal() ? this->GetGoal()->tilePos : this->goalPos, MapFieldRocks | MapFieldForest, &distance);
 	}
-	input.SetMaxRange(distance);
+	// against a unit the range is a square around it, as InAttackRange counts it
+	input.SetMaxRange(distance, this->HasGoal() && !IsMovingToAttackPos());
 	if (!this->SkirmishRange || Distance(input.GetUnitPos(), input.GetGoalPos()) < this->SkirmishRange) {
 		input.SetMinRange(this->MinRange);
 	} else {
@@ -510,7 +511,10 @@ bool COrder_Attack::AutoSelectTarget(CUnit &unit)
 	if (goal /// if goal is Valid
 		&& goal->IsVisibleAsGoal(*unit.Player)
 		&& CanTarget(*unit.Type, *goal->Type)
-		&& (immobile ? InAttackRange(unit, *goal) : (attackedByGoal ? true : InReactRange(unit, *goal)))
+		// a goal that can be hit from here is kept: the square of the attack range has tiles
+		// outside the reaction range's circle
+		&& (immobile ? InAttackRange(unit, *goal)
+					 : (attackedByGoal || InAttackRange(unit, *goal) || InReactRange(unit, *goal)))
 		&& !(unit.UnderAttack && !goal->IsAggressive())) {
 
 		if (newTarget && newTarget != goal) {

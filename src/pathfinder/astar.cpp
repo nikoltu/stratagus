@@ -91,10 +91,28 @@ private:
 	uint32_t Costs; /// complete costs to goal
 };
 
+/// Tiles covered by one path element of the unit the current search is for (CUnitType::GridStep).
+/// Such a unit visits only the tiles a whole number of steps away from its start tile.
+static int AStarStep = 1;
+/// Start tile of the current search
+static Vec2i AStarStart;
+/// The current search is for a transporter on a grid: it may also stand on any coast tile and
+/// takes one-tile steps (PathShortStep) onto, along and off coast tiles.
+static bool AStarDocker = false;
+
+/// Tile a unit on the grid of the current search can stand on, by its coordinates alone
+static inline bool AStarOnGrid(int x, int y)
+{
+	if (AStarDocker) {
+		return !(x % AStarStep) && !(y % AStarStep);
+	}
+	return !((x - AStarStart.x) % AStarStep) && !((y - AStarStart.y) % AStarStep);
+}
+
 /// heuristic cost function for a*
 static inline int AStarCosts(const Vec2i &pos, const Vec2i &goalPos)
 {
-	int baseCost = std::abs(pos.x - goalPos.x) + std::abs(pos.y - goalPos.y);
+	int baseCost = (std::abs(pos.x - goalPos.x) + std::abs(pos.y - goalPos.y)) / AStarStep;
 	// the base cost underestimates the real cost, because movement cost
 	// is increased by terrain or other units. it's difficult to give a good
 	// estimate, but we want to be pretty greedy anyway, so we multiply by a
@@ -643,6 +661,14 @@ public:
 
 	void operator()(int offset)
 	{
+		if (AStarStep > 1) {
+			// only tiles the unit can stand on
+			const int x = offset % AStarMapWidth;
+			const int y = offset / AStarMapWidth;
+			if (!AStarOnGrid(x, y) && !(AStarDocker && Map.Field(offset)->CoastOnMap())) {
+				return;
+			}
+		}
 		if (CostMoveTo(offset, unit) >= 0) {
 			AStarMatrix[offset].SetInGoal();
 			goal_reachable = true;
@@ -675,6 +701,9 @@ public:
 		this->maxrange = maxrange;
 	}
 
+	/// The max range is the larger axis gap to the goal: its area is a square, not a circle
+	void SetSquareRange(bool squareRange) { this->squareRange = squareRange; }
+
 	void SetUnitSize(const Vec2i &tileSize)
 	{
 		this->unitExtraTileSize.x = tileSize.x - 1;
@@ -696,13 +725,18 @@ private:
 		return isqrt(square(range + 1) - square(dy) - 1);
 	}
 
+	int GetMaxRangeOffsetX(int dy) const
+	{
+		return squareRange ? maxrange : GetMaxOffsetX(dy, maxrange);
+	}
+
 	// Distance are computed between bottom of unit and top of goal
 	void TopHemicycle()
 	{
 		const int miny = std::max(0, goalTopLeft.y - maxrange - unitExtraTileSize.y);
 		const int maxy = std::min(goalTopLeft.y - minrange - unitExtraTileSize.y, goalTopLeft.y - 1 - unitExtraTileSize.y);
 		for (int y = miny; y <= maxy; ++y) {
-			const int offsetx = GetMaxOffsetX(y - goalTopLeft.y, maxrange);
+			const int offsetx = GetMaxRangeOffsetX(y - goalTopLeft.y);
 			const int minx = std::max(0, goalTopLeft.x - offsetx - unitExtraTileSize.x);
 			const int maxx = std::min(Map.Info.MapWidth - 1 - unitExtraTileSize.x, goalBottomRight.x + offsetx);
 			Vec2i mpos(minx, y);
@@ -734,7 +768,7 @@ private:
 		const int miny = std::max(0, goalTopLeft.y - (minrange - 1) - unitExtraTileSize.y);
 		const int maxy = goalTopLeft.y - 1 - unitExtraTileSize.y;
 		for (int y = miny; y <= maxy; ++y) {
-			const int offsetmaxx = GetMaxOffsetX(y - goalTopLeft.y, maxrange);
+			const int offsetmaxx = GetMaxRangeOffsetX(y - goalTopLeft.y);
 			const int offsetminx = GetMaxOffsetX(y - goalTopLeft.y, minrange - 1) + 1;
 
 			HemiCycleRing(y, offsetminx, offsetmaxx);
@@ -778,7 +812,7 @@ private:
 		const int maxy = std::min(Map.Info.MapHeight - 1 - unitExtraTileSize.y, goalBottomRight.y + (minrange - 1));
 
 		for (int y = miny; y <= maxy; ++y) {
-			const int offsetmaxx = GetMaxOffsetX(y - goalBottomRight.y, maxrange);
+			const int offsetmaxx = GetMaxRangeOffsetX(y - goalBottomRight.y);
 			const int offsetminx = GetMaxOffsetX(y - goalBottomRight.y, minrange - 1) + 1;
 
 			HemiCycleRing(y, offsetminx, offsetmaxx);
@@ -790,7 +824,7 @@ private:
 		const int miny = std::max(goalBottomRight.y + minrange, goalBottomRight.y + 1);
 		const int maxy = std::min(Map.Info.MapHeight - 1 - unitExtraTileSize.y, goalBottomRight.y + maxrange);
 		for (int y = miny; y <= maxy; ++y) {
-			const int offsetx = GetMaxOffsetX(y - goalBottomRight.y, maxrange);
+			const int offsetx = GetMaxRangeOffsetX(y - goalBottomRight.y);
 			const int minx = std::max(0, goalTopLeft.x - offsetx - unitExtraTileSize.x);
 			const int maxx = std::min(Map.Info.MapWidth - 1 - unitExtraTileSize.x, goalBottomRight.x + offsetx);
 			Vec2i mpos(minx, y);
@@ -809,6 +843,7 @@ private:
 	Vec2i unitExtraTileSize;
 	int minrange = 0;
 	int maxrange = 0;
+	bool squareRange = false;
 };
 
 /**
@@ -821,7 +856,8 @@ static bool AStarMarkGoal(const Vec2i &goal,
                           int tilesizey,
                           int minrange,
                           int maxrange,
-                          const CUnit &unit)
+                          const CUnit &unit,
+                          bool squareRange)
 {
 	ProfileBegin("AStarMarkGoal");
 
@@ -850,6 +886,7 @@ static bool AStarMarkGoal(const Vec2i &goal,
 	const Vec2i goalBottomRigth(goal.x + gw - 1, goal.y + gh - 1);
 	visitor.SetGoal(goal, goalBottomRigth);
 	visitor.SetRange(minrange, maxrange);
+	visitor.SetSquareRange(squareRange);
 	const Vec2i tileSize(tilesizex, tilesizey);
 	visitor.SetUnitSize(tileSize);
 
@@ -881,11 +918,12 @@ static int AStarSavePath(const Vec2i &startPos, const Vec2i &endPos, char *path,
 	while (curr != startPos) {
 		direction = AStarMatrix[currO + curr.x].GetDirection();
 #ifdef DEBUG
-		Assert(direction >= 0 && direction < 8);
+		Assert(direction >= 0 && direction != 8);
 #endif
-		curr.x -= Heading2X[direction];
-		curr.y -= Heading2Y[direction];
-		currO -= Heading2O[direction];
+		const int length = PathElementLength(direction, AStarStep);
+		curr.x -= Heading2X[PathElementHeading(direction)] * length;
+		curr.y -= Heading2Y[PathElementHeading(direction)] * length;
+		currO -= Heading2O[PathElementHeading(direction)] * length;
 		fullPathLength++;
 	}
 
@@ -898,11 +936,12 @@ static int AStarSavePath(const Vec2i &startPos, const Vec2i &endPos, char *path,
 		while (curr != startPos) {
 			direction = AStarMatrix[currO + curr.x].GetDirection();
 #ifdef DEBUG
-			Assert(direction >= 0 && direction < 8);
+			Assert(direction >= 0 && direction != 8);
 #endif
-			curr.x -= Heading2X[direction];
-			curr.y -= Heading2Y[direction];
-			currO -= Heading2O[direction];
+			const int length = PathElementLength(direction, AStarStep);
+			curr.x -= Heading2X[PathElementHeading(direction)] * length;
+			curr.y -= Heading2Y[PathElementHeading(direction)] * length;
+			currO -= Heading2O[PathElementHeading(direction)] * length;
 			--pathPos;
 			if (pathPos < pathLen) {
 				path[pathLen - pathPos - 1] = direction;
@@ -920,7 +959,7 @@ static int AStarSavePath(const Vec2i &startPos, const Vec2i &endPos, char *path,
 */
 static int AStarFindSimplePath(const Vec2i &startPos, const Vec2i &goal, int gw, int gh,
 							   int, int, int minrange, int maxrange,
-							   char *path, const CUnit &unit)
+							   char *path, const CUnit &unit, bool squareRange)
 {
 	ProfileBegin("AStarFindSimplePath");
 	// At exact destination point already
@@ -937,22 +976,24 @@ static int AStarFindSimplePath(const Vec2i &startPos, const Vec2i &goal, int gw,
 
 	const Vec2i diff = goal - startPos;
 	const int distance = isqrt(square(diff.x) + square(diff.y));
+	const int maxDistance = squareRange ? std::max(std::abs(diff.x), std::abs(diff.y)) : distance;
 
 	// Within range of destination
-	if (minrange <= distance && distance <= maxrange) {
+	if (minrange <= distance && maxDistance <= maxrange) {
 		ProfileEnd("AStarFindSimplePath");
 		return PF_REACHED;
 	}
 
-	if (std::abs(diff.x) <= 1 && std::abs(diff.y) <= 1) {
-		// Move to adjacent cell
+	if (!AStarDocker && std::abs(diff.x) <= AStarStep && std::abs(diff.y) <= AStarStep
+		&& diff.x % AStarStep == 0 && diff.y % AStarStep == 0) {
+		// Move to adjacent cell (one step away)
 		if (CostMoveTo(GetIndex(goal.x, goal.y), unit) == -1) {
 			ProfileEnd("AStarFindSimplePath");
 			return PF_UNREACHABLE;
 		}
 
 		if (path) {
-			path[0] = XY2Heading[diff.x + 1][diff.y + 1];
+			path[0] = XY2Heading[diff.x / AStarStep + 1][diff.y / AStarStep + 1];
 		}
 		ProfileEnd("AStarFindSimplePath");
 		return 1;
@@ -960,6 +1001,70 @@ static int AStarFindSimplePath(const Vec2i &startPos, const Vec2i &goal, int gw,
 
 	ProfileEnd("AStarFindSimplePath");
 	return PF_FAILED;
+}
+
+/**
+**  The straight way of a unit on a grid (AStarStep > 1) to a single tile.
+**
+**  The line runs from the start to the goal tile rounded down to the grid of the given step
+**  (the unit's own, or 1 with the PathShortStep flag for a transporter beside its coast tile). With a the longer
+**  and b the shorter distance in steps, each step adds b to an error term; the step is diagonal
+**  when twice the error reaches a, and a is then taken off. The way ends on the first tile in
+**  range of the goal tile itself.
+**
+**  @return  path length, or PF_FAILED when a tile of the line cannot be entered or the start is
+**           off the grid (the caller then searches).
+*/
+static int AStarFindGridLine(const Vec2i &startPos, const Vec2i &goal, int minrange, int maxrange,
+							 char *path, int pathLen, const CUnit &unit, int step, int flag)
+{
+	const Vec2i target(goal.x - goal.x % step, goal.y - goal.y % step);
+	const Vec2i diff = target - startPos;
+
+	if (diff.x % step || diff.y % step) {
+		return PF_FAILED;
+	}
+	const Vec2i dir((diff.x > 0) - (diff.x < 0), (diff.y > 0) - (diff.y < 0));
+	const int nx = std::abs(diff.x) / step;
+	const int ny = std::abs(diff.y) / step;
+	const int a = std::max(nx, ny);
+	const int b = std::min(nx, ny);
+	const char diagonal = XY2Heading[dir.x + 1][dir.y + 1];
+	const char straight = nx >= ny ? XY2Heading[dir.x + 1][1] : XY2Heading[1][dir.y + 1];
+
+	std::vector<char> line;
+	Vec2i pos = startPos;
+	int e = 0;
+	bool inRange = false;
+	for (int i = 0; i < a && !inRange; ++i) {
+		char heading = straight;
+		e += b;
+		if (2 * e >= a) {
+			e -= a;
+			heading = diagonal;
+		}
+		pos.x += Heading2X[(int) heading] * step;
+		pos.y += Heading2Y[(int) heading] * step;
+		if (CostMoveTo(GetIndex(pos.x, pos.y), unit) < 0) {
+			return PF_FAILED;
+		}
+		line.push_back(heading | flag);
+		const Vec2i rest = goal - pos;
+		const int distance = isqrt(square(rest.x) + square(rest.y));
+		inRange = minrange <= distance && distance <= maxrange;
+	}
+	if (!inRange) {
+		return PF_FAILED;
+	}
+	const int length = static_cast<int>(line.size());
+	if (path) {
+		// stored as AStarSavePath does: the first steps of the way, the next one last
+		const int stored = std::min(length, pathLen);
+		for (int i = 0; i < stored; ++i) {
+			path[stored - 1 - i] = line[i];
+		}
+	}
+	return length;
 }
 
 #ifdef DEBUG
@@ -972,11 +1077,24 @@ void AStarDumpStats();
 */
 int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 				  int tilesizex, int tilesizey, int minrange, int maxrange,
-				  char *path, int pathlen, const CUnit &unit)
+				  char *path, int pathlen, const CUnit &unit, bool squareRange)
 {
 	Assert(Map.Info.IsPointOnMap(startPos));
 
 	ProfileBegin("AStarFindPath");
+
+	AStarStep = std::max<int>(1, unit.Type->GridStep);
+	AStarStart = startPos;
+	// A unit on a grid cannot stand on every tile: sent to a single tile, it has arrived on a grid
+	// tile within one tile less than its step of that tile.
+	AStarDocker = AStarStep > 1 && unit.Type->CanTransport();
+	// A transporter sent to a coast tile stands on that tile itself.
+	const bool dockPoint = AStarDocker && gw == 0 && gh == 0 && minrange == 0
+						   && Map.Info.IsPointOnMap(goalPosIn) && Map.Field(goalPosIn)->CoastOnMap();
+	const bool gridPoint = AStarStep > 1 && gw == 0 && gh == 0 && !dockPoint;
+	if (gridPoint) {
+		maxrange = std::max(maxrange, AStarStep - 1);
+	}
 
 	Vec2i goalPos = goalPosIn;
 	/*
@@ -1000,7 +1118,7 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 
 	//  Check for simple cases first
 	int ret = AStarFindSimplePath(startPos, goalPos, gw, gh, tilesizex, tilesizey,
-								  minrange, maxrange, path, unit);
+								  minrange, maxrange, path, unit, squareRange);
 	if (ret != PF_FAILED) {
 		ProfileEnd("AStarFindPath");
 		return ret;
@@ -1009,9 +1127,25 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 	//  Initialize
 	AStarCleanUp();
 
+	if (gridPoint) {
+		ret = AStarFindGridLine(startPos, goalPos, minrange, maxrange, path, pathlen, unit, AStarStep, 0);
+		if (ret != PF_FAILED) {
+			ProfileEnd("AStarFindPath");
+			return ret;
+		}
+	} else if (dockPoint && std::abs(goalPos.x - startPos.x) <= AStarStep
+			   && std::abs(goalPos.y - startPos.y) <= AStarStep) {
+		// no whole step brings it nearer: the last tiles to the coast tile are one-tile steps on the line
+		ret = AStarFindGridLine(startPos, goalPos, 0, 0, path, pathlen, unit, 1, PathShortStep);
+		if (ret != PF_FAILED) {
+			ProfileEnd("AStarFindPath");
+			return ret;
+		}
+	}
+
 	OpenSetSize = 0;
 
-	if (!AStarMarkGoal(goalPos, gw, gh, tilesizex, tilesizey, minrange, maxrange, unit)) {
+	if (!AStarMarkGoal(goalPos, gw, gh, tilesizex, tilesizey, minrange, maxrange, unit, squareRange)) {
 		// goal is not reachable
 		ret = PF_UNREACHABLE;
 		ProfileEnd("AStarFindPath");
@@ -1079,14 +1213,25 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 
 		// Node that this node was generated from.
 #ifdef DEBUG
-		Assert(AStarMatrix[o].GetDirection() >= 0 && (AStarMatrix[o].GetDirection() < 8 || (x == startPos.x && y == startPos.y)));
+		Assert(AStarMatrix[o].GetDirection() >= 0 && (AStarMatrix[o].GetDirection() != 8 || (x == startPos.x && y == startPos.y)));
 #endif
-		const int px = x - Heading2X[(int)AStarMatrix[o].GetDirection()];
-		const int py = y - Heading2Y[(int)AStarMatrix[o].GetDirection()];
+		// 8: the start tile, it came from nowhere
+		const int cameBy = AStarMatrix[o].GetDirection();
+		const int cameLength = cameBy == 8 ? 0 : PathElementLength(cameBy, AStarStep);
+		const int px = x - Heading2X[PathElementHeading(cameBy)] * cameLength;
+		const int py = y - Heading2Y[PathElementHeading(cameBy)] * cameLength;
+		const bool nodeOnGrid = AStarOnGrid(x, y);
 
-		for (int i = 0; i < 8; ++i) {
-			endPos.x = x + Heading2X[i];
-			endPos.y = y + Heading2Y[i];
+		// a transporter on a grid: the 8 whole steps, then the 8 one-tile steps
+		for (int element = 0; element < (AStarDocker ? 16 : 8); ++element) {
+			const int i = element & 7;
+			const bool shortStep = element >= 8;
+			const int length = shortStep ? 1 : AStarStep;
+			if (AStarDocker && !shortStep && !nodeOnGrid) {
+				continue;
+			}
+			endPos.x = x + Heading2X[i] * length;
+			endPos.y = y + Heading2Y[i] * length;
 
 			// Don't check the tile we came from, it's not going to be better
 			// Should reduce load on A*
@@ -1102,12 +1247,17 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 			}
 
 			//eo = GetIndex(ex, ey);
-			eo = o + Heading2X[i] + Heading2O[i];
+			eo = o + (Heading2X[i] + Heading2O[i]) * length;
 
 			if (eo < 0 || eo >= CostMoveToCache.size()) {
 				// inaccessible tile
 				continue;
 			}
+			if (shortStep && !Map.Field(eo)->CoastOnMap() && (nodeOnGrid || !AStarOnGrid(endPos.x, endPos.y))) {
+				// one tile only onto a coast tile, or from a tile off the grid back onto the grid
+				continue;
+			}
+			const int direction = shortStep ? (i | PathShortStep) : i;
 
 			// if the point is "move to"-able and
 			// if we have not reached this point before,
@@ -1125,7 +1275,7 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 				--counter;
 				// we are sure the current node has not been already visited
 				AStarMatrix[eo].SetCostFromStart(new_cost);
-				AStarMatrix[eo].SetDirection(i);
+				AStarMatrix[eo].SetDirection(direction);
 				costToGoal = AStarCosts(endPos, goalPos);
 				AStarMatrix[eo].SetCostToGoal(costToGoal);
 				if (AStarAddNode(endPos, new_cost + costToGoal) == PF_FAILED) {
@@ -1138,7 +1288,7 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 				// Already visited node, but we have here a better path
 				// I know, it's redundant (but simpler like this)
 				AStarMatrix[eo].SetCostFromStart(new_cost);
-				AStarMatrix[eo].SetDirection(i);
+				AStarMatrix[eo].SetDirection(direction);
 				// this point might be already in the OpenSet
 				const int j = AStarFindNode(eo);
 				if (j == -1) {
@@ -1258,8 +1408,9 @@ void DrawLastAStar(const CViewport& vp)
 			if (direction == 255) {
 				continue;
 			}
-			const auto nextX = x - Heading2X[direction];
-			const auto nextY = y - Heading2Y[direction];
+			const int length = direction == 8 ? 0 : PathElementLength(direction, 1);
+			const auto nextX = x - Heading2X[PathElementHeading(direction)] * length;
+			const auto nextY = y - Heading2Y[PathElementHeading(direction)] * length;
 			const auto pixel1 = vp.TilePosToScreen_Center(Vec2i(x, y));
 			const auto pixel2 = vp.TilePosToScreen_Center(Vec2i(nextX, nextY));
 

@@ -214,8 +214,7 @@ SDL_Surface *BuildHDIconStrip(const char *set)
 	}
 	// M666-9: the game's own team mask. A frame of it is grey where the picture takes the player's
 	// colour (0 elsewhere); the original's portrait is colour * grey / 255 there (fit on captures
-	// hi10 and e01 of work/agent-orig-scenes, work/agent-fix-hudrest/tools/m9_teamcolour.py:
-	// residual 2..3 levels).
+	// hi10 and e01).
 	Atlas mask;
 	const bool haveMask = LoadAtlas("Data/Art/hd/HUD/Portrait-mask.json", mask);
 	SDL_Surface *cell = haveMask ? NewRGBA(hdicon::CELL_W, hdicon::CELL_H) : nullptr;
@@ -230,9 +229,8 @@ SDL_Surface *BuildHDIconStrip(const char *set)
 		if (it == atlas.frames.end()) {
 			continue; // missing slot -> leave transparent (matches bake's missing handling)
 		}
-		// M666-2: the picture fills its cell. It was seated 18 px in (114 x 88) and the whole cell,
-		// margin included, was then stretched over the button, which made the picture 0.83..0.88 of
-		// the original's size. The frame is a separate graphic and is drawn around the picture.
+		// M666-2: the picture fills its cell. The frame is a separate graphic and is drawn around
+		// the picture.
 		const SDL_Rect dst{0, n * hdicon::CELL_H, hdicon::CELL_W, hdicon::CELL_H};
 		CopyScaled(atlas.surface, it->second, strip, dst);
 		++placed;
@@ -334,8 +332,7 @@ SDL_Surface *BuildHDSidebarPanel(const char *race, const char *frameName)
 /**
 **  The F5 menu button's three states. Each is the atlas' empty button frame (f5, f5_hovered,
 **  f5_active; 200x100) with the race's inset -- the "F5" mark and the race's figure
-**  (f5_inset_<race>; 180x80) -- laid over its middle. The frame alone is what was shown before:
-**  an empty framed slot at the head of the side bar.
+**  (f5_inset_<race>; 180x80) -- laid over its middle.
 */
 SDL_Surface *BuildHDHudF5Strip(const char *race, int cellW, int cellH)
 {

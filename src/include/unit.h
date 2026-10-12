@@ -112,6 +112,9 @@ extern void SelectedUnitChanged();
 /// Returns the map distance between to unittype as locations
 extern int MapDistanceBetweenTypes(const CUnitType &src, const Vec2i &pos1,
 								   const CUnitType &dst, const Vec2i &pos2);
+/// Returns the attack-range distance between two unittypes as locations
+extern int AttackDistanceBetweenTypes(const CUnitType &src, const Vec2i &pos1,
+									  const CUnitType &dst, const Vec2i &pos2);
 
 /**
 **  Unit/Missile headings.
@@ -290,6 +293,12 @@ public:
 
 	int MapDistanceTo(const Vec2i &pos) const;
 
+	/// The distance an attack range is compared with: the larger axis gap to dst
+	int AttackDistanceTo(const CUnit &dst) const
+	{
+		return AttackDistanceBetweenTypes(*Type, tilePos, *dst.Type, dst.tilePos);
+	}
+
 	/**
 	**  Test if unit can move.
 	**  For the moment only check for move animation.
@@ -355,8 +364,9 @@ public:
 	int Colors = -1;       /// custom colors
 	bool IndividualUpgrades[UpgradeMax]{}; /// individual upgrades which the unit has
 
-	signed char IX = 0;         /// X image displacement to map position
-	signed char IY = 0;         /// Y image displacement to map position
+	// short: a two-tile step starts 2 * PixelTileSize away, which a signed char cannot hold at 64 px per tile
+	short IX = 0;               /// X image displacement to map position
+	short IY = 0;               /// Y image displacement to map position
 	int LastPixelX = 0;         /// absolute on-map pixel pos at the previous game cycle
 	int LastPixelY = 0;         /// (render-side movement interpolation; not gameplay state)
 	int LastFrame = 0;          /// unit.Frame at the previous game cycle (render-side sprite tween)
@@ -401,8 +411,8 @@ public:
 		int         Frame = 0;              /// last seen frame/stage of buildings
 		const CUnitType *Type = nullptr;    /// Pointer to last seen unit-type
 		Vec2i tilePos{-1, -1};              /// Last unit->tilePos Seen
-		signed char IX = 0;                 /// Seen X image displacement to map position
-		signed char IY = 0;                 /// seen Y image displacement to map position
+		short IX = 0;                       /// Seen X image displacement to map position
+		short IY = 0;                       /// seen Y image displacement to map position
 		unsigned    Constructed : 1;        /// Unit seen construction
 		unsigned    State : 3;              /// Unit seen build/upgrade state
 		unsigned    Destroyed : PlayerMax;  /// Unit seen destroyed or not
@@ -602,6 +612,15 @@ extern void UnitHeadingFromDeltaXY(CUnit &unit, const Vec2i &delta);
 extern void DropOutOnSide(CUnit &unit, int heading, const CUnit *container);
 /// @todo more docu
 extern void DropOutNearest(CUnit &unit, const Vec2i &goalPos, const CUnit *container);
+
+/// How a unit that moves on a grid leaves a building
+enum class EGridExit {
+	Resource, /// a harvester with its load
+	Depot,    /// a harvester that has delivered
+	Trained   /// a new unit
+};
+/// The tile on which a unit that moves on a grid comes out of a 3x3 building, if that tile is free
+extern std::optional<Vec2i> FindGridExitTile(const CUnit &unit, const CUnit &container, EGridExit kind);
 
 /// Drop out all units in the unit
 extern void DropOutAll(const CUnit &unit);

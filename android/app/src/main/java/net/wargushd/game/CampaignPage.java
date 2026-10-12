@@ -63,6 +63,8 @@ final class CampaignPage {
     private final Bitmap[] logos = new Bitmap[2];
     private final Bitmap[] sketches = new Bitmap[4];
     private boolean loaded;
+    /** Asks for the page to be drawn again; may be called from any thread. */
+    Runnable redraw;
 
     /** Read the active profile's progress. A missing or unreadable file means none. */
     void readProgress(Context c, Profiles.Profile profile) {
@@ -129,14 +131,25 @@ final class CampaignPage {
 
     void draw(Canvas c, SkinKit kit) {
         if (!loaded) {
+            // Cut out of the atlas off the main thread: the page is drawn without its pictures
+            // first and again when they are there.
             loaded = true;
+            final SkinKit k = kit;
             final int lw = Math.round(LOGO_W * kit.unit), lh = Math.round(LOGO_H * kit.unit);
-            logos[0] = kit.atlasFrame("Modern_Graphics", "logo_tod", lw, lh);
-            logos[1] = kit.atlasFrame("Modern_Graphics", "logo_btdp", lw, lh);
             final int sw = Math.round(648f * kit.unit), sh = Math.round(1080f * kit.unit);
-            for (int i = 0; i < campaigns.length; ++i) {
-                sketches[i] = kit.atlasFrame("Modern_Graphics", campaigns[i].sketch, sw, sh);
-            }
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    logos[0] = k.atlasFrame("Modern_Graphics", "logo_tod", lw, lh);
+                    logos[1] = k.atlasFrame("Modern_Graphics", "logo_btdp", lw, lh);
+                    for (int i = 0; i < campaigns.length; ++i) {
+                        sketches[i] = k.atlasFrame("Modern_Graphics", campaigns[i].sketch, sw, sh);
+                    }
+                    if (redraw != null) {
+                        redraw.run();
+                    }
+                }
+            }, "campaign-pictures").start();
         }
 
         for (int g = 0; g < 2; ++g) {

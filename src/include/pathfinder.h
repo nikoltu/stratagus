@@ -78,12 +78,14 @@ public:
 	const Vec2i &GetGoalSize() const { return goalSize; }
 	int GetMinRange() const { return minRange; }
 	int GetMaxRange() const { return maxRange; }
+	bool IsSquareRange() const { return squareRange; }
 	bool IsRecalculateNeeded() const { return isRecalculatePathNeeded; }
 
 	void SetUnit(CUnit &_unit);
 	void SetGoal(const Vec2i &pos, const Vec2i &size);
 	void SetMinRange(int range);
-	void SetMaxRange(int range);
+	/// squareRange: the max range is the larger axis gap to the goal (an attack on a unit), not the map distance
+	void SetMaxRange(int range, bool squareRange = false);
 
 	void PathRecalculated();
 
@@ -97,6 +99,7 @@ private:
 	Vec2i goalSize{0, 0};
 	int minRange = 0;
 	int maxRange = 0;
+	bool squareRange = false;
 	bool isRecalculatePathNeeded = true;
 };
 
@@ -217,6 +220,14 @@ extern const int Heading2X[9];
 extern const int Heading2Y[9];
 extern const int XY2Heading[3][3];
 
+/// Set in a path element beside its heading: the step is one tile, whatever the unit's GridStep
+/// (a transporter going onto, along or off coast tiles).
+constexpr int PathShortStep = 16;
+/// Heading of a path element
+inline int PathElementHeading(int element) { return element & 7; }
+/// Tiles covered by a path element of a unit with the given GridStep
+inline int PathElementLength(int element, int gridStep) { return (element & PathShortStep) ? 1 : gridStep; }
+
 /*----------------------------------------------------------------------------
 --  Functions
 ----------------------------------------------------------------------------*/
@@ -229,13 +240,15 @@ extern void FreePathfinder();
 /// Returns the next element of the path
 extern std::pair<int, Vec2i> NextPathElement(CUnit &unit);
 /// Return path length to unit 'dst'.
-extern int UnitReachable(const CUnit &src, const CUnit &dst, int range, bool from_outside_container);
+extern int UnitReachable(const CUnit &src, const CUnit &dst, int range, bool from_outside_container,
+						 bool squareRange = false);
 /// Return path length to unit 'dst' or error code.
 extern int CalcPathLengthToUnit(const CUnit &src, const CUnit &dst,
-						  const int minrange, const int range);
+						  const int minrange, const int range, bool squareRange = false);
 /// Can the unit 'src' reach the place x,y
 extern int PlaceReachable(const CUnit &src, const Vec2i &pos, int w, int h,
-						  int minrange, int maxrange, bool from_outside_container);
+						  int minrange, int maxrange, bool from_outside_container,
+						  bool squareRange = false);
 
 //
 // in astar.cpp

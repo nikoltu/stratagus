@@ -640,6 +640,7 @@ public:
 
 	short TileWidth = 0;                /// Tile size on map width
 	short TileHeight = 0;               /// Tile size on map height
+	short GridStep = 1;                 /// Tiles per move step; a unit with step N rests only on tiles whose coordinates are multiples of N
 	short PersonalSpaceWidth = 0;       /// How much "personal space" the unit tries to leave in X direction
 	short PersonalSpaceHeight = 0;      /// How much "personal space" the unit tries to leave in Y direction
 	int BoxWidth = 0;                   /// Selected box size width
@@ -647,6 +648,7 @@ public:
 	PixelPos BoxOffset{0, 0};           /// Selected box size offset
 	int NumDirections = 0;              /// Number of directions unit can face
 	int MinAttackRange = 0;             /// Minimal attack range
+	int MinImpactRange = 0;             /// Nearest distance at which its missile comes down
 	int ReactRangeComputer = 0;         /// Reacts on enemy for computer
 	int ReactRangePerson = 0;           /// Reacts on enemy for person player
 	int BurnPercent = 0;                /// Burning percent.
@@ -731,6 +733,11 @@ public:
 	mutable std::string HDSpriteFile;                    /// the File the attempt was made for (HD-ART-STALE-TILESET)
 	mutable std::string HDSpritePrefix;                  /// native Remastered atlas frame prefix (e.g.
 	                                                     /// "grunt"); empty => numeric frame names (legacy .hdatlas)
+	// Classic view: the type's sprite group in the map's classic atlas, or -1. Kept apart from the
+	// HD fields; good only for the File and the atlas (CAtlasGraphic::ClassicSerial) it was asked for.
+	mutable std::string ClassicSpriteFile;
+	mutable unsigned ClassicSpriteSerial = 0;
+	mutable int ClassicSpriteGroup = -1;
 };
 
 /*----------------------------------------------------------------------------
@@ -870,6 +877,14 @@ extern std::shared_ptr<CAtlasGraphic> GetHDShadowAtlas(const CUnitType &type);
 
 extern std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building,
 														  std::string &outPrefix);
+
+/// Classic view: draw a scaffold stage of the common land construction site from the classic art,
+/// its cell centred on `centre` (the footprint centre on screen). False when it cannot be drawn so.
+extern bool DrawClassicLandSite(const CUnitType &building, int frame, const PixelPos &centre);
+
+/// Classic view: draw a flyer's shadow disc from the classic art below the unit drawn at `screenPos`.
+/// False when it cannot be drawn so.
+extern bool DrawClassicFlyerShadow(const CUnitType &type, const PixelPos &screenPos, int zDisplacement);
 
 extern void DrawUnitType(const CUnitType &type, CPlayerColorGraphic *sprite,
 						 int colorIndex, int frame, const PixelPos &screenPos);

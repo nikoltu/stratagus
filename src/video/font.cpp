@@ -257,11 +257,10 @@ void CFont::drawString(
 // blend honours it per pixel. Cached once per sheet; classic binary sheets never take this path.
 static std::map<std::pair<const CGraphic *, const CFontColor *>, SDL_Surface *> GlyphAlphaSurfaces;
 
-/// True only for a PALETTED sheet whose palette carries partial alpha, i.e. one baked with a coverage
-/// ramp. A sheet that is already RGBA is left alone on purpose: CFont::drawString converts a font to
-/// RGBA the first time a deliberately-coloured label is drawn and then colour-mods it, and that path
-/// already blends per-pixel alpha correctly. Intercepting it was what turned the dark parchment labels
-/// white in cycle 184.
+/// True only for a paletted sheet whose palette carries partial alpha, i.e. one baked with a
+/// coverage ramp. A sheet that is already RGBA is left alone on purpose: CFont::drawString converts
+/// a font to RGBA the first time a deliberately-coloured label is drawn and then colour-mods it, and
+/// that path already blends per-pixel alpha correctly.
 static bool PalettedSheetHasPartialAlpha(SDL_Surface *surf)
 {
 	if (!surf || !surf->format->palette) {
@@ -365,13 +364,9 @@ static SDL_Texture *GetGlyphColorTexture(CGraphic &g, const CFontColor &fc)
 	if (!surf->format->palette) {
 		// HUD-FACE-RGBA: the faces made on the device (FontBaker: an indexed PNG whose tRNS holds a
 		// coverage ramp) do not arrive here indexed. The PNG reader turns a palette with partly
-		// transparent entries into RGBA (third-party/SDL_image/IMG_png.c, "more than one
-		// transparent index, or translucency" -> png_set_expand; measured with the tree's own
-		// SDL_image on a sheet of the baker's form: BytesPerPixel 4, no palette --
-		// work/agent-fix-three/logs/d2_sheet_load.txt). Such a sheet had no texture, so in the HUD
-		// pass its glyphs fell to the CPU blit, which knows no glyph colour: no red food figure,
-		// no yellow message line, no dim caption, no text shadow (work/c671_e.png, c671_g.png: the
-		// "3" of "3/1" is (255, 255, 255) and no pixel 3 px down-right of the ink is black).
+		// transparent entries into RGBA (third-party/SDL_image/IMG_png.c, png_set_expand). Without
+		// a texture such a sheet's glyphs fall to the CPU blit in the HUD pass, which knows no glyph
+		// colour and no text shadow.
 		// The sheet is one picture for every font colour: one texture, under a null colour.
 		const auto rgbaKey = std::make_pair((const CGraphic *) &g, (const CFontColor *) nullptr);
 		auto found = GlyphTextures.find(rgbaKey);
@@ -1231,11 +1226,9 @@ void CFont::Load()
 	if (this->G) {
 		this->G->Load();
 		// NG84: an HD font sheet is baked at one pixel size while every layout around it scales with
-		// Video.Height, so its size relative to the HUD is wrong at every resolution but one. Scale
-		// the sheet here -- fonts load lazily, after InitVideo, so Video.Height is known even though
-		// fonts.lua itself runs before video is up. This MUST precede MeasureWidths(): the glyph
-		// width table is measured off the surface pixels, so measuring first would describe a sheet
-		// that is no longer the one being drawn.
+		// Video.Height. Scale the sheet here -- fonts load lazily, after InitVideo, so Video.Height is
+		// known even though fonts.lua itself runs before video is up. This must precede
+		// MeasureWidths(): the glyph width table is measured off the surface pixels.
 		if (this->AuthoredHeight > 0 && Video.Height > 0 && this->AuthoredScale() != 1.0) {
 			const int cellW = this->G->Width;
 			const int cellH = this->G->Height;
@@ -1251,10 +1244,9 @@ void CFont::Load()
 			}
 		}
 		this->MeasureWidths();
-		// NG84: MeasureWidths gives SPACE half a cell, because a classic fixed-pitch sheet has no
-		// other sensible answer. For an HD proportional face that is about twice the original's word
-		// gap -- measured off `ingame-human01-clean-3440x1440.png`, whose three word breaks span 9,
-		// 11 and 9 capture px (13.5-16.5 logical) against our 32. Override with the declared value,
+		// NG84: MeasureWidths gives the space half a cell, as a classic fixed-pitch sheet needs. For
+		// an HD proportional face that is about twice the original's word gap (measured:
+		// ingame-human01-clean-3440x1440.png, 13.5-16.5 logical). Override with the declared value,
 		// scaled the same way the sheet was.
 		if (this->SpaceAdvance > 0 && !this->CharWidth.empty()) {
 			const double s = this->AuthoredScale();

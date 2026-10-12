@@ -635,9 +635,7 @@ static int CclDefinePopup(lua_State *l)
 			// IG-T1: the Remastered draws its tooltip as a nine-sliced sprite, not a flat rect.
 			// TOOLTIP-FRAME-FAINT: named here, loaded by CUserInterface::Load like every other HUD
 			// picture. The scripts run before the renderer exists (stratagus.cpp: LoadCcl, then
-			// InitVideo); a picture loaded here got no GPU texture, was blitted into the CPU overlay
-			// and its translucent line lost its colour to a second alpha multiply (device capture
-			// c665_c: line adds 18,18,17 instead of the sprite's 67,66,60).
+			// InitVideo): a picture loaded here would get no GPU texture.
 			popup->BackgroundImage = CGraphic::New(std::string{LuaToString(l, -1)});
 		} else if (key == "BackgroundBorder") {
 			popup->BackgroundBorder = LuaToNumber(l, -1);
@@ -926,11 +924,10 @@ static int CclDefineButtonStyle(lua_State *l)
 	if (!b) {
 		b = std::make_unique<ButtonStyle>();
 	}
-	// Set to bogus value to see if it was set later. On EVERY definition, not only the first: a
-	// style defined again (the race's UI script is loaded more than once, and its sizes follow the
-	// screen) kept the text position and alignment of its FIRST definition for every state that
-	// does not name its own -- the HUD's "Menu" / "Pause" captions stood at the buttons' left
-	// edge, where an earlier, differently scaled definition had put them.
+	// Set to bogus value to see if it was set later. On every definition, not only the first: a
+	// style defined again (the race's UI script is loaded more than once, and its sizes follow
+	// the screen) must not keep the text position and alignment of its first definition for the
+	// states that do not name their own.
 	b->Default.TextPos.x = b->Hover.TextPos.x = b->Clicked.TextPos.x = 0xFFFFFF;
 	b->Default.TextAlign = b->Hover.TextAlign = b->Clicked.TextAlign = ETextAlignment::Undefined;
 
@@ -1394,7 +1391,7 @@ static int CclSetHideObjectivesHud(lua_State *l)
 
 /**
 **  IG-T8: pick the portrait icon style. true = "Scaled" (the whole icon drawn smaller),
-**  false = "Cropped" (the original's default, and ours).
+**  false = "Cropped" (the original's default).
 */
 static int CclSetPortraitIconScaled(lua_State *l)
 {

@@ -143,13 +143,13 @@ public:
 	bool operator()(const CUnit *unit) const
 	{
 		return unit->IsVisibleAsGoal(*attacker->Player)
-			   && IsDistanceCorrect(attacker->MapDistanceTo(*unit));
+			   && IsDistanceCorrect(attacker->MapDistanceTo(*unit), attacker->AttackDistanceTo(*unit));
 	}
 private:
-	bool IsDistanceCorrect(int distance) const
+	bool IsDistanceCorrect(int distance, int attackDistance) const
 	{
 		return attacker->Type->MinAttackRange < distance
-			   && distance <= attacker->Stats->Variables[ATTACKRANGE_INDEX].Max;
+			   && attackDistance <= attacker->Stats->Variables[ATTACKRANGE_INDEX].Max;
 	}
 private:
 	const CUnit *attacker;
@@ -354,7 +354,8 @@ bool COrder_Still::AutoAttackStand(CUnit &unit)
 	// If unit is removed, use containers x and y
 	const CUnit *firstContainer = unit.Container ? unit.Container : &unit;
 	const int dist = firstContainer->MapDistanceTo(*autoAttackUnit);
-	if (dist > unit.Stats->Variables[ATTACKRANGE_INDEX].Max	|| dist < unit.Type->MinAttackRange) {
+	if (firstContainer->AttackDistanceTo(*autoAttackUnit) > unit.Stats->Variables[ATTACKRANGE_INDEX].Max
+		|| dist < unit.Type->MinAttackRange) {
 		return false;
 	}
 	if (GameSettings.Inside && CheckObstaclesBetweenTiles(unit.tilePos, autoAttackUnit->tilePos, MapFieldRocks | MapFieldForest) == false) {

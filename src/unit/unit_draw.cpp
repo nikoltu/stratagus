@@ -43,6 +43,7 @@
 #include "actions.h"
 #include "action/action_build.h"
 #include "action/action_built.h"
+#include "action/action_resource.h"
 #include "action/action_upgradeto.h"
 #include "construct.h"
 #include "cursor.h"
@@ -235,9 +236,8 @@ void DrawSelectionCircleWithTrans(IntColor color, int x1, int y1, int x2, int y2
 **  @param x2,y2  Coordinates of the bottom right corner.
 */
 /// M666-7: the rectangle's line is one classic pixel wide, i.e. tile / 32 screen px: 3 px at tile
-/// 96 (work/agent-orig-scenes/captures e01 c25 b02 b03: columns 1871..1873 etc., outer 96 x 96 on a
-/// 1 x 1 unit), 2 px at tile 64 (work/agent-hud/captures o41, o43). The lines go inwards: the outer
-/// size is the one that was measured.
+/// 96 (captures e01 c25 b02 b03), 2 px at tile 64 (captures o41, o43). The lines go inwards: the
+/// outer size is the one that was measured.
 static void DrawSelectionOutline(IntColor color, int x1, int y1, int x2, int y2)
 {
 	const int t = std::max(1, (int) std::lround(PixelTileSize.x * GpuWorldDrawZoom / 32.0));
@@ -649,16 +649,13 @@ void CDecoVarAnimatedSprite::Draw(int x, int y, const CUnitType &/*type*/, const
 */
 /**
 **  The health bar over a unit, as the original draws it. Measured at tile 96 (k = 3) on
-**  work/agent-orig-scenes/captures i01 i02 k02 k06 k19 k20 k24 k31 k32 d05 h10 hc12
-**  (work/agent-fix-hudrest/tools/m9_bars.py), one classic pixel = tile / 32 = 3 px:
+**  captures i01 i02 k02 k06 k19 k20 k24 k31 k32 d05 h10 hc12, one classic pixel = tile / 32 = 3 px:
 **    width   = the selection rectangle's: 96 (1 x 1 units), 111 (box 37), 212 (box 71), 192 / 288 /
 **              384 (2 x 2, 3 x 3, 4 x 4 buildings and their sites)
 **    height  = 9 px = 3 classic px
-**    place   = top edge 45 px = 15 classic px above the rectangle's top (i02: bar 531, box 576;
-**              k24: 723 / 768; a 1 x 1 unit: 1107 / 1152), left edges equal
+**    place   = top edge 45 px = 15 classic px above the rectangle's top, left edges equal
 **    colours = the filled part (52, 112, 4), (252, 252, 0) or (252, 0, 0); the rest black; no
 **              border. Red at 43.75 % and 28 %, yellow at 50 %..66 %, green from 80 %.
-**  It was BoxWidth un-zoomed wide, 8 px high with a 1-px border, on the footprint's top edge.
 **  Not in evidence: the 75 % step itself, and the bar's place under "Healthbar Location: Below"
 **  (mirrored here: the same 12 classic px between bar and rectangle).
 */
@@ -779,17 +776,13 @@ static void DrawDecoration(const CUnit &unit, const CUnitType &type, const Pixel
 */
 void DrawShadow(const CUnitType &type, int frame, const PixelPos &screenPos, char zDisplacement)
 {
-	// NG82: the flying units' shadow has no sprite to draw. `ShadowDefinition` (units.lua) points
-	// at "missiles/unit_shadow.png", which vanilla Wargus EXTRACTS from shadow.grp -- an extractor
-	// WargusHD never runs, so the file does not exist, `ShadowSprite` is null, and this function
-	// used to return here for every unit. Ground units still looked right because their shadow is
-	// baked into the HD sprite art; the eight airborne types (the only ones that declare a shadow)
-	// simply had none. Measured: ground under a balloon read +11.6 BRIGHTER than plain terrain.
-	// The art ships: shadow_0/1/2 in every common atlas, three frames for the three scales those
-	// eight ask for, indexed by ShadowSpriteFrame exactly as the classic branch below indexes them.
-	// The candidate test is "declares a file-based shadow", NOT ShadowSpriteFrame != 0: the scale is
-	// stored verbatim in ShadowSpriteFrame, so eye-of-vision (scale 0) has 0 there and was skipped by
-	// the first attempt while still needing a shadow.
+	// NG82: the flying units' shadow. `ShadowDefinition` (units.lua) points at
+	// "missiles/unit_shadow.png", which does not exist in the HD data, so `ShadowSprite` is null.
+	// Ground units need none: their shadow is baked into the HD sprite art. The art for the
+	// eight airborne types ships as shadow_0/1/2 in every common atlas.
+	// The candidate test is "declares a file-based shadow", not ShadowSpriteFrame != 0: the scale is
+	// stored verbatim in ShadowSpriteFrame, so eye-of-vision (scale 0) has 0 there and still
+	// needs a shadow.
 	const bool hdShadowCandidate = !type.ShadowFile.empty();
 	if (!type.ShadowSprite && !hdShadowCandidate) {
 		return;
@@ -808,51 +801,32 @@ void DrawShadow(const CUnitType &type, int frame, const PixelPos &screenPos, cha
 	pos.x += offX;
 	pos.y += offY;
 
+	// Classic view: the dithered disc of the classic art; without it the Remastered blot is drawn.
+	if (hdShadowCandidate && IsClassicView() && DrawClassicFlyerShadow(type, screenPos, zDisplacement)) {
+		return;
+	}
+
 	// NG82: HD branch, mirroring DrawUnitType's. Draw into the same rect the classic path would
 	// have used so the offsets above are reused, not re-derived. Falls through to the classic
 	// sprite when the atlas or the frame does not resolve, and says so once per key.
 	if (hdShadowCandidate) {
 		if (std::shared_ptr<CAtlasGraphic> atlas = GetHDShadowAtlas(type)) {
 			if (atlas->IsLoaded()) {
-				// AMEND B / INV-6: ONE frame for every flying unit. The original was captured with a
-				// Dragon, a Gryphon Rider and a Gnomish Flying Machine in one frame -- FWHM 45/46/45
-				// px, identical to 1-2 px despite wildly different sprite sizes. `shadow_<scale>`
-				// selection reproduced vanilla Wargus, not the original. shadow_2 is chosen among the
-				// three identically-shaped frames only because it is the highest resolution, so
-				// scaling it down never upscales; the choice is invisible in the output.
+				// One frame for every flying unit: the original's shadows of a Dragon, a Gryphon Rider and
+				// a Gnomish Flying Machine are alike to 1-2 px (INV-6). shadow_2 is the highest resolution
+				// of the three identically shaped frames, so scaling it never upscales.
 				const char *const name = "shadow_2";
 				const int f = atlas->FrameByName(name);
 				if (f >= 0) {
-					// Size: a single measured world constant. Ours rendered 0.602 tiles FWHM against
-					// the original's 0.695 (EVIDENCE-NG82-010; the tile ruler is the engine's own
-					// 128 screen px per tile, cross-checked in both axes), so the footprint that
-					// reproduces the original is 80 * 0.695/0.602 = 92 classic px.
-					const int kShadowFootprint = 92;
-					// Neither offset comes from ShadowDefinition any more. INV-6 applies to the
-					// placement as much as to the size: the original draws ONE shadow, so it cannot
-					// be varying the offset per unit either, and measurement agrees -- its two
-					// unlike flyers sit at +1.44 and +1.51 tiles below their sprite ink centres,
-					// and +1 / +2 px horizontally.
-					//   x: no offset at all. The vanilla -3*(scale+1) displaced ours 0.29 tiles left.
-					//   y: one constant, 86 classic px. That is what the scale-2 term evaluated to
-					//      at this footprint (30 * 92/32), and it measured +1.483 tiles against the
-					//      original's +1.475 -- while the scale-1 term left the balloon 0.38 tiles
-					//      high, which is exactly the per-unit variation the original does not have.
-					// zDisplacement stays: it is engine-side, not from that table.
-					const int kShadowOffsetY = 86;
-					const float z = GpuWorldDrawZoom;
-					int hdX = -(kShadowFootprint - type.TileWidth * PixelTileSize.x) / 2
-					          + type.Offset.x;
-					int hdY = -(kShadowFootprint - type.TileHeight * PixelTileSize.y) / 2
-					          + type.Offset.y + kShadowOffsetY - 2 * zDisplacement;
-					if (z != 1.0f) {
-						hdX = (int) std::lround(hdX * z);
-						hdY = (int) std::lround(hdY * z);
-					}
-					const int d = (z == 1.0f) ? kShadowFootprint
-					                          : (int) std::lround(kShadowFootprint * z);
-					atlas->DrawAtlasFrameClipScaled(f, screenPos.x + hdX, screenPos.y + hdY,
-					                                d, d, false);
+					// Size and place: measured world constants (hdatlas::hdFlyerShadowRect), the same for
+					// every flyer; neither comes from ShadowDefinition. The place is counted from the
+					// centre of the unit's tile. zDisplacement stays: it is engine-side.
+					const hdatlas::FlyerShadowRect r =
+						hdatlas::hdFlyerShadowRect(type.TileWidth, type.TileHeight, PixelTileSize.x,
+						                           PixelTileSize.y, type.Offset.x, type.Offset.y,
+						                           zDisplacement, GpuWorldDrawZoom);
+					atlas->DrawAtlasFrameClipScaled(f, screenPos.x + r.x, screenPos.y + r.y,
+					                                r.size, r.size, false);
 					return;
 				}
 				static std::set<std::string> reportedShadowMiss;
@@ -1056,6 +1030,9 @@ static void DrawConstruction(const int player, const CConstructionFrame &cframe,
 		const int dh = (int) std::lround(type.TileHeight * PixelTileSize.y * GpuWorldDrawZoom);
 		const PixelPos topLeft(screenPos.x - dw / 2, screenPos.y - dh / 2);
 		if (cframe.File == ConstructionFileType::Construction) {
+			if (IsClassicView() && DrawClassicLandSite(type, frame, screenPos)) {
+				return;
+			}
 			std::string prefix;
 			std::shared_ptr<CAtlasGraphic> atlas = GetHDConstructionAtlas(type, prefix);
 			if (atlas && atlas->IsLoaded()) {
@@ -1245,8 +1222,16 @@ void CUnit::Draw(const CViewport &vp) const
 		// carry sprite once the load is full (i.e. actually hauling it home). Non-terrain
 		// harvesters (gold/mine) are only ever drawn while carrying, so their behaviour is
 		// unchanged by requiring a full load.
+		// A load below the full one is carried too once the chopping is over (the tile ran out
+		// under the axe, or the worker was sent elsewhere with what it had): only a worker still
+		// at its tree is drawn with empty hands.
+		bool chopping = false;
+		if (resinfo->TerrainHarvester && this->CurrentAction() == UnitAction::Resource) {
+			const COrder_Resource &order = *static_cast<const COrder_Resource *>(this->CurrentOrder());
+			chopping = !order.IsGatheringFinished();
+		}
 		const bool carrying = resinfo->TerrainHarvester
-			? (this->ResourcesHeld >= resinfo->ResourceCapacity)
+			? (this->ResourcesHeld > 0 && !chopping)
 			: (this->ResourcesHeld > 0);
 		if (carrying) {
 			if (resinfo->SpriteWhenLoaded) {
