@@ -163,12 +163,22 @@ void COrder_Attack::Save(CFile &file, const CUnit &unit) const /* override */
 	}
 	file.printf(" \"range\", %d,", this->Range);
 	file.printf(" \"min-range\", %d,", this->MinRange);
+	// After "range": its reader gives a skirmisher the range, anything else 0.
+	if (this->SkirmishRange != (unit.Type->BoolFlag[SKIRMISHER_INDEX].value ? this->Range : 0)) {
+		file.printf(" \"skirmish-range\", %d,", this->SkirmishRange);
+	}
+	if (this->Sleep != 0) {
+		file.printf(" \"sleep\", %d,", this->Sleep);
+	}
 
 	if (this->Finished) {
 		file.printf(" \"finished\", ");
 	}
 	if (this->HasGoal()) {
 		file.printf(" \"goal\", \"%s\",", UnitReference(*this->GetGoal()).c_str());
+	}
+	if (this->offeredTarget != nullptr) {
+		file.printf(" \"offered-target\", \"%s\",", UnitReference(*this->offeredTarget).c_str());
 	}
 	file.printf(" \"tile\", {%d, %d},", this->goalPos.x, this->goalPos.y);
 	file.printf(" \"amove-tile\", {%d, %d},", this->attackMovePos.x, this->attackMovePos.y);
@@ -194,6 +204,17 @@ bool COrder_Attack::ParseSpecificData(lua_State *l,
 		if (unit.Type->BoolFlag[SKIRMISHER_INDEX].value) {
 			this->SkirmishRange = this->Range;
 		}
+	} else if (value == "skirmish-range") {
+		++j;
+		this->SkirmishRange = LuaToNumber(l, -1, j + 1);
+	} else if (value == "sleep") {
+		++j;
+		this->Sleep = LuaToNumber(l, -1, j + 1);
+	} else if (value == "offered-target") {
+		++j;
+		lua_rawgeti(l, -1, j + 1);
+		this->offeredTarget = CclGetUnitFromRef(l);
+		lua_pop(l, 1);
 	} else if (value == "tile") {
 		++j;
 		lua_rawgeti(l, -1, j + 1);

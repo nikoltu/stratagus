@@ -38,6 +38,7 @@
 #include "missile.h"
 
 #include "map.h"
+#include "missile_cadence.h"
 
 /**
 **  Whirlwind controller
@@ -61,7 +62,7 @@ void MissileWhirlwind::Action() /* override */
 	const PixelPos centerOffset(PixelTileSize.x / 2, PixelTileSize.y);
 	const Vec2i center = Map.MapPixelPosToTilePos(pixelCenter + centerOffset);
 
-	if (!(this->TTL % CYCLES_PER_SECOND / 10)) {
+	if (WhirlwindHitsOn(this->TTL)) {
 		this->MissileHit();
 	}
 	// Changes direction every 3 seconds (approx.)

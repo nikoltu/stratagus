@@ -514,6 +514,7 @@ extern bool LuaToBoolean(lua_State *l, int index, int subIndex);
 
 extern void LuaGarbageCollect();  /// Perform garbage collection
 extern void InitLua();                /// Initialise Lua
+extern void RestrictLuaLibraries(lua_State *l);  /// Close the library parts no script needs
 extern void LoadCcl(const fs::path &filename, const std::string &luaArgStr = "");  /// Load ccl config file
 extern void SavePreferences();        /// Save user preferences
 extern int CclCommand(const std::string &command, bool exitOnError = true);

@@ -40,6 +40,7 @@
 #include "animation.h"
 #include "commands.h"
 #include "construct.h"
+#include "home_leash.h"
 #include "interface.h"
 #include "map.h"
 #include "netconnect.h"
@@ -363,9 +364,17 @@ static int CclUnit(lua_State *l)
 		++j;
 
 		if (value == "type") {
-			type = &UnitTypeByIdent(LuaToString(l, 2, j + 1));
+			// A type this build does not have (a save made with other content) refuses the file
+			// instead of ending the process.
+			type = UnitTypeByIdentOrNull(LuaToString(l, 2, j + 1));
+			if (type == nullptr) {
+				LuaError(l, "Saved unit of an unknown type '%s'", LuaToString(l, 2, j + 1).data());
+			}
 		} else if (value == "seen-type") {
-			seentype = &UnitTypeByIdent(LuaToString(l, 2, j + 1));
+			seentype = UnitTypeByIdentOrNull(LuaToString(l, 2, j + 1));
+			if (seentype == nullptr) {
+				LuaError(l, "Saved unit of an unknown type '%s'", LuaToString(l, 2, j + 1).data());
+			}
 		} else if (value == "player") {
 			player = &Players[LuaToNumber(l, 2, j + 1)];
 
@@ -468,6 +477,18 @@ static int CclUnit(lua_State *l)
 			--j;
 		} else if (value == "rescued-from") {
 			unit->RescuedFrom = &Players[LuaToNumber(l, 2, j + 1)];
+		} else if (value == "take-over") {
+			unit->TakeOver = LuaToNumber(l, 2, j + 1);
+		} else if (value == "map-fixed") {
+			unit->MapFixed = LuaToNumber(l, 2, j + 1);
+		} else if (value == "home") {
+			lua_rawgeti(l, 2, j + 1);
+			CclGetPos(l, &unit->HomePos, -1);
+			lua_pop(l, 1);
+			// A file written before roles were saved: a unit with a home was a guard.
+			unit->HomeRole = HomeRoleOnLoad(unit->HomePos.x >= 0, false, 0);
+		} else if (value == "home-role") {
+			unit->HomeRole = HomeRoleOnLoad(unit->HomePos.x >= 0, true, LuaToNumber(l, 2, j + 1));
 		} else if (value == "seen-by-player") {
 			const std::string_view s = LuaToString(l, 2, j + 1);
 			unit->Seen.ByPlayer = 0;
@@ -505,6 +526,15 @@ static int CclUnit(lua_State *l)
 		} else if (value == "threshold") {
 			// FIXME : unsigned long should be better handled
 			unit->Threshold = LuaToNumber(l, 2, j + 1);
+		} else if (value == "under-attack") {
+			unit->UnderAttack = LuaToNumber(l, 2, j + 1);
+		} else if (value == "just-moved") {
+			unit->JustMoved = LuaToNumber(l, 2, j + 1);
+		} else if (value == "z-displaced") {
+			unit->ZDisplaced = 1;
+			--j;
+		} else if (value == "colors") {
+			unit->Colors = LuaToNumber(l, 2, j + 1);
 		} else if (value == "group-id") {
 			unit->GroupId = LuaToNumber(l, 2, j + 1);
 		} else if (value == "last-group") {
@@ -908,6 +938,27 @@ static int CclDamageUnit(lua_State *l)
 	HitUnit(attackerUnit, *targetUnit, damage);
 
 	return 1;
+}
+
+/**
+**  Mark a unit as placed by the map with a non-zero data word (the original's fixed unit)
+**
+**  @param l  Lua state.
+*/
+static int CclSetUnitMapFixed(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+
+	if (lua_isnil(l, 1)) {
+		return 0;
+	}
+
+	lua_pushvalue(l, 1);
+	CUnit *unit = CclGetUnit(l);
+	lua_pop(l, 1);
+	SetUnitMapFixed(*unit);
+
+	return 0;
 }
 
 /**
@@ -1355,6 +1406,12 @@ static int CclGetUnitVariable(lua_State *l)
 	} else if (value == "Idle") {
 		lua_pushboolean(l, unit->IsIdle());
 		return 1;
+	} else if (value == "HomeRole") {
+		// For checks through the debug bridge: the role, and the home tile or the place held to.
+		lua_pushnumber(l, unit->HomeRole);
+		lua_pushnumber(l, unit->HomePos.x);
+		lua_pushnumber(l, unit->HomePos.y);
+		return 3;
 	} else if (value == "PixelPos") {
 		PixelPos pos = unit->GetMapPixelPosCenter();
 		lua_newtable(l);
@@ -1696,6 +1753,7 @@ void UnitCclRegister()
 	lua_register(Lua, "TransformUnit", CclTransformUnit);
 	lua_register(Lua, "DamageUnit", CclDamageUnit);
 	lua_register(Lua, "SetResourcesHeld", CclSetResourcesHeld);
+	lua_register(Lua, "SetUnitMapFixed", CclSetUnitMapFixed);
 	lua_register(Lua, "SetTeleportDestination", CclSetTeleportDestination);
 	lua_register(Lua, "OrderUnit", CclOrderUnit);
 	lua_register(Lua, "KillUnit", CclKillUnit);

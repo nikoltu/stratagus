@@ -236,15 +236,33 @@ unsigned char VolumeForDistance(unsigned short d, unsigned char range)
 }
 
 /**
+**  Stereo position of a sound heard at a map pixel column.
+**
+**  @param x          map pixel column of the sound's source
+**  @param viewX      map pixel column of the viewport's left edge
+**  @param viewWidth  width the viewport pans over, in map pixels
+**
+**  @return           -128 (left edge) .. 127 (right edge), clamped outside the viewport
+*/
+int StereoForMapPixel(int x, int viewX, int viewWidth)
+{
+	if (viewWidth <= 0) {
+		return 0;
+	}
+	int stereo = (x - viewX) * 256 / viewWidth - 128;
+	clamp(&stereo, -128, 127);
+	return stereo;
+}
+
+/**
 **  Calculate the stereo value for a unit
 */
 static char CalculateStereo(const CUnit &unit)
 {
-	int stereo = ((unit.tilePos.x * PixelTileSize.x + unit.Type->TileWidth * PixelTileSize.x / 2 +
-				   unit.IX - UI.SelectedViewport->MapPos.x * PixelTileSize.x) * 256 /
-				  ((UI.SelectedViewport->MapWidth - 1) * PixelTileSize.x)) - 128;
-	clamp(&stereo, -128, 127);
-	return stereo;
+	return StereoForMapPixel(unit.tilePos.x * PixelTileSize.x
+	                             + unit.Type->TileWidth * PixelTileSize.x / 2 + unit.IX,
+	                         UI.SelectedViewport->MapPos.x * PixelTileSize.x,
+	                         (UI.SelectedViewport->MapWidth - 1) * PixelTileSize.x);
 }
 
 /**
@@ -329,10 +347,11 @@ void PlayMissileSound(const Missile &missile, CSound *sound)
 	if (!sound) {
 		return;
 	}
-	int stereo = ((missile.position.x + (missile.Type->G ? missile.Type->G->Width / 2 : 0) +
-				   UI.SelectedViewport->MapPos.x * PixelTileSize.x) * 256 /
-				  ((UI.SelectedViewport->MapWidth - 1) * PixelTileSize.x)) - 128;
-	clamp(&stereo, -128, 127);
+	// relative to the viewport's left edge, as for a unit
+	const int stereo =
+		StereoForMapPixel(missile.position.x + (missile.Type->G ? missile.Type->G->Width / 2 : 0),
+	                      UI.SelectedViewport->MapPos.x * PixelTileSize.x,
+	                      (UI.SelectedViewport->MapWidth - 1) * PixelTileSize.x);
 
 	Origin source = {nullptr, 0};
 	const unsigned char volume =

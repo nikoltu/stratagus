@@ -39,13 +39,22 @@ final class PudInfo {
     /** Facts already read in this process, by path, size and time of change. */
     private static final java.util.Map<String, PudInfo> KNOWN = new java.util.HashMap<String, PudInfo>();
 
-    /** As read, but a file that has not changed since it was last read is not opened again. */
+    /**
+     * As read, but a file that has not changed since it was last read is not opened again.
+     * Safe for two threads; the file is read outside the lock, so one thread never waits for
+     * the other's reading.
+     */
     static PudInfo of(java.io.File f) {
         final String key = f.getPath() + "|" + f.length() + "|" + f.lastModified();
-        PudInfo facts = KNOWN.get(key);
+        PudInfo facts;
+        synchronized (KNOWN) {
+            facts = KNOWN.get(key);
+        }
         if (facts == null) {
             facts = read(f);
-            KNOWN.put(key, facts);
+            synchronized (KNOWN) {
+                KNOWN.put(key, facts);
+            }
         }
         return facts;
     }

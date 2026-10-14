@@ -39,6 +39,7 @@
 
 #include "actions.h"
 #include "map.h"
+#include "missile_cadence.h"
 #include "unit.h"
 
 struct LandMineTargetFinder {
@@ -60,8 +61,6 @@ struct LandMineTargetFinder {
 
 /**
 **  Land mine controller.
-**  @todo start-finish-start cyclic animation.(anim scripts!)
-**  @todo missile should disappear for a while.
 */
 void MissileLandMine::Action() /* override */
 {
@@ -73,9 +72,12 @@ void MissileLandMine::Action() /* override */
 		this->TTL = 0;
 		return;
 	}
-	if (!this->AnimWait--) {
-		this->NextMissileFrame(1, 0);
-		this->AnimWait = this->Type->Sleep;
+	// Seen only as a flash on every 256th cycle of its life (RuneFlashPicture); between the
+	// flashes it is not drawn. The step test above comes first: a rune that is not drawn goes off.
+	const int picture = RuneFlashPicture(RuneFlashPhase(this->TTL));
+	this->Hidden = picture < 0 ? 1 : 0;
+	if (picture >= 0) {
+		this->SpriteFrame = std::min(picture, std::max(0, this->Type->SpriteFrames - 1));
 	}
 	this->Wait = 1;
 }

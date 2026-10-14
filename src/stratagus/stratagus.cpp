@@ -421,9 +421,9 @@ void Exit(int err)
 	FreeButtonStyles();
 	DeInitOnlineService();
 	freeGuichan();
-	fprintf(stdout, "Frames %lu, Slow frames %ld = %ld%%\n",
+	fprintf(stdout, "Frames %lu, Slow frames %ld = %ld%%, Long frames %lu\n",
 			   FrameCounter, SlowFrameCounter,
-			   (SlowFrameCounter * 100) / (FrameCounter ? FrameCounter : 1));
+			   (SlowFrameCounter * 100) / (FrameCounter ? FrameCounter : 1), LongFrameCounter);
 	lua_settop(Lua, 0);
 	lua_close(Lua);
 

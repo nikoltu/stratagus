@@ -62,6 +62,9 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#include <SDL_image.h>
 
 /*----------------------------------------------------------------------------
 -- Documentation
@@ -927,15 +930,27 @@ static void LoadHDUnitMap()
 
 // Shared native atlas cache: many unit types map to the same atlas (e.g. every human land unit ->
 // units_human_common_sprites), so load each atlas once and share the pointer.
-static std::shared_ptr<CAtlasGraphic> GetSharedNativeAtlas(const std::string &stem, bool teamMask = false)
+static std::unordered_map<std::string, std::shared_ptr<CAtlasGraphic>> &NativeAtlasCache()
 {
 	static std::unordered_map<std::string, std::shared_ptr<CAtlasGraphic>> cache;
+	return cache;
+}
+
+// decoded: the atlas page decoded ahead by the preload (taken and freed here), or null.
+static std::shared_ptr<CAtlasGraphic> GetSharedNativeAtlas(const std::string &stem, bool teamMask = false,
+                                                           const AtlasPageDecode *decoded = nullptr)
+{
+	auto &cache = NativeAtlasCache();
 	auto it = cache.find(stem);
 	if (it != cache.end()) {
+		if (decoded && decoded->surface) {
+			SDL_FreeSurface(decoded->surface);
+		}
 		return it->second;
 	}
 	auto atlas = std::make_shared<CAtlasGraphic>();
-	if (!atlas->LoadTexturePacker("Data/Art/hd/unit/" + stem + ".json", teamMask)) {
+	if (!atlas->LoadTexturePacker("Data/Art/hd/unit/" + stem + ".json", teamMask, false, nullptr, false,
+	                              nullptr, nullptr, nullptr, decoded)) {
 		atlas.reset(); // remember the failure (null) so we don't retry every unit
 	}
 	cache[stem] = atlas;
@@ -949,6 +964,14 @@ std::shared_ptr<CAtlasGraphic> GetSharedHDAtlas(const std::string &stem)
 	return GetSharedNativeAtlas(stem);
 }
 
+// The answers of ResolveHDForFile, per sprite path (a function-local map until the release below
+// had to reach it).
+static std::map<std::string, std::pair<std::shared_ptr<CAtlasGraphic>, std::string>> &HDFileCache()
+{
+	static std::map<std::string, std::pair<std::shared_ptr<CAtlasGraphic>, std::string>> cache;
+	return cache;
+}
+
 // NG15/NG22: resolve the HD atlas+prefix for an ARBITRARY sprite path. The per-type cache below is
 // keyed on type.File, which is correct for the unit's own sprite but wrong for the CARRY sprites: a
 // loaded worker is drawn from resinfo->SpriteWhenLoaded (peasant_with_gold.png / _with_wood.png),
@@ -960,7 +983,7 @@ static bool ResolveHDForFile(const std::string &file,
                              std::shared_ptr<CAtlasGraphic> &outSprite,
                              std::string &outPrefix)
 {
-	static std::map<std::string, std::pair<std::shared_ptr<CAtlasGraphic>, std::string>> cache;
+	auto &cache = HDFileCache();
 	if (file.size() < 4 || file.compare(file.size() - 4, 4, ".png") != 0) {
 		return false;
 	}
@@ -1671,6 +1694,134 @@ void LoadUnitTypes()
 	}
 }
 
+/// Worker threads of the HD preload; 0 = every atlas is decoded on the main thread, one by one.
+static int HDPreloadWorkers = 2;
+/// Decoded pages that may exist at one time, in decode, waiting or in upload (a common page is
+/// about 240 MB, so every step up costs that much at the peak).
+static int HDPreloadWindow = 2;
+static constexpr int HDPreloadWindowMax = 4;
+
+void SetHDPreloadWorkers(int count)
+{
+	HDPreloadWorkers = count < 0 ? 0 : (count > HDPreloadWindowMax ? HDPreloadWindowMax : count);
+}
+
+void SetHDPreloadWindow(int count)
+{
+	HDPreloadWindow = count < 1 ? 1 : (count > HDPreloadWindowMax ? HDPreloadWindowMax : count);
+}
+
+/// The threads the preload starts: a thread more than the window allows pages would only wait.
+static int HDPreloadWorkersInUse()
+{
+	return HDPreloadWorkers > HDPreloadWindow ? HDPreloadWindow : HDPreloadWorkers;
+}
+
+/**
+**  The preload with the pages decoded on worker threads: the same atlases as the plain loop, put
+**  into the cache by the main thread in the same order. A worker reads and decodes a page file
+**  and nothing else; the frame table and the upload stay on the main thread.
+**
+**  @return  the number of atlases of the list.
+*/
+static int PreloadHDArtDecodedAhead(const std::string &biome, const std::set<std::string> &races)
+{
+	struct Job {
+		std::string stem;
+		std::string label;
+		bool teamMask;
+		fs::path png;
+	};
+	std::vector<Job> list;
+	list.push_back({"units_common_" + biome + "_sprites", "units_common_" + biome, false, {}});
+	for (const std::string &race : races) {
+		for (const std::string &group : {std::string("common"), biome}) {
+			const std::string stem = "units_" + race + "_" + group;
+			list.push_back({stem + "_sprites", stem, false, {}});
+			list.push_back({stem + "_masks", stem, true, {}});
+		}
+	}
+	// Only what the cache does not hold is decoded; the search roots are read here, not by a worker.
+	std::vector<Job> jobs;
+	for (Job &job : list) {
+		if (NativeAtlasCache().count(job.stem)) {
+			continue;
+		}
+		const fs::path json = LibraryFileName("Data/Art/hd/unit/" + job.stem + ".json");
+		if (!json.empty()) {
+			job.png = json;
+			job.png.replace_extension(".png");
+		}
+		jobs.push_back(job);
+	}
+	IMG_Init(IMG_INIT_PNG); // not first called by two workers at once
+	hdatlas::runOrdered<AtlasPageDecode>(
+		(int) jobs.size(), HDPreloadWorkersInUse(), HDPreloadWindow, 100,
+		[&jobs](int i) {
+			const Job &job = jobs[i];
+			return job.png.empty() ? AtlasPageDecode() : DecodeAtlasPage(job.png, job.teamMask, false, false);
+		},
+		[&jobs](int i, AtlasPageDecode page) {
+			const Job &job = jobs[i];
+			ShowLoadProgress("%s", job.label.c_str());
+			// Without a page the atlas goes the plain way and fails or loads as it would there.
+			GetSharedNativeAtlas(job.stem, job.teamMask, page.surface ? &page : nullptr);
+			NetworkLoadingPing(); // LAN: alive between two atlases
+		},
+		[&jobs](int i) {
+			NetworkLoadingPing();
+			ShowLoadProgress("%s", jobs[i].label.c_str());
+		});
+	return (int) list.size();
+}
+
+/**
+**  HD-ATLAS-CACHE-GROWS: one process plays several missions and the cache kept the pages of every
+**  biome it had seen. The atlases of the other biomes are let go here, before the first page of
+**  the present biome is decoded, so the two sets are never held together. A race's common pages
+**  stay. Everything that points at a dropped atlas is cleared first, and a unit type is marked
+**  "not tried", so its next draw resolves again for the File it has then (HD-ART-STALE-TILESET).
+**  The textures are destroyed with the last pointer: here, on the main thread, during loading.
+*/
+static void ReleaseHDArtOfOtherBiomes(const std::string &biome)
+{
+	auto &cache = NativeAtlasCache();
+	std::set<const CAtlasGraphic *> dropped;
+	int count = 0;
+	for (auto it = cache.begin(); it != cache.end();) {
+		if (hdatlas::stemIsOfOtherBiome(it->first, biome)) {
+			if (it->second) {
+				dropped.insert(it->second.get());
+				++count;
+			}
+			it = cache.erase(it); // a remembered failure goes too: asked again when that biome returns
+		} else {
+			++it;
+		}
+	}
+	if (!dropped.empty()) {
+		for (CUnitType *type : UnitTypes) {
+			if (dropped.count(type->HDSprite.get()) || dropped.count(type->HDSpriteTeam.get())) {
+				type->HDSprite.reset();
+				type->HDSpriteTeam.reset();
+				type->HDSpritePrefix.clear();
+				type->HDSpriteFile.clear();
+				type->HDSpriteTried = false;
+			}
+		}
+		auto &files = HDFileCache();
+		for (auto it = files.begin(); it != files.end();) {
+			if (dropped.count(it->second.first.get())) {
+				it = files.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+	ReleaseHDMissileArtOfOtherBiomes();
+	ErrorPrint("HD release: %d atlases of other biomes, cache now %d\n", count, (int) cache.size());
+}
+
 /**
 **  STUTTER-FIRST-DRAW-LOAD: load the native HD atlases this map will draw from while the loading
 **  screen is up, so that no atlas is decoded and uploaded in the middle of a frame at the first
@@ -1695,23 +1846,31 @@ void PreloadHDArtForMap()
 			races.insert(race);
 		}
 	}
+	ReleaseHDArtOfOtherBiomes(biome); // before the first decode: the peak is one biome's set
 	const unsigned long start = GetTicks();
 	int count = 0;
-	GetSharedNativeAtlas("units_common_" + biome + "_sprites");
-	++count;
-	for (const std::string &race : races) {
-		for (const std::string &group : {std::string("common"), biome}) {
-			const std::string stem = "units_" + race + "_" + group;
-			ShowLoadProgress("%s", stem.c_str());
-			GetSharedNativeAtlas(stem + "_sprites");
-			NetworkLoadingPing(); // LAN: alive between two atlases
-			GetSharedNativeAtlas(stem + "_masks", /*teamMask=*/true);
-			NetworkLoadingPing();
-			count += 2;
+	if (HDPreloadWorkers > 0) {
+		count = PreloadHDArtDecodedAhead(biome, races);
+	} else {
+		GetSharedNativeAtlas("units_common_" + biome + "_sprites");
+		++count;
+		for (const std::string &race : races) {
+			for (const std::string &group : {std::string("common"), biome}) {
+				const std::string stem = "units_" + race + "_" + group;
+				ShowLoadProgress("%s", stem.c_str());
+				GetSharedNativeAtlas(stem + "_sprites");
+				NetworkLoadingPing(); // LAN: alive between two atlases
+				GetSharedNativeAtlas(stem + "_masks", /*teamMask=*/true);
+				NetworkLoadingPing();
+				count += 2;
+			}
 		}
 	}
-	ErrorPrint("HD preload: %d atlases for biome '%s', %d race(s), %lu ms\n",
-	           count, biome.c_str(), (int) races.size(), GetTicks() - start);
+	// The time is the wall time of the whole preload; with workers the read+decode and convert
+	// columns of the ATLAS load lines overlap and add up to more than it.
+	ErrorPrint("HD preload: %d atlases for biome '%s', %d race(s), %lu ms, %d worker(s), window %d\n",
+	           count, biome.c_str(), (int) races.size(), GetTicks() - start, HDPreloadWorkersInUse(),
+	           HDPreloadWindow);
 }
 
 void CUnitTypeVar::Init()

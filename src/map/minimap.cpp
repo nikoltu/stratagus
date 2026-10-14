@@ -170,6 +170,17 @@ void CMinimap::Create()
 	NumMinimapEvents = 0;
 }
 
+/// The tileset sheet has no such tile (a sheet with fewer tiles than the map uses): said once,
+/// the minimap pixel is left black.
+static void ReportTilePastSheet(int tile)
+{
+	static bool reported = false;
+	if (!reported) {
+		reported = true;
+		ErrorPrint("Minimap: tile %d is past the end of the tileset sheet, drawn black\n", tile);
+	}
+}
+
 /**
 **  Calculate the tile graphic pixel
 */
@@ -317,8 +328,15 @@ static bool ClassicMinimapReady()
 
 static Uint32 ClassicTilePixel(int megatile, int slotX, int slotY)
 {
-	const int idx = megatile - g_hdmm.base;
-	if (idx < 0 || idx >= (int) g_hdmm.tiles.size()) {
+	const int idx = hdatlas::classicMinimapRecord(megatile, g_hdmm.base, (int) g_hdmm.tiles.size());
+	if (idx < 0 || slotX < 0 || slotX > 3 || slotY < 0 || slotY > 3) {
+		// A tile the colour file has no record for: black, said once.
+		static bool reported = false;
+		if (!reported) {
+			reported = true;
+			ErrorPrint("Minimap: tile %d has no record in the classic colours (%d records), drawn black\n",
+			           megatile, (int) g_hdmm.tiles.size());
+		}
 		return 0;
 	}
 	const uint8_t *c = g_hdmm.classicPal[g_hdmm.tiles[idx][slotY * 4 + slotX]];
@@ -378,6 +396,7 @@ void CMinimap::UpdateTerrain()
 	}
 
 	const int tilepitch = Map.TileGraphic->getSurface()->w / PixelTileSize.x;
+	const int tilerows = PixelTileSize.y > 0 ? Map.TileGraphic->getSurface()->h / PixelTileSize.y : 0;
 
 	// WargusHD: when terrain is drawn from the native Remastered HD atlas, the classic tileset sheet
 	// is a 1-frame placeholder (missing classic PNG). Sampling per-tile pixels from it (tile indices
@@ -415,6 +434,11 @@ void CMinimap::UpdateTerrain()
 	for (int my = YOffset; my < SurfaceH - YOffset; ++my) {
 		for (int mx = XOffset; mx < SurfaceW - XOffset; ++mx) {
 			const int tile = Map.Fields[Minimap2MapX[mx] + Minimap2MapY[my]].getGraphicTile();
+			if (!hdatlas::tileSheetHolds(tile, tilepitch, tilerows)) {
+				ReportTilePastSheet(tile);
+				PutMinimapPixel(MinimapTerrainSurface, mx, my, 0);
+				continue;
+			}
 			const int xofs = PixelTileSize.x * (tile % tilepitch);
 			const int yofs = PixelTileSize.y * (tile / tilepitch);
 
@@ -531,6 +555,7 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 	}
 
 	const int tilepitch = Map.TileGraphic->getSurface()->w / PixelTileSize.x;
+	const int tilerows = PixelTileSize.y > 0 ? Map.TileGraphic->getSurface()->h / PixelTileSize.y : 0;
 	const int bpp = Map.TileGraphic->getSurface()->format->BytesPerPixel;
 
 	//
@@ -561,6 +586,11 @@ void CMinimap::UpdateXY(const Vec2i &pos)
 			int tile = Map.Fields[x + y].playerInfo.SeenTile;
 			if (!tile) {
 				tile = Map.Fields[x + y].getGraphicTile();
+			}
+			if (!hdatlas::tileSheetHolds(tile, tilepitch, tilerows)) {
+				ReportTilePastSheet(tile);
+				PutMinimapPixel(MinimapTerrainSurface, mx, my, 0);
+				continue;
 			}
 
 			const int xofs = PixelTileSize.x * (tile % tilepitch);
@@ -620,11 +650,14 @@ static void DrawUnitOn(const CUnit &unit, int red_phase, int scaleX, int scaleY)
 	int mx = 1 + UI.Minimap.XOffset + Map2MinimapX[unit.tilePos.x];
 	int my = 1 + UI.Minimap.YOffset + Map2MinimapY[unit.tilePos.y];
 	// The loops below draw w + 1 by h0 + 1 pixels from the pixel of the unit's own tile.
-	int w = hdatlas::minimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC) - 1;
+	const bool classic = ClassicHudActive();
+	int w = (classic ? hdatlas::classicMinimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC)
+					 : hdatlas::minimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC)) - 1;
 	if (mx + w >= SurfaceW) { // clip right side
 		w = SurfaceW - mx;
 	}
-	int h0 = hdatlas::minimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC) - 1;
+	int h0 = (classic ? hdatlas::classicMinimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC)
+					  : hdatlas::minimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC)) - 1;
 	if (my + h0 >= SurfaceH) { // clip bottom side
 		h0 = SurfaceH - my;
 	}
@@ -856,6 +889,8 @@ void CMinimap::DrawViewportArea(const CViewport &viewport, int alpha) const
 		// Classic view: the size by the whole tiles of the logical view
 		// (hdatlas::classicMinimapViewPixels: 104 x 92 on a 32-tile map, 25 x 23 on a 96-tile one
 		// at 776 x 582), a line of one classic pixel = step.
+		// Colour 252, 248, 240 (o11_13 and the other captures of the classic minimap).
+		const Uint32 colour = Video.MapRGB(TheScreen->format, 252, 248, 240);
 		const int line = hdatlas::classicStep(Video.Height);
 		const hdatlas::ClassicRect lv = hdatlas::classicView(hdatlas::classicScreen(Video.Width, Video.Height));
 		const int cw = MinimapStep * hdatlas::classicMinimapViewPixels(
@@ -863,7 +898,7 @@ void CMinimap::DrawViewportArea(const CViewport &viewport, int alpha) const
 		const int ch = MinimapStep * hdatlas::classicMinimapViewPixels(
 						   std::min(lv.h, Map.Info.MapHeight * hdatlas::ClassicTilePx), n);
 		for (int i = 0; i < line && cw - 2 * i > 0 && ch - 2 * i > 0; ++i) {
-			Video.DrawTransRectangle(UI.ViewportCursorColor, x + i, y + i, cw - 2 * i, ch - 2 * i, alpha);
+			Video.DrawTransRectangle(colour, x + i, y + i, cw - 2 * i, ch - 2 * i, alpha);
 		}
 		return;
 	}

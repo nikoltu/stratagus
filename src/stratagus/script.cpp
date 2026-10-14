@@ -46,6 +46,12 @@
 #include "ui.h"
 #include "unit.h"
 
+#ifdef __ANDROID__
+#include "debug_bridge.h"
+
+#include <cstdlib>
+#endif
+
 #include <optional>
 #include <set>
 #include <signal.h>
@@ -127,7 +133,17 @@ static int report(int status, bool exitOnError)
 		}
 		ErrorPrint("%s\n", msg);
 		if (exitOnError) {
+#ifdef __ANDROID__
+			// See Exit() / ExitFatal(): exit() runs the static destructors while Android's hwuiTask
+			// render thread still runs, which ends in a FORTIFY destroyed-mutex SIGABRT instead of
+			// the script error. Leave the record of the error, then end without them.
+			DebugBridge_RecordFatal("lua", msg);
+			fflush(stdout);
+			fflush(stderr);
+			std::_Exit(1);
+#else
 			::exit(1);
+#endif
 		} else {
 			lua_pushstring(Lua, msg);
 			lua_setglobal(Lua, "__last_error__");
@@ -137,17 +153,15 @@ static int report(int status, bool exitOnError)
 	return status;
 }
 
+/// Registry key of the trace-back function: kept there by InitLua so that the error report does
+/// not depend on a global a script can reach, replace or lose.
+static const char LuaTracebackKey[] = "stratagus.traceback";
+
 static int luatraceback(lua_State *L)
 {
-	lua_getglobal(L, "debug");
-	if (!lua_istable(L, -1)) {
-		lua_pop(L, 1);
-		return 1;
-	}
-	lua_pushliteral(L, "traceback");
-	lua_gettable(L, -2);
+	lua_getfield(L, LUA_REGISTRYINDEX, LuaTracebackKey);
 	if (!lua_isfunction(L, -1)) {
-		lua_pop(L, 2);
+		lua_pop(L, 1);
 		return 1;
 	}
 	lua_pushvalue(L, 1);  // pass error message
@@ -2026,6 +2040,49 @@ int CclCommand(const std::string &command, bool exitOnError)
 extern int tolua_stratagus_open(lua_State *tolua_S);
 
 /**
+**  Close the parts of the standard libraries no script needs: of os only the four time
+**  functions stay, the debug library goes, and so do the base library's file loaders (Load()
+**  is the script loader and stays inside the data roots), its text compilers loadstring and
+**  load, and string.dump.
+**
+**  @param l  Lua state with the standard libraries opened.
+*/
+void RestrictLuaLibraries(lua_State *l)
+{
+	static const char *const osKept[] = {"time", "clock", "date", "difftime"};
+
+	lua_getglobal(l, "os");
+	if (lua_istable(l, -1)) {
+		lua_newtable(l);
+		for (const char *name : osKept) {
+			lua_getfield(l, -2, name);
+			lua_setfield(l, -2, name);
+		}
+		lua_setglobal(l, "os");
+	}
+	lua_pop(l, 1);
+
+	lua_pushnil(l);
+	lua_setglobal(l, "debug");
+	lua_pushnil(l);
+	lua_setglobal(l, "dofile");
+	lua_pushnil(l);
+	lua_setglobal(l, "loadfile");
+	// No script compiles text at run time; the engine's own callers use the C API.
+	lua_pushnil(l);
+	lua_setglobal(l, "loadstring");
+	lua_pushnil(l);
+	lua_setglobal(l, "load");
+
+	lua_getglobal(l, "string");
+	if (lua_istable(l, -1)) {
+		lua_pushnil(l);
+		lua_setfield(l, -2, "dump");
+	}
+	lua_pop(l, 1);
+}
+
+/**
 **  Initialize Lua
 */
 void InitLua()
@@ -2057,6 +2114,14 @@ void InitLua()
 		lua_call(Lua, 1, 0);
 #endif
 	}
+	// The error handler takes the trace-back from the registry, not from the global table.
+	lua_getglobal(Lua, "debug");
+	lua_getfield(Lua, -1, "traceback");
+	lua_setfield(Lua, LUA_REGISTRYINDEX, LuaTracebackKey);
+	lua_pop(Lua, 1);
+#ifndef DEBUG
+	RestrictLuaLibraries(Lua);
+#endif
 #if defined(DEBUG) && !defined(WIN32)
 	static const char* mobdebug =
 #include "./lua/mobdebug.luaheader"

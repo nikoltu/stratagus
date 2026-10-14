@@ -38,6 +38,7 @@
 #include "missile.h"
 
 #include "actions.h"
+#include "missile_cadence.h"
 #include "unit.h"
 #include "unit_find.h"
 
@@ -46,21 +47,21 @@
 */
 void MissileFlameShield::Action() /* override */
 {
-	static const int fs_dc[] = {
-		0, 32, 5, 31, 10, 30, 16, 27, 20, 24, 24, 20, 27, 15, 30, 10, 31,
-		5, 32, 0, 31, -5, 30, -10, 27, -16, 24, -20, 20, -24, 15, -27, 10,
-		-30, 5, -31, 0, -32, -5, -31, -10, -30, -16, -27, -20, -24, -24, -20,
-		-27, -15, -30, -10, -31, -5, -32, 0, -31, 5, -30, 10, -27, 16, -24,
-		20, -20, 24, -15, 27, -10, 30, -5, 31, 0, 32
-	};
-
 	this->Wait = this->Type->Sleep;
-	if (this->NextMissileFrame(1, 0)) {
-		this->SpriteFrame = 0;
+	// Each picture is held for two calls.
+	if (this->AnimWait-- <= 0) {
+		if (this->NextMissileFrame(1, 0)) {
+			this->SpriteFrame = 0;
+		}
+		this->AnimWait = FlameShieldPictureCalls - 1;
 	}
-	const int index = this->TTL % 36;  // 36 positions on the circle
-	const int dx = fs_dc[index * 2];
-	const int dy = fs_dc[index * 2 + 1];
+	// The flame's place on the ring: a step counter of its own (State), one step a call. The ring
+	// is the original's, in pixels of the classic tile, from the centre of the unit to the flame's
+	// point (the middle of its picture, where the area hit is made from).
+	const int step = this->State;
+	this->State = FlameShieldNextStep(step);
+	const int dx = FlameShieldOffset(step, PixelTileSize.x, false);
+	const int dy = FlameShieldOffset(step, PixelTileSize.y, true);
 	CUnit *unit = this->TargetUnit;
 	//
 	// Show around the top most unit.
@@ -74,10 +75,10 @@ void MissileFlameShield::Action() /* override */
 	const int iy = unit->IY;
 	const int uw = unit->Type->TileWidth;
 	const int uh = unit->Type->TileHeight;
-	this->position.x = upos.x * PixelTileSize.x + ix + uw * PixelTileSize.x / 2 + dx - 16;
-	this->position.y = upos.y * PixelTileSize.y + iy + uh * PixelTileSize.y / 2 + dy - 32;
+	this->position.x = upos.x * PixelTileSize.x + ix + uw * PixelTileSize.x / 2 + dx - this->Type->size.x / 2;
+	this->position.y = upos.y * PixelTileSize.y + iy + uh * PixelTileSize.y / 2 + dy - this->Type->size.y / 2;
 	if (unit->CurrentAction() == UnitAction::Die) {
-		this->TTL = index;
+		this->TTL = this->TTL % 36;
 	}
 
 	if (unit->Container) {
@@ -87,17 +88,12 @@ void MissileFlameShield::Action() /* override */
 		this->Hidden = 0;
 	}
 
-	// Only hit 1 out of 8 frames
-	if (this->TTL & 7) {
+	// One area hit from the flame's own place on every 16th cycle; the unit it circles is left out
+	// (MissileHitsZones).
+	if (!FlameShieldHitsOn(this->TTL)) {
 		return;
 	}
-
-	std::vector<CUnit *> table = SelectAroundUnit(*unit, 1);
-	for (CUnit *unit : table) {
-		if (unit->CurrentAction() != UnitAction::Die) {
-			HitUnit(this->SourceUnit, *unit, this->Damage);
-		}
-	}
+	this->MissileHit();
 }
 
 //@}

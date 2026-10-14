@@ -65,6 +65,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private static final int ENTRY_SCENARIO = 1;
     private static final int ENTRY_MULTIPLAYER = 2;
     private static final int ENTRY_LOAD = 3;
+    private static final int ENTRY_MODS = 4;
     private static final int ENTRY_EDITOR = 5;
     private static final int ENTRY_OPTIONS = 6;
     private static final int PAGE_NONE = -1;
@@ -112,6 +113,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private boolean firstFrameTold;
     private final MissionsPage missions = new MissionsPage();
     private final LoadPage load = new LoadPage();
+    private final ModsPage modsPage = new ModsPage();
     private final OptionsPage options = new OptionsPage();
     private final LanPage lan = new LanPage();
     private final EditorPage editor = new EditorPage();
@@ -126,6 +128,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private LicencesSheet licences;
     /** What a confirmed question does. */
     private Runnable sheetAction;
+    /** What a question left unconfirmed does, when that must undo something; else null. */
+    private Runnable sheetDismiss;
     private final ProfileSheet profileSheet = new ProfileSheet();
     /** True while the profile sheet is shown over the shell. */
     private boolean profileOpen;
@@ -224,6 +228,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         createdAt = android.os.SystemClock.uptimeMillis();
+        warmMapFacts();
         kit = new SkinKit(this);
         entries = new String[] {
             kit.string("campaign", "Campaign"),
@@ -268,12 +273,17 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         campaign.redraw = pagePictures;
         missions.redraw = pagePictures;
         Screen.useWhole(this);
+        android.util.Log.i("WargusHD", "LAUNCHER home create in "
+            + (android.os.SystemClock.uptimeMillis() - createdAt) + " ms");
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        final long resumedAt = android.os.SystemClock.uptimeMillis();
         filesOk = GateActivity.isSatisfied(this);
+        android.util.Log.i("WargusHD", "LAUNCHER home files check in "
+            + (android.os.SystemClock.uptimeMillis() - resumedAt) + " ms");
         if (folderVisit) {
             folderVisit = false;
             final String now = GateActivity.rememberedFolder(this);
@@ -334,6 +344,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         netReason = null;
         view.invalidate();
         menuMusic.resume();
+        android.util.Log.i("WargusHD", "LAUNCHER home resume in "
+            + (android.os.SystemClock.uptimeMillis() - resumedAt) + " ms");
     }
 
     @Override
@@ -371,6 +383,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             words = "The network port is in use on this device.";
         } else if ("net_stranger".equals(reason)) {
             words = "A device that is not in the room tried to join.";
+        } else if ("bad-save".equals(reason)) {
+            // The game's own line for a saved game that cannot be read.
+            return kit.string("save_error_cant_load", kit.own("The saved game could not be loaded."));
         } else {
             return kit.own("Reason: {0}", reason);
         }
@@ -397,6 +412,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             view.invalidate();
         } else if (sheet != null) {
             sheet = null;
+            sheetDismissed();
             view.invalidate();
         } else if (completeSheet != null) {
             completeSheet = null;
@@ -440,6 +456,45 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     }
 
     // ----- maps -----
+
+    /**
+     * Read the facts of every map the Custom Scenario list can show, off the main thread, so
+     * that the list finds them known when it is opened. The same folders and depth as loadMaps.
+     */
+    private void warmMapFacts() {
+        final String folder = GateActivity.rememberedFolder(this);
+        final File own = MapStore.directory(this);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final long began = android.os.SystemClock.uptimeMillis();
+                int n = 0;
+                if (folder != null) {
+                    n += warmMapFacts(new File(folder, "Data/Maps"), 0);
+                }
+                n += warmMapFacts(own, 0);
+                android.util.Log.i("WargusHD", "LAUNCHER maps " + n + " read ahead in "
+                    + (android.os.SystemClock.uptimeMillis() - began) + " ms");
+            }
+        }, "map-facts").start();
+    }
+
+    private static int warmMapFacts(File dir, int depth) {
+        final File[] files = dir.listFiles();
+        if (files == null || depth > 3) {
+            return 0;
+        }
+        int n = 0;
+        for (File f : files) {
+            if (f.isFile() && f.getName().toLowerCase().endsWith(".pud")) {
+                PudInfo.of(f);
+                ++n;
+            } else if (f.isDirectory()) {
+                n += warmMapFacts(f, depth + 1);
+            }
+        }
+        return n;
+    }
 
     private void loadMaps() {
         final long began = android.os.SystemClock.uptimeMillis();
@@ -590,6 +645,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     @Override
     protected void onActivityResult(int request, int result, android.content.Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REQ_IMPORT_MOD && result == RESULT_OK && data != null && data.getData() != null) {
+            importMod(data.getData());
+            return;
+        }
         if (request != REQ_IMPORT_MAP || result != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
@@ -612,6 +671,181 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         opponents = Math.min(opponents, maxOpponents());
         revealMap = true;
         view.invalidate();
+    }
+
+    // ----- mods: import and removal -----
+
+    private static final int REQ_IMPORT_MOD = 2002;
+
+    /** Let the player pick a mod package file; it is unpacked into the app's own mods. */
+    private void pickMod() {
+        final android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, REQ_IMPORT_MOD);
+        } catch (RuntimeException e) {
+            tell(kit.own("No file picker on this device"), kit.own("A mod cannot be chosen here."));
+        }
+    }
+
+    /**
+     * Read a picked package file off the main thread; the page shows that it waits. A package
+     * that is new is installed at once, one that is already installed asks first.
+     */
+    private void importMod(final android.net.Uri document) {
+        if (modsPage.isWaiting()) {
+            return;
+        }
+        final Context app = getApplicationContext();
+        page = ENTRY_MODS;
+        modsPage.setWaiting(ModsPage.IMPORTING);
+        view.invalidate();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String file = MapStore.nameOf(app, document);
+                final ModStore.Import read = ModStore.read(app, document);
+                final boolean installed = read.fault == ModPackage.OK && read.installed == null
+                    && ModStore.install(app, read);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        modRead(read, file != null ? file : kit.own("The file"), installed);
+                    }
+                });
+            }
+        }, "mod-import").start();
+    }
+
+    /** A package file was read: say why it is refused, ask before it replaces one, or list it. */
+    private void modRead(final ModStore.Import read, String file, boolean installed) {
+        final Context app = getApplicationContext();
+        if (read.fault != ModPackage.OK) {
+            modsPage.setWaiting(ModsPage.IDLE);
+            android.util.Log.i("WargusHD", "LAUNCHER mod refused " + read.fault + " " + read.detail);
+            final String notMod = kit.own("That file is not a mod"), notIn = kit.own("The mod was not imported");
+            switch (read.fault) {
+                case ModPackage.NOT_PACKAGE:
+                    tell(notMod, kit.own("{0} was not imported.", file));
+                    break;
+                case ModPackage.NO_MANIFEST:
+                    tell(notMod, kit.own("{0} has no mod.json.", file));
+                    break;
+                case ModPackage.BAD_MANIFEST:
+                    tell(notMod, kit.own("The mod.json of {0} cannot be used.", file));
+                    break;
+                case ModPackage.BAD_PATH:
+                    tell(notIn, kit.own("It holds a file path that is not allowed: {0}", read.detail));
+                    break;
+                case ModPackage.UNKNOWN_NAME:
+                    tell(notIn, kit.own("It holds a name that no mod has: {0}", read.detail));
+                    break;
+                case ModPackage.TOO_LARGE:
+                    tell(notIn, kit.own("It is larger than {0} MB.", ModPackage.MAX_BYTES / (1024L * 1024L)));
+                    break;
+                case ModPackage.TOO_MANY:
+                    tell(notIn, kit.own("It holds more than {0} files.", ModPackage.MAX_ENTRIES));
+                    break;
+                default:
+                    tell(notIn, kit.own("{0} could not be read, or the storage is full.", file));
+                    break;
+            }
+            return;
+        }
+        if (read.installed == null) {
+            modInstalled(read, installed);
+            return;
+        }
+        modsPage.setWaiting(ModsPage.IDLE);
+        sheet = new ConfirmSheet(kit.own("Replace this mod?"),
+                                 kit.own("{0} - version {1} with version {2}", read.installed.name,
+                                         read.installed.version, read.mod.version),
+                                 kit.string("common_cancel", "Cancel"), kit.own("Replace"));
+        sheetAction = new Runnable() {
+            @Override
+            public void run() {
+                modsPage.setWaiting(ModsPage.IMPORTING);
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final boolean done = ModStore.install(app, read);
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                modInstalled(read, done);
+                            }
+                        });
+                    }
+                }, "mod-import").start();
+            }
+        };
+        // Not replaced: the package that was read is given up, and nothing else waits meanwhile.
+        sheetDismiss = new Runnable() {
+            @Override
+            public void run() {
+                modsPage.setWaiting(ModsPage.IMPORTING);
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        ModStore.discard(app);
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                modsPage.setWaiting(ModsPage.IDLE);
+                                view.invalidate();
+                            }
+                        });
+                    }
+                }, "mod-import").start();
+            }
+        };
+        view.invalidate();
+    }
+
+    /** The end of an import: the list is read again and shows the package, selected. */
+    private void modInstalled(ModStore.Import read, boolean done) {
+        modsPage.setWaiting(ModsPage.IDLE);
+        if (done) {
+            android.util.Log.i("WargusHD", "LAUNCHER mod imported " + read.mod.id + " " + read.mod.version);
+        } else {
+            tell(kit.own("The mod was not imported"), kit.own("{0} could not be put in place.", read.mod.name));
+        }
+        modsPage.open(this, view, read.mod.id);
+        view.invalidate();
+    }
+
+    private void askRemoveMod() {
+        final ModStore.Mod mod = modsPage.selectedMod();
+        if (mod == null) {
+            return;
+        }
+        final Context app = getApplicationContext();
+        sheet = new ConfirmSheet(kit.own("Remove this mod?"), mod.name,
+                                 kit.string("common_cancel", "Cancel"),
+                                 kit.string("common_delete", "Delete"));
+        sheetAction = new Runnable() {
+            @Override
+            public void run() {
+                modsPage.setWaiting(ModsPage.REMOVING);
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (ModStore.remove(app, mod.id)) {
+                            android.util.Log.i("WargusHD", "LAUNCHER mod removed " + mod.id);
+                        }
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                modsPage.setWaiting(ModsPage.IDLE);
+                                modsPage.open(HomeActivity.this, view);
+                                view.invalidate();
+                            }
+                        });
+                    }
+                }, "mod-remove").start();
+            }
+        };
     }
 
     /** Open the Custom Scenario page with the settings of the last scenario started. */
@@ -689,8 +923,6 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         r.append("  mode = \"campaign\",\n");
         r.append("  campaign = \"").append(missions.campaign().key).append("\",\n");
         r.append("  mission = ").append(missions.mission()).append(",\n");
-        // The engine counts difficulty from 1: easy, normal, hard.
-        r.append("  difficulty = ").append(missions.difficulty + 1).append(",\n");
         r.append("  chain = true,\n");
         r.append("  window = true,\n");
         launch(r.toString());
@@ -912,6 +1144,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         final StringBuilder r = new StringBuilder("LaunchRequest = {\n");
         r.append(fields);
         r.append(options.requestBlock());
+        // The mods switched on for a game of this kind; nothing when there is none.
+        r.append(ModStore.requestBlock(this, fields));
         r.append("  language = \"").append(SkinKit.language(this)).append("\",\n");
         // The profile's name is the player's name in the game (design 22.7). A Lua string:
         // the backslash and the quote are escaped; control characters cannot be in a name.
@@ -1004,7 +1238,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         return page + "/" + inMissions + "/" + profileOpen + "/" + galleryOpen + "/" + (sheet != null)
             + "/" + (nameSheet != null) + "/" + (mapSheet != null) + "/" + (switchSheet != null) + "/" + (completeSheet != null)
             + "/" + (licences != null) + "/" + source + "/" + selectedMap + "/" + race + "/" + opponents
-            + "/" + resources + "/" + units + "/" + tileset + "/" + missions.mission() + "/" + missions.difficulty
+            + "/" + resources + "/" + units + "/" + tileset + "/" + missions.mission()
             + "/" + (missions.campaign() != null ? missions.campaign().key : "")
             + "/" + (save != null ? save.file : "")
             + "/" + (profile != null ? profile.color + "." + profile.portrait + "." + profile.name : "");
@@ -1015,8 +1249,18 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     /** How a network game ended when it had no outcome of its own (the record's "net"). */
     private String netReason;
 
+    /** A question went away unconfirmed: what it had begun is undone, once. */
+    private void sheetDismissed() {
+        final Runnable undo = sheetDismiss;
+        sheetDismiss = null;
+        if (undo != null) {
+            undo.run();
+        }
+    }
+
     /** Say one thing on a sheet with OK, above whatever page is shown. */
     private void tell(String title, String body) {
+        sheetDismissed();
         sheet = ConfirmSheet.notice(title, body);
         sheetAction = null;
         menuAudio.play(MenuAudio.ERROR);
@@ -1105,17 +1349,23 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 final String outcome = game.optString("outcome");
                 if ("victory".equals(outcome)) {
                     ++profile.victories;
-                    if ("campaign".equals(record.optString("mode"))) {
+                    // A campaign mission run from a saved game names its campaign itself, in any
+                    // mode; a saved game without that field is of no campaign.
+                    String key = game.optString("campaign", "");
+                    if (key.isEmpty() && "campaign".equals(record.optString("mode"))
+                            && !game.optString("map").startsWith("~save/")) {
                         // campaigns/<human|orc|human-exp|orc-exp>/…: which campaign saved progress.
                         final String[] part = game.optString("map").split("/");
                         if (part.length >= 2) {
-                            final String key = (part[1].endsWith("-exp") ? "bdp" : "tod")
+                            key = (part[1].endsWith("-exp") ? "bdp" : "tod")
                                 + (part[1].startsWith("orc") ? "Orc" : "Human");
-                            for (CampaignPage.Campaign k : campaign.campaigns) {
-                                if (k.key.equals(key)) {
-                                    savedCampaign = k;
-                                    wonMission = game.optInt("mission", 0);
-                                }
+                        }
+                    }
+                    if (!key.isEmpty()) {
+                        for (CampaignPage.Campaign k : campaign.campaigns) {
+                            if (k.key.equals(key)) {
+                                savedCampaign = k;
+                                wonMission = game.optInt("mission", 0);
                             }
                         }
                     }
@@ -1153,7 +1403,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
 
     private final class HomeView extends View {
         private volatile Bitmap backdropStart, backdropPage;
-        private Bitmap logo, portrait, action;
+        private volatile Bitmap logo, portrait, action;
         private boolean loaded;
         /** Rail entry under the finger, or -1. */
         private int pressed = -1;
@@ -1299,6 +1549,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
          * The start state's pictures, read side by side and waited for, so that the first frame
          * is whole; the pages' backdrop, which the start state does not show, comes when ready.
          */
+        private static final long FIRST_FRAME_WAIT_MS = 1200;
+
         private void load(final int w, final int h) {
             loaded = true;
             final long t0 = android.os.SystemClock.uptimeMillis();
@@ -1308,6 +1560,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     @Override
                     public void run() {
                         logo = kit.atlasFrame("Modern_Graphics", "logo_main", logoW, logoH);
+                        postInvalidate();
                     }
                 }, "home-logo"),
                 new Thread(new Runnable() {
@@ -1320,14 +1573,27 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                             portrait =
                                 Portraits.tinted(kit, profile.portrait, Profiles.COLORS[profile.color]);
                         }
+                        postInvalidate();
                     }
                 }, "home-button-portrait"),
+                // The backdrop of the state shown first is read beside the others, not ahead of them.
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (page == PAGE_NONE) {
+                            backdropStart =
+                                kit.file("Data/Backgrounds/main_background_characters.png", w, h);
+                        } else {
+                            backdropPage = kit.file("Data/Backgrounds/main_background.png", w, h);
+                        }
+                        postInvalidate();
+                    }
+                }, "home-first-backdrop"),
             };
             for (Thread t : readers) {
                 t.start();
             }
             if (page == PAGE_NONE) {
-                backdropStart = kit.file("Data/Backgrounds/main_background_characters.png", w, h);
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
@@ -1336,7 +1602,6 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     }
                 }, "home-page-backdrop").start();
             } else {
-                backdropPage = kit.file("Data/Backgrounds/main_background.png", w, h);
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
@@ -1346,9 +1611,15 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     }
                 }, "home-start-backdrop").start();
             }
+            // Waited for only so long: a slow store must not hold the main thread. What comes
+            // later asks for a new frame itself.
+            final long until = t0 + FIRST_FRAME_WAIT_MS;
             for (Thread t : readers) {
                 try {
-                    t.join();
+                    final long left = until - android.os.SystemClock.uptimeMillis();
+                    if (left > 0) {
+                        t.join(left);
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
@@ -1394,6 +1665,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 campaign.draw(c, kit);
             } else if (page == ENTRY_EDITOR) {
                 editor.draw(c, kit);
+            } else if (page == ENTRY_MODS) {
+                modsPage.draw(c, kit);
             }
             if (galleryOpen) {
                 gallery.draw(c, kit);
@@ -1693,7 +1966,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     final int answer = sheet.up(x, y, kit);
                     if (answer != ConfirmSheet.NONE) {
                         sheet = null;
-                        if (answer == ConfirmSheet.CONFIRM && sheetAction != null) {
+                        if (answer != ConfirmSheet.CONFIRM) {
+                            sheetDismissed();
+                        } else if (sheetAction != null) {
+                            sheetDismiss = null;
                             sheetAction.run();
                         }
                         sheetAction = null;
@@ -1849,6 +2125,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         missions.down(x, y, kit);
                     } else if (page == ENTRY_LOAD) {
                         load.down(x, y, kit);
+                    } else if (page == ENTRY_MODS) {
+                        modsPage.down(x, y, kit);
                     } else if (page == ENTRY_OPTIONS && x >= RAIL_W) {
                         options.down(x, y);
                     }
@@ -1861,6 +2139,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         }
                     } else if (page == ENTRY_LOAD && x >= RAIL_W) {
                         if (load.move(x, y, kit)) {
+                            invalidate();
+                        }
+                    } else if (page == ENTRY_MODS && x >= RAIL_W) {
+                        if (modsPage.move(x, y, kit)) {
                             invalidate();
                         }
                     } else if (page == ENTRY_OPTIONS && x >= RAIL_W) {
@@ -1898,7 +2180,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         } else if (pressed >= 0 && entryAt(x, y) == pressed
                                    && pressed != ENTRY_SCENARIO && pressed != ENTRY_CAMPAIGN
                                    && pressed != ENTRY_OPTIONS && pressed != ENTRY_LOAD
-                                   && pressed != ENTRY_EDITOR
+                                   && pressed != ENTRY_EDITOR && pressed != ENTRY_MODS
                                    && !(pressed == ENTRY_MULTIPLAYER && lanPreview())) {
                             // A section that is not built yet.
                             menuAudio.play(MenuAudio.ERROR);
@@ -1927,6 +2209,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                             menuAudio.play(MenuAudio.BUTTON);
                             page = ENTRY_LOAD;
                             load.refresh(HomeActivity.this, profile);
+                        } else if (pressed == ENTRY_MODS && entryAt(x, y) == ENTRY_MODS) {
+                            menuAudio.play(MenuAudio.BUTTON);
+                            page = ENTRY_MODS;
+                            modsPage.open(HomeActivity.this, HomeView.this);
                         }
                         // The other sections are not built yet; a tap only shows its feedback.
                     } else if (page == ENTRY_SCENARIO && !dragging) {
@@ -1952,6 +2238,16 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                             folderBefore = GateActivity.rememberedFolder(HomeActivity.this);
                             startActivity(new android.content.Intent(HomeActivity.this, GateActivity.class)
                                 .putExtra(GateActivity.EXTRA_RETURN, true));
+                        }
+                    } else if (page == ENTRY_MODS) {
+                        final int action = modsPage.up(HomeActivity.this, x, y, kit);
+                        if (action != ModsPage.ACTION_NONE) {
+                            menuAudio.play(MenuAudio.BUTTON);
+                        }
+                        if (action == ModsPage.ACTION_IMPORT) {
+                            pickMod();
+                        } else if (action == ModsPage.ACTION_REMOVE) {
+                            askRemoveMod();
                         }
                     } else if (page == ENTRY_LOAD) {
                         final int action = load.up(x, y, kit);

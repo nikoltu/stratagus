@@ -290,6 +290,34 @@ int DoActionMove(CUnit &unit)
 }
 
 
+/// Longest wait for the unit on the goal to walk off, in cycles.
+static constexpr int MaxGoalHolderWaits = 30;
+
+/// Is this a land unit of one tile, moving tile by tile, under a player's command?
+static bool IsPlayerLandUnitOfOneTile(const CUnit &unit)
+{
+	const CUnitType &type = *unit.Type;
+	return !unit.Player->AiEnabled && type.MoveType == EMovement::Land && type.TileWidth == 1
+	       && type.TileHeight == 1 && type.GridStep == 1;
+}
+
+/**
+**  Is the goal close by and held by a unit of the same player that has a move order to
+**  another tile and has not taken its first step yet? A group that was just sent off: the
+**  tile is about to be free.
+*/
+static bool GoalHolderLeaves(const CUnit &unit, const Vec2i &goalPos)
+{
+	if (!IsPlayerLandUnitOfOneTile(unit) || !Map.Info.IsPointOnMap(goalPos)
+		|| std::abs(goalPos.x - unit.tilePos.x) > 4 || std::abs(goalPos.y - unit.tilePos.y) > 4) {
+		return false;
+	}
+	const CUnit *holder = UnitOnMapTile(goalPos, unit.Type->MoveType);
+	return holder != nullptr && holder != &unit && holder->Player == unit.Player && holder->Moving == 0
+	       && holder->CurrentAction() == UnitAction::Move
+	       && holder->CurrentOrder()->GetGoalPos() != holder->tilePos;
+}
+
 void COrder_Move::Execute(CUnit &unit) /* override */
 {
 	Assert(unit.CanMove());
@@ -302,6 +330,12 @@ void COrder_Move::Execute(CUnit &unit) /* override */
 
 	switch (DoActionMove(unit)) { // reached end-point?
 		case PF_UNREACHABLE:
+			if (this->Range == 0 && this->GoalHolderWaits < MaxGoalHolderWaits
+				&& GoalHolderLeaves(unit, this->goalPos)) {
+				// The goal is held by a unit that is leaving it: try again.
+				this->GoalHolderWaits++;
+				break;
+			}
 			// Some tries to reach the goal
 			this->Range++;
 			break;
@@ -318,7 +352,15 @@ void COrder_Move::Execute(CUnit &unit) /* override */
 			const CUnit *blocker = UnitOnMapTile(goalTile, unit.Type->MoveType);
 			if (blocker) {
 				const int distToBlocker = MapDistanceBetweenTypes(*(unit.Type), unit.tilePos, *(blocker->Type), blocker->tilePos);
-				if (distToBlocker == step && (unit.IsEnemy(*blocker) || blocker->Moving == 0)) {
+				// A land unit of one tile under a player's command does not wait for a unit that
+				// only crosses its goal: it has arrived beside it and stays.
+				const bool staysBeside = IsPlayerLandUnitOfOneTile(unit);
+				if (distToBlocker == step && this->GoalHolderWaits < MaxGoalHolderWaits
+					&& GoalHolderLeaves(unit, this->goalPos)) {
+					// Between two steps of its own way: the holder is off the goal at once.
+					this->GoalHolderWaits++;
+					unit.Wait = 1;
+				} else if (distToBlocker == step && (unit.IsEnemy(*blocker) || blocker->Moving == 0 || staysBeside)) {
 					unit.Wait = 0;
 					this->Finished = true;
 				}

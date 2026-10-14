@@ -32,6 +32,8 @@
 
 #include "stratagus.h"
 
+#include <tuple>
+
 #include "spell/spell_spawnmissile.h"
 
 #include "map.h"
@@ -117,6 +119,9 @@ void Spell_SpawnMissile::Parse(lua_State *l, int startIndex, int endIndex) /* ov
 			this->Delay = LuaToNumber(l, -1, j + 1);
 		} else if (value == "ttl") {
 			this->TTL = LuaToNumber(l, -1, j + 1);
+		} else if (value == "state") {
+			// the missile's own state at the start (a flame of the Flame Shield: its step on the ring)
+			this->State = LuaToNumber(l, -1, j + 1);
 		} else if (value == "start-point") {
 			lua_rawgeti(l, -1, j + 1);
 			CclSpellMissileLocation(l, this->StartPoint);
@@ -195,33 +200,46 @@ int Spell_SpawnMissile::Cast(CUnit &caster,
 	if (this->Missile->Class == MissileClass::DeathCoil) {
 		const Vec2i offset(2, 2);
 		std::vector<CUnit *> table = Select(goalPos - offset, goalPos + offset);
+		// The organic units of other, not allied players on the 5 x 5 tiles, ground and air.
 		ranges::erase_if(table, [&](const CUnit *unit) {
-			return !unit->Type->BoolFlag[ORGANIC_INDEX].value || !unit->IsEnemy(caster);
+			return !unit->Type->BoolFlag[ORGANIC_INDEX].value || !unit->IsAliveOnMap()
+				   || unit->CurrentAction() == UnitAction::Die
+				   || unit->Player == caster.Player || caster.IsAllied(*unit);
 		});
 		if (!table.empty()) {
-			ranges::sort(table, CompareUnitDistance(caster));
-			int damageLeft = this->Damage;
-			for (std::vector<CUnit *>::iterator it = table.begin();
-			     it != table.end() && damageLeft > 0;
-			     ++it) {
-				CUnit &unit = **it;
-				if (unit.IsAliveOnMap()) {
-					const PixelPos startPos = EvaluateMissileLocation(this->StartPoint, caster, &unit, unit.tilePos);
-					const PixelPos endPos = EvaluateMissileLocation(this->EndPoint, caster, &unit, unit.tilePos);
-					::Missile *missile = MakeMissile(*this->Missile, startPos, endPos);
-					missile->TTL = this->TTL;
-					missile->Delay = this->Delay;
-					if (it + 1 == table.end()) {
-						missile->Damage = damageLeft;
-						damageLeft = 0;
-					} else {
-						missile->Damage = std::min(damageLeft, unit.Variable[HP_INDEX].Value);
-						damageLeft -= unit.Variable[HP_INDEX].Value;
-					}
-					missile->SourceUnit = &caster;
-					missile->TargetUnit = &unit;
-				}
+			// Row by row, the ground unit of a tile before the flying one; the
+			// weakest is served first (DeathCoilShares).
+			ranges::sort(table, [](const CUnit *a, const CUnit *b) {
+				const bool aFlies = a->Type->MoveType == EMovement::Fly;
+				const bool bFlies = b->Type->MoveType == EMovement::Fly;
+				return std::make_tuple(a->tilePos.y, a->tilePos.x, aFlies, UnitNumber(*a))
+					   < std::make_tuple(b->tilePos.y, b->tilePos.x, bFlies, UnitNumber(*b));
+			});
+			std::vector<int> hitPoints;
+			for (const CUnit *unit : table) {
+				hitPoints.push_back(unit->Variable[HP_INDEX].Value);
 			}
+			const std::vector<int> shares = DeathCoilShares(hitPoints, this->Damage);
+			int taken = 0;
+
+			for (size_t i = 0; i != table.size(); ++i) {
+				if (shares[i] <= 0) {
+					continue;
+				}
+				CUnit &unit = *table[i];
+				const PixelPos startPos = EvaluateMissileLocation(this->StartPoint, caster, &unit, unit.tilePos);
+				const PixelPos endPos = EvaluateMissileLocation(this->EndPoint, caster, &unit, unit.tilePos);
+				::Missile *missile = MakeMissile(*this->Missile, startPos, endPos);
+				missile->TTL = this->TTL;
+				missile->Delay = this->Delay;
+				missile->Damage = shares[i];
+				missile->SourceUnit = &caster;
+				missile->TargetUnit = &unit;
+				taken += shares[i];
+			}
+			// The caster gains the whole sum at the cast (original VA 0x4CB790 - 0x4CB7D1); a missile
+			// only carries what its unit loses.
+			caster.Variable[HP_INDEX].Value = std::min(caster.Variable[HP_INDEX].Max, caster.Variable[HP_INDEX].Value + taken);
 			return 1;
 		}
 		return 0;
@@ -232,6 +250,7 @@ int Spell_SpawnMissile::Cast(CUnit &caster,
 		::Missile *missile = MakeMissile(*this->Missile, startPos, endPos);
 		missile->TTL = this->TTL;
 		missile->Delay = this->Delay;
+		missile->State = this->State;
 		missile->Damage = this->Damage;
 		if (this->UseUnitVar) {
 			missile->Damage = 0;

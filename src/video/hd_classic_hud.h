@@ -20,6 +20,7 @@
 #define __HD_CLASSIC_HUD_H__
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 class CContentType;
@@ -171,7 +172,9 @@ inline std::string hotkeyLetter(int key)
 }
 
 /// Width of the hit point bar's filled part and its colour: the rule of the Remastered panel
-/// (green from 75 %, yellow from 50 %, red under it; the captures show a full green bar only).
+/// (green from 75 %, yellow from 50 %, red under it). Seen: a full green bar (o11_16) and
+/// 108 / 400 = 13 px of `bar_red` (o21_52); the two limits are not in a capture. The part that is
+/// not filled is the sprite's own middle (52, 52, 52), not black.
 /// @return the width in logical pixels, 0 for a dead or empty unit; colour 0 green, 1 yellow, 2 red.
 constexpr int hitPointFill(int value, int max, int &colour)
 {
@@ -182,6 +185,153 @@ constexpr int hitPointFill(int value, int max, int &colour)
 	const int f = value >= max ? 100 : (100 * value) / max;
 	colour = f >= 75 ? 0 : f >= 50 ? 1 : 2;
 	return (f * HitPointFill.w) / 100;
+}
+
+// A building under construction (o21_52): the sprite `complete_bar` (158 x 20, its own size) in
+// the panel's lower part, the 1 x 1 sprite `bar_green` stretched over the done part of its
+// inside (skin `classic_hud_complete_bar`: "padding" 3), the words "% Complete" on the inside's
+// middle (ink rows 315.5..325.5 with the descender). No level row and no stat line.
+constexpr Rect CompleteBar = {9, 310, 158, 20};
+constexpr Rect CompleteFill = {12, 313, 152, 14};
+constexpr double CompleteTextMidX = 88.0;
+constexpr double CompleteTextMidY = 320.0;
+/// Width of the done part: the progress over the inside's width, rounded down (o21_52: 40 px;
+/// a whole per cent first would give 39 or 41).
+constexpr int completeFill(int value, int max)
+{
+	if (max <= 0 || value <= 0) {
+		return 0;
+	}
+	return value >= max ? CompleteFill.w : (int) ((long long) value * CompleteFill.w / max);
+}
+
+// A unit that trains, researches or upgrades (o30_C01_*, o30_C02_*, o30_C03_*; one layout): the
+// label "Training:" / "Upgrading:" on stat row 1 at the colon's column, the picture of what is
+// made in a cell right of it, the bar of a building site under them. No cells of a queue.
+constexpr Rect TrainingCell = {106, 238, CellW, CellH};
+constexpr double TrainingLabelMidY = 252.0;
+
+// A caster (o30_C14_mage_selected): stat row 5 is "Magic:" with a bar in the value's place: the
+// sprite `magic_bar` (6 x 6, nine-sliced by 2) on 104, 306, 63 x 14, inside it the 1 x 1 sprite
+// `bar_magic` over the part of 59 x 10 that the mana fills (29 px at 127 of 255), the number
+// centred on the bar.
+constexpr int MagicRow = 5;
+constexpr int MagicSprite = 6;
+constexpr int MagicSlice = 2;
+constexpr double MagicTextMidX = 135.5;
+constexpr Rect magicBar(int row)
+{
+	return {104, 231 + 15 * row, 63, 14};
+}
+constexpr Rect magicFillArea(const Rect &bar)
+{
+	return {bar.x + MagicSlice, bar.y + MagicSlice, bar.w - 2 * MagicSlice, bar.h - 2 * MagicSlice};
+}
+constexpr int magicFill(int value, int max)
+{
+	const int w = magicFillArea(magicBar(MagicRow)).w;
+	if (max <= 0 || value <= 0) {
+		return 0;
+	}
+	return value >= max ? w : (int) ((long long) value * w / max);
+}
+
+// Several units selected (o30_C06_*): the panel's frame stays; up to 9 units in cells of the
+// portrait's size, pitch 56 x 55, row by row; 10 to 12 in cells 40 wide, pitch 42, four a row,
+// whose picture is the columns 7..38 of the 46. Under every cell its hit point bar as under the
+// single portrait. No text. Passengers of a transport (o30_C13_*) sit in the rows 1 and 2 of the
+// wide cells, the ship's own portrait in cell 0.
+constexpr int GroupPitchX = 56;
+constexpr int GroupPitchY = 55;
+constexpr int GroupWideColumns = 3;
+constexpr int GroupWideMax = 9;
+constexpr int GroupSmallW = 40;
+constexpr int GroupSmallPitchX = 42;
+constexpr int GroupSmallColumns = 4;
+constexpr int GroupSmallMax = 12;
+constexpr int GroupSmallPictureW = 32;
+constexpr int GroupSmallPictureSrcX = 7;
+constexpr int PassengerMax = 6;
+constexpr int groupCellCount(bool wide)
+{
+	return wide ? GroupWideMax : GroupSmallMax;
+}
+/// Cell `index` of a group, row by row. `wide`: the cells of up to 9 units.
+constexpr Rect groupCell(int index, bool wide)
+{
+	return wide ? Rect{InfoPanel.x + GroupPitchX * (index % GroupWideColumns),
+	                   InfoPanel.y + GroupPitchY * (index / GroupWideColumns), CellW, CellH}
+	            : Rect{InfoPanel.x + GroupSmallPitchX * (index % GroupSmallColumns),
+	                   InfoPanel.y + GroupPitchY * (index / GroupSmallColumns), GroupSmallW, CellH};
+}
+/// The hit point bar under a cell and the part of it that is filled at full health.
+constexpr Rect groupBar(const Rect &cell)
+{
+	return {cell.x, cell.y + cell.h - HitPointSlice, cell.w, HitPointBar.h};
+}
+constexpr Rect groupFill(const Rect &cell)
+{
+	return {cell.x + HitPointSlice, cell.y + cell.h, cell.w - 2 * HitPointSlice, HitPointFill.h};
+}
+/// Width of the filled part of a bar `width` wide and its colour (the limits of hitPointFill;
+/// the same width as hitPointFill for the 50 of the single bar).
+constexpr int groupHitPointFill(int value, int max, int width, int &colour)
+{
+	if (hitPointFill(value, max, colour) <= 0 && (max <= 0 || value <= 0)) {
+		return 0;
+	}
+	return value >= max ? width : (int) ((long long) value * width / max);
+}
+/// The cell of a group that holds the logical pixel, or -1 (between cells and on the bars too).
+constexpr int groupCellAt(int bx, int by, bool wide)
+{
+	for (int i = 0; i < groupCellCount(wide); ++i) {
+		if (contains(groupCell(i, wide), bx, by)) {
+			return i;
+		}
+	}
+	return -1;
+}
+/// The cell of passenger n (0..5) of a transport.
+constexpr Rect passengerCell(int n)
+{
+	return groupCell(GroupWideColumns + n, true);
+}
+/// The passenger whose cell holds the logical pixel, or -1.
+constexpr int passengerCellAt(int bx, int by)
+{
+	const int cell = groupCellAt(bx, by, true);
+	return cell >= GroupWideColumns ? cell - GroupWideColumns : -1;
+}
+
+// The message line (o30_C07_*): one line, yellow, no plate, first ink x 183, capitals
+// logicalH - 50 .. - 42; a new message takes the line of the one before. The objectives of a
+// mission (o30_C08_*, h40_h6_start): white, first ink x 185, capitals from row 28, 16 px a line.
+constexpr int MessageX = 183;
+constexpr double messageMidY(int logicalH)
+{
+	return logicalH - 46.0;
+}
+constexpr int ObjectivesX = 185;
+constexpr int ObjectivesPitch = 16;
+constexpr double objectiveMidY(int n)
+{
+	return 32.0 + ObjectivesPitch * n;
+}
+
+/// The sprite of a button's face by its state: `<sprite>_active` while the button is held down
+/// (`hud_<race>_small`, `portrait_button`, `portrait_button_highlight`, `f5` have one each).
+inline std::string faceName(const std::string &sprite, bool held)
+{
+	return held ? sprite + "_active" : sprite;
+}
+
+/// The grey a pixel has behind an in-game window: 0.2126 R + 0.7152 G + 0.0722 B, not darkened
+/// (the classic frame of the orc side, o21_14 against o21_40 at the same pixels: 52, 32, 0 -> 34;
+/// 80, 48, 8 -> 52; 60, 36, 4 -> 39; 72, 44, 4 -> 47; the Remastered view by the same rule).
+constexpr int greyOf(int r, int g, int b)
+{
+	return (int) ((r * 13933u + g * 46871u + b * 4732u + 32768u) >> 16);
 }
 
 /// One piece of a nine-sliced sprite: a part of the sprite and the rect it fills.
@@ -232,6 +382,83 @@ constexpr double TooltipMidYFromBottom = 52.0;
 constexpr double tooltipMidY(int logicalH)
 {
 	return logicalH - TooltipMidYFromBottom;
+}
+// The box under the hint (o11_55, logical 1024 x 768): black with a line of one pixel
+// (67, 66, 60), a rectangle with its four corners cut out square: columns 195..411 in the rows
+// 692..739, columns 188..419 in the rows 699..732. Seen with the one-word hint "Move" at that
+// size only; taken as hanging on the map view's bottom-left like the hint, its width fixed.
+constexpr int TooltipBoxX = 188;
+constexpr int TooltipBoxW = 232;
+constexpr int TooltipBoxH = 48;
+constexpr int TooltipBoxTopFromBottom = 76;
+constexpr int TooltipBoxCutLeft = 7;
+constexpr int TooltipBoxCutRight = 8;
+constexpr int TooltipBoxCutY = 7;
+constexpr int TooltipBoxLineRGB[3] = {67, 66, 60};
+constexpr int TooltipBoxFills = 2;
+constexpr int TooltipBoxLines = 12;
+struct TooltipBox {
+	Rect fill[TooltipBoxFills];   // black
+	Rect line[TooltipBoxLines];   // the line, clockwise from the top
+};
+// More lines (o30_C05_hover_*, logical 1024 x 768; the place at 640 x 480 and 720 x 540 from
+// o30_C09_*): the box keeps its columns and its bottom row (logicalH - 29) and grows upward, 15 px
+// a line. Top row 692 with one line, 662 with three, 646 with four (both captures of four lines:
+// one pixel more than the pitch gives). The lines stand from the top: the first capital 20 under
+// the top row (712; 682 / 697 / 712; 666 / 681 / 696 / 711), the yellow requirement line one
+// pixel lower than the pitch (712 in o30_C05_hover_dim_keep).
+constexpr int TooltipLinePitch = 15;
+constexpr int TooltipLineMax = 8;
+constexpr double TooltipFirstMidFromTop = 24.0;
+constexpr int tooltipBoxHeight(int lines)
+{
+	return TooltipBoxH + TooltipLinePitch * ((lines < 1 ? 1 : lines) - 1) + (lines >= 4 ? 1 : 0);
+}
+/// The middle row of the capitals of line n (0 the title) of a box of `lines` lines.
+/// `requirementLine`: n is the line that names what the command still needs.
+constexpr double tooltipLineMidY(int logicalH, int lines, int n, bool requirementLine)
+{
+	return logicalH - TooltipBoxTopFromBottom + TooltipBoxH - tooltipBoxHeight(lines)
+	       + TooltipFirstMidFromTop + TooltipLinePitch * n + (requirementLine ? 1 : 0);
+}
+// The cost row is the second line: the 14 x 14 sprites `icons_0` gold, `icons_1` lumber,
+// `icons_2` oil at x 204 / 270 / 336, rows capital top - 3 .. + 10, the number's ink 18 px right
+// of its icon; only the resources with a cost, packed from the left (Farm 500, 250; Keep 2000,
+// 1000, 200).
+constexpr int TooltipCostIconX = 204;
+constexpr int TooltipCostPitch = 66;
+constexpr int TooltipCostTextDX = 18;
+constexpr int TooltipCostIconDY = -3;
+constexpr int TooltipCostMax = 3;
+/// The icon of cost k (0..2, as packed) of the cost row whose capitals' middle row is `midY`.
+constexpr Rect tooltipCostIcon(int k, double midY)
+{
+	return {TooltipCostIconX + TooltipCostPitch * k, (int) midY - TextCap / 2 + TooltipCostIconDY,
+	        ResourceIconSize, ResourceIconSize};
+}
+// The requirement line and the message line are yellow (255, 204, 0). The box is black at one
+// third over the map: what is under it keeps two thirds (120, 56, 4 -> 80, 38, 3; 16, 32, 44 ->
+// 11, 21, 30), alpha 85 of 255. The description wraps inside the columns 204..403 (seen: two
+// lines, ink 205..403; the width itself is not measured).
+constexpr int TooltipYellowRGB[3] = {255, 204, 0};
+constexpr int TooltipBoxAlpha = 85;
+constexpr int TooltipTextW = 200;
+/// The box's parts in a logical screen `logicalH` high, for `lines` lines of text.
+constexpr TooltipBox tooltipBox(int logicalH, int lines = 1)
+{
+	const int x0 = TooltipBoxX;
+	const int x1 = x0 + TooltipBoxCutLeft;
+	const int x2 = x0 + TooltipBoxW - 1 - TooltipBoxCutRight;
+	const int x3 = x0 + TooltipBoxW - 1;
+	const int y3 = logicalH - TooltipBoxTopFromBottom + TooltipBoxH - 1;
+	const int y0 = y3 - tooltipBoxHeight(lines) + 1;
+	const int y1 = y0 + TooltipBoxCutY;
+	const int y2 = y3 - TooltipBoxCutY;
+	return {{{x1, y0, x2 - x1 + 1, y3 - y0 + 1}, {x0, y1, x3 - x0 + 1, y2 - y1 + 1}},
+	        {{x1, y0, x2 - x1 + 1, 1}, {x2, y0, 1, y1 - y0 + 1}, {x2, y1, x3 - x2 + 1, 1},
+	         {x3, y1, 1, y2 - y1 + 1}, {x2, y2, x3 - x2 + 1, 1}, {x2, y2, 1, y3 - y2 + 1},
+	         {x1, y3, x2 - x1 + 1, 1}, {x1, y2, 1, y3 - y2 + 1}, {x0, y2, x1 - x0 + 1, 1},
+	         {x0, y1, 1, y2 - y1 + 1}, {x0, y1, x1 - x0 + 1, 1}, {x1, y0, 1, y1 - y0 + 1}}};
 }
 // Info panel, as measured (o11_16, o11_84): name centred about x 114 (rows 186..193), "Level N"
 // under it (201..208), the hit point figure centred on x 31 (rows 220..224), stat lines with the
@@ -351,6 +578,17 @@ extern bool ClassicPauseButtonContains(int screenX, int screenY);
 /// brightness and does nothing). `marked`: the button of the order the units carry out (the
 /// highlighted cell). (src/ui/botpanel.cpp)
 extern bool ClassicCommandButtonShown(int index, bool &allowed, bool &marked);
+
+/// The classic HUD is drawn and the logical pixel of the screen point is in the cell of a unit of
+/// the selected group that holds a unit: the cell's number (GetSelectionCells), else -1.
+/// (src/ui/ui.cpp)
+extern int ClassicGroupCellAt(int screenX, int screenY);
+/// Same for the cell of a passenger of the selected transport: the passenger's number. (src/ui/ui.cpp)
+extern int ClassicPassengerCellAt(int screenX, int screenY);
+/// The message line of the classic view. (src/ui/ui.cpp)
+extern void DrawClassicMessage(std::string_view text);
+/// Line n (0 the first) of the objectives block of the classic view. (src/ui/ui.cpp)
+extern void DrawClassicObjective(int n, std::string_view text);
 
 /// One text of the Remastered info panel: what it prints, where and with which face. The text
 /// keeps its codes ("~|" tab, "~<" "~>").

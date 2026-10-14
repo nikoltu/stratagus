@@ -297,7 +297,7 @@ void COrder_UpgradeTo::Execute(CUnit &unit) /* override */
 	if (!this->Instant && this->Ticks < newstats.Costs[TimeCost]) {
 		unit.Wait = WC2_FRAMES_PER_TIME_UNIT - 1; // one tick per WC2_FRAMES_PER_TIME_UNIT cycles
 		if (firstUnit) {
-			unit.Wait += WC2_RESEARCH_EXTRA_FRAMES;
+			unit.Wait += WC2_PRODUCTION_EXTRA_FRAMES;
 		}
 		return ;
 	}

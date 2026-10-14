@@ -418,3 +418,25 @@ TEST_CASE("quit: a player who is in the game keeps everything")
 	CHECK(Players[0].Score == 100);
 	CHECK(QuitWorld::Living(1).size() == 8);
 }
+
+TEST_CASE("train order: with the queue off a building holds one production order")
+{
+	using A = UnitAction;
+
+	// An idle building takes the order.
+	CHECK_FALSE(TrainOrderRefused(false, {A::Still}));
+	CHECK_FALSE(TrainOrderRefused(false, {}));
+	// It trains, upgrades itself or researches: refused.
+	CHECK(TrainOrderRefused(false, {A::Train}));
+	CHECK(TrainOrderRefused(false, {A::UpgradeTo}));
+	CHECK(TrainOrderRefused(false, {A::Research}));
+	// The first order has not started yet (a second click inside the command delay): refused.
+	CHECK(TrainOrderRefused(false, {A::Still, A::Train}));
+	CHECK(TrainOrderRefused(false, {A::Still, A::Research}));
+	CHECK(TrainOrderRefused(false, {A::Still, A::UpgradeTo}));
+	// Orders that produce nothing do not count.
+	CHECK_FALSE(TrainOrderRefused(false, {A::Still, A::Move, A::Attack}));
+	// With the queue on nothing is refused here.
+	CHECK_FALSE(TrainOrderRefused(true, {A::Train}));
+	CHECK_FALSE(TrainOrderRefused(true, {A::Train, A::Train, A::Research}));
+}

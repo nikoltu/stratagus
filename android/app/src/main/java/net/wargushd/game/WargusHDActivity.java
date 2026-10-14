@@ -2,8 +2,14 @@ package net.wargushd.game;
 
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -97,6 +103,91 @@ public class WargusHDActivity extends SDLActivity {
 
     /** The chat lines the engine keeps (UTF-8): one a line, "rrggbb<tab>name<tab>text". */
     private static native byte[] nativeChatLines();
+
+    /** Tells the engine how much it may play: 0 all, 1 quietly, 2 nothing. */
+    private static native void nativeAudioFocus(int state);
+
+    private AudioManager audioManager;
+    /** An AudioFocusRequest on API 26 and later, built once; null before that. */
+    private Object focusRequest;
+    private boolean focusHeld;
+
+    private final AudioManager.OnAudioFocusChangeListener focusListener =
+        new AudioManager.OnAudioFocusChangeListener() {
+            @Override
+            public void onAudioFocusChange(int change) {
+                if (change == AudioManager.AUDIOFOCUS_GAIN) {
+                    tellAudioFocus(0);
+                } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+                    tellAudioFocus(1);
+                } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                    tellAudioFocus(2);
+                } else if (change == AudioManager.AUDIOFOCUS_LOSS) {
+                    // Lost for good: silent until the game is in front again and asks anew.
+                    tellAudioFocus(2);
+                    focusHeld = false;
+                }
+            }
+        };
+
+    /** The first onResume runs before the engine's library is loaded; its state is "all" then. */
+    private static void tellAudioFocus(int state) {
+        try {
+            nativeAudioFocus(state);
+        } catch (UnsatisfiedLinkError e) {
+        }
+    }
+
+    /** Asks the audio focus of a game unless it is held; a refusal (a call) keeps the game silent. */
+    @SuppressWarnings("deprecation")
+    private void askFocus() {
+        if (focusHeld) {
+            return;
+        }
+        if (audioManager == null) {
+            audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        }
+        if (audioManager == null) {
+            return;
+        }
+        final int answer;
+        if (Build.VERSION.SDK_INT >= 26) {
+            if (focusRequest == null) {
+                focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build())
+                    .setOnAudioFocusChangeListener(focusListener, new Handler(Looper.getMainLooper()))
+                    .setWillPauseWhenDucked(true)
+                    .setAcceptsDelayedFocusGain(false)
+                    .build();
+            }
+            answer = audioManager.requestAudioFocus((AudioFocusRequest) focusRequest);
+        } else {
+            answer = audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN);
+        }
+        if (answer == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            focusHeld = true;
+            tellAudioFocus(0);
+        } else {
+            tellAudioFocus(2);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void giveFocusBack() {
+        if (!focusHeld || audioManager == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 26) {
+            audioManager.abandonAudioFocusRequest((AudioFocusRequest) focusRequest);
+        } else {
+            audioManager.abandonAudioFocus(focusListener);
+        }
+        focusHeld = false;
+    }
 
     /** The chat control of a game with other people; null in every other game. */
     private ChatView chatView;
@@ -486,6 +577,11 @@ public class WargusHDActivity extends SDLActivity {
             }
         } catch (java.io.IOException | RuntimeException ignored) {
         }
+        // The game presents 60 frames a second at most: ask a faster panel for 60 Hz, so that the
+        // display's beat and the engine's frame timer are one clock.
+        final android.view.WindowManager.LayoutParams windowParams = getWindow().getAttributes();
+        windowParams.preferredRefreshRate = 60f;
+        getWindow().setAttributes(windowParams);
         super.onCreate(savedInstanceState);
         Screen.hideBars(this);
         createOverlayHost();
@@ -537,12 +633,14 @@ public class WargusHDActivity extends SDLActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             Screen.hideBars(this);
+            askFocus();
         }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        askFocus();
         if (multicastLock != null && !multicastLock.isHeld()) {
             multicastLock.acquire();
         }
@@ -559,6 +657,7 @@ public class WargusHDActivity extends SDLActivity {
         if (fastWifi != null && fastWifi.isHeld()) {
             fastWifi.release();
         }
+        giveFocusBack();
         super.onPause();
     }
 }

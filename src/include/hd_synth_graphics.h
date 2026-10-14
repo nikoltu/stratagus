@@ -21,6 +21,10 @@
 
 //@{
 
+#include "../video/hd_iconstrip_cache.h"
+
+#include <filesystem>
+
 struct SDL_Surface;
 
 /// WargusHD command-icon cell geometry (IC1, M666-2).
@@ -57,6 +61,14 @@ extern SDL_Surface *BuildHDIconStrip(const char *set = "forest");
 
 /// True when the last BuildHDIconStrip() wrote the team key from the mask atlas.
 extern bool HDIconStripHasTeamKey();
+
+/// The strip kept in `file`, when the file is whole and was made for exactly `key`: a fresh
+/// surface with the bytes BuildHDIconStrip gave when it was written. nullptr otherwise.
+extern SDL_Surface *ReadHDIconStripCache(const std::filesystem::path &file, const hdiconcache::Key &key,
+                                         bool &teamKey);
+/// Writes the strip to `file` through `file`.tmp and a rename. False, and no file, on a failure.
+extern bool WriteHDIconStripCache(const std::filesystem::path &file, const hdiconcache::Key &key,
+                                  SDL_Surface *strip, bool teamKey);
 
 /// Build the command-cell FRAME strip natively from the Remastered `skins/Modern_HUD_Widgets`
 /// atlas: 80 x (80*6) RGBA32, the six portrait_button sprites as they are, in the order

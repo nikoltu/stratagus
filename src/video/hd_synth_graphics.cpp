@@ -36,6 +36,7 @@
 
 #include "hd_synth_graphics.h"
 
+#include "hd_iconstrip_cache.h"
 #include "iolib.h"
 #include "json.h"
 #include "video.h"
@@ -43,6 +44,7 @@
 #include <SDL.h>
 #include <SDL_image.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -190,7 +192,159 @@ SDL_Surface *CropFrame(const Atlas &atlas, const std::string &name)
 	return dst;
 }
 
+/// Size and modification time of a source file of the strip; {0, 0} when it cannot be read.
+hdiconcache::SourceStamp StampOf(const fs::path &file)
+{
+	hdiconcache::SourceStamp stamp;
+	if (file.empty()) {
+		return stamp;
+	}
+	std::error_code ec;
+	const uintmax_t size = fs::file_size(file, ec);
+	if (!ec) {
+		stamp.size = size;
+	} else {
+		// fs::file_size fails on Android scoped storage paths (see LoadAtlas)
+		CFile fp;
+		if (fp.open(file.string().c_str(), CL_OPEN_READ) == -1) {
+			return stamp;
+		}
+		fp.seek(0, SEEK_END);
+		const long end = fp.tell();
+		fp.close();
+		stamp.size = end > 0 ? (uint64_t) end : 0;
+	}
+	const fs::file_time_type written = fs::last_write_time(file, ec);
+	if (!ec) {
+		stamp.mtime = (int64_t) written.time_since_epoch().count();
+	}
+	return stamp;
+}
+
+/// The app's cache directory (the system may empty it; the strip is then built again). Empty
+/// where there is none: the strip is built at every start, as before.
+fs::path IconStripCacheDir()
+{
+#ifdef __ANDROID__
+	if (const char *files = SDL_AndroidGetInternalStoragePath()) {
+		return fs::path(files).parent_path() / "cache"; // <app>/files -> <app>/cache
+	}
+#endif
+	return fs::path();
+}
+
+/// The cache file of a set's strip and the key it must carry. Empty path: no caching this time.
+fs::path IconStripCacheFile(const std::string &setName, hdiconcache::Key &key)
+{
+	const fs::path dir = IconStripCacheDir();
+	const std::string name = hdiconcache::fileName(setName);
+	if (dir.empty() || name.empty()) {
+		return fs::path();
+	}
+	static const char *const kSources[hdiconcache::SOURCES / 2] = {
+	    "Data/Art/hd/HUD/Portrait-face.json", "Data/Art/hd/HUD/Portrait-mask.json"};
+	key.width = hdicon::CELL_W;
+	key.height = hdicon::CELL_H * hdicon::SLOTS;
+	key.set = setName;
+	key.pathHash = hdiconcache::hashBytes(nullptr, 0);
+	for (int i = 0; i < hdiconcache::SOURCES / 2; ++i) {
+		const fs::path json = LibraryFileName(kSources[i]);
+		fs::path png = json;
+		if (!json.empty()) {
+			png.replace_extension(".png");
+		}
+		key.sources[i * 2] = StampOf(json);
+		key.sources[i * 2 + 1] = StampOf(png);
+		const std::string where = json.generic_string();
+		key.pathHash = hdiconcache::hashBytes(where.c_str(), where.size() + 1, key.pathHash);
+	}
+	if (!key.sources[0].size || !key.sources[1].size) {
+		return fs::path(); // no picture atlas: nothing to key a file by
+	}
+	return dir / name;
+}
+
 } // namespace
+
+SDL_Surface *ReadHDIconStripCache(const fs::path &file, const hdiconcache::Key &key, bool &teamKey)
+{
+	std::error_code ec;
+	const uintmax_t fileSize = fs::file_size(file, ec);
+	if (ec) {
+		return nullptr;
+	}
+	FILE *fp = fopen(file.string().c_str(), "rb");
+	if (!fp) {
+		return nullptr;
+	}
+	unsigned char header[hdiconcache::HEADER_BYTES];
+	uint64_t pixelSum = 0;
+	bool team = false;
+	SDL_Surface *strip = nullptr;
+	if (fread(header, 1, sizeof(header), fp) == sizeof(header)
+		&& hdiconcache::checkHeader(header, sizeof(header), fileSize, key, team, pixelSum)) {
+		strip = NewRGBA((int) key.width, (int) key.height);
+	}
+	if (strip) {
+		// The file's rows are packed; the surface's may be padded.
+		const size_t rowBytes = (size_t) key.width * 4;
+		uint64_t sum = hdiconcache::hashBytes(nullptr, 0);
+		bool ok = true;
+		for (uint32_t y = 0; ok && y < key.height; ++y) {
+			Uint8 *row = static_cast<Uint8 *>(strip->pixels) + (size_t) y * strip->pitch;
+			ok = fread(row, 1, rowBytes, fp) == rowBytes;
+			sum = hdiconcache::payloadSum(row, rowBytes, sum);
+		}
+		if (!ok || sum != pixelSum) {
+			SDL_FreeSurface(strip); // cut short or damaged
+			strip = nullptr;
+		}
+	}
+	fclose(fp);
+	if (strip) {
+		teamKey = team;
+	}
+	return strip;
+}
+
+bool WriteHDIconStripCache(const fs::path &file, const hdiconcache::Key &key, SDL_Surface *strip, bool teamKey)
+{
+	if (!strip || !strip->format || strip->format->format != SDL_PIXELFORMAT_RGBA32
+		|| strip->w != (int) key.width || strip->h != (int) key.height) {
+		return false;
+	}
+	std::error_code ec;
+	fs::create_directories(file.parent_path(), ec);
+	// The whole file under another name first, then renamed: a start that dies in the middle
+	// leaves no file a later start could take for a strip.
+	fs::path temp = file;
+	temp += ".tmp";
+	FILE *fp = fopen(temp.string().c_str(), "wb");
+	if (!fp) {
+		return false;
+	}
+	const size_t rowBytes = (size_t) key.width * 4;
+	const Uint8 *pixels = static_cast<const Uint8 *>(strip->pixels);
+	uint64_t sum = hdiconcache::hashBytes(nullptr, 0);
+	for (uint32_t y = 0; y < key.height; ++y) {
+		sum = hdiconcache::payloadSum(pixels + (size_t) y * strip->pitch, rowBytes, sum);
+	}
+	const auto header = hdiconcache::encodeHeader(key, teamKey, sum);
+	bool ok = fwrite(header.data(), 1, header.size(), fp) == header.size();
+	for (uint32_t y = 0; ok && y < key.height; ++y) {
+		ok = fwrite(pixels + (size_t) y * strip->pitch, 1, rowBytes, fp) == rowBytes;
+	}
+	ok = fflush(fp) == 0 && ok;
+	ok = fclose(fp) == 0 && ok;
+	if (ok) {
+		fs::rename(temp, file, ec);
+		ok = !ec;
+	}
+	if (!ok) {
+		fs::remove(temp, ec);
+	}
+	return ok;
+}
 
 static bool IconStripHasTeamKey = false;
 
@@ -203,7 +357,20 @@ SDL_Surface *BuildHDIconStrip(const char *set)
 {
 	// `set` is the frame-name prefix of the tileset's portrait set: forest / ice / swamp / xswamp.
 	const std::string setName = (set && *set) ? set : "forest";
+	const Uint32 ticksStart = SDL_GetTicks();
 	IconStripHasTeamKey = false;
+	// The strip of an earlier start, when the game folder and the builder are what they were.
+	hdiconcache::Key cacheKey;
+	const fs::path cacheFile = IconStripCacheFile(setName, cacheKey);
+	if (!cacheFile.empty()) {
+		bool teamKey = false;
+		if (SDL_Surface *cached = ReadHDIconStripCache(cacheFile, cacheKey, teamKey)) {
+			IconStripHasTeamKey = teamKey;
+			ErrorPrint("HD icon strip '%s' loaded from cache in %u ms\n", setName.c_str(),
+			           (unsigned) (SDL_GetTicks() - ticksStart));
+			return cached;
+		}
+	}
 	Atlas atlas;
 	if (!LoadAtlas("Data/Art/hd/HUD/Portrait-face.json", atlas)) {
 		return nullptr;
@@ -265,6 +432,7 @@ SDL_Surface *BuildHDIconStrip(const char *set)
 		SDL_UnlockSurface(cell);
 		SDL_UnlockSurface(strip);
 	}
+	const bool keyed = cell != nullptr;
 	if (cell) {
 		SDL_FreeSurface(cell);
 	}
@@ -273,6 +441,13 @@ SDL_Surface *BuildHDIconStrip(const char *set)
 		return nullptr;
 	}
 	IconStripHasTeamKey = haveMask;
+	ErrorPrint("HD icon strip '%s' built in %u ms\n", setName.c_str(), (unsigned) (SDL_GetTicks() - ticksStart));
+	// Kept only when it is the whole result: a mask that is there but did not load this time
+	// must not be remembered as "no team colour".
+	const bool maskThere = cacheKey.sources[2].size && cacheKey.sources[3].size;
+	if (!cacheFile.empty() && haveMask == maskThere && keyed == haveMask) {
+		WriteHDIconStripCache(cacheFile, cacheKey, strip, haveMask);
+	}
 	return strip;
 }
 

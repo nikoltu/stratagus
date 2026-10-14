@@ -53,6 +53,7 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "network.h"
+#include "wc2ai.h"
 
 /*----------------------------------------------------------------------------
 --  Defines
@@ -1061,6 +1062,7 @@ static void AiCollectResources()
 	int num_units_assigned[MaxCosts]{};
 	int num_units_unassigned[MaxCosts]{};
 	int total_harvester = 0;
+	std::vector<CUnit *> units_free; // the unassigned workers once each, in the player's unit order
 
 	// Collect statistics about the current assignment
 	for (CUnit *unit : AiPlayer->Player->GetUnits()) {
@@ -1101,10 +1103,45 @@ static void AiCollectResources()
 				num_units_unassigned[c]++;
 			}
 		}
+		units_free.push_back(unit);
 		++total_harvester;
 	}
 
 	if (!total_harvester) {
+		return;
+	}
+
+	// A player run by its original script: each worker with nothing to do goes to lumber while
+	// fewer workers cut it than the original's rule wants (wc2ai::LumberWorkers, local evidence
+	// record AI-SPLIT-002), else to gold, failing that to lumber. A worker that gathers is never
+	// taken off its resource. The original asks per worker when that worker decides; here all
+	// idle workers are asked once a second.
+	if (Wc2AiRuns(AiPlayer->Player->Index)) {
+		const int lumberWanted = Wc2AiLumberWanted(*AiPlayer->Player);
+		int onLumber = num_units_assigned[WoodCost] + num_units_with_resource[WoodCost];
+		for (CUnit *unit : units_free) {
+			const bool gold = unit->Type->ResInfo[GoldCost] != nullptr;
+			const bool lumber = unit->Type->ResInfo[WoodCost] != nullptr;
+			if (!gold && !lumber) {
+				// no worker (a tanker): its one resource, as before
+				for (int c = 1; c < MaxCosts; ++c) {
+					if (unit->Type->ResInfo[c] && AiAssignHarvester(*unit, c)) {
+						break;
+					}
+				}
+				continue;
+			}
+			if (lumber && onLumber < lumberWanted && AiAssignHarvester(*unit, WoodCost)) {
+				++onLumber;
+				continue;
+			}
+			if (gold && AiAssignHarvester(*unit, GoldCost)) {
+				continue;
+			}
+			if (lumber && AiAssignHarvester(*unit, WoodCost)) {
+				++onLumber;
+			}
+		}
 		return;
 	}
 
@@ -1349,6 +1386,25 @@ static void AiCheckRepair()
 		}
 	}
 
+	// A player run by its original script repairs by the original's rule (wc2ai::RepairPick, local
+	// evidence record AI-REPAIR-001): one building a pass; a building no worker can be sent to
+	// counts as not on the workers' ground and the rule is asked again, a few times at most.
+	const bool scripted = Wc2AiRuns(AiPlayer->Player->Index);
+	if (scripted) {
+		std::vector<const CUnit *> unreachable;
+		for (int tries = 0; tries < 4; ++tries) {
+			CUnit *target = Wc2AiRepairTarget(*AiPlayer->Player, unreachable);
+			if (!target) {
+				break;
+			}
+			if (AiRepairUnit(*target)) {
+				AiPlayer->LastRepairBuilding = UnitNumber(*target);
+				return;
+			}
+			unreachable.push_back(target);
+		}
+	}
+
 	for (int i = k; i < n; ++i) {
 		CUnit &unit = AiPlayer->Player->GetUnit(i);
 		bool repair_flag = true;
@@ -1359,7 +1415,7 @@ static void AiCheckRepair()
 
 		// Unit damaged?
 		// Don't repair attacked unit (wait 5 sec before repairing)
-		if (unit.Type->RepairHP
+		if (!scripted && unit.Type->RepairHP
 			&& unit.CurrentAction() != UnitAction::Built
 			&& unit.CurrentAction() != UnitAction::UpgradeTo
 			&& unit.Variable[HP_INDEX].Value < unit.Variable[HP_INDEX].Max

@@ -112,6 +112,9 @@ void COrder_SpellCast::Save(CFile &file, const CUnit &unit) const /* override */
 		file.printf(" \"finished\", ");
 	}
 	file.printf(" \"range\", %d,", this->Range);
+	if (this->isAutocast) {
+		file.printf(" \"autocast\",");
+	}
 	if (this->HasGoal()) {
 		file.printf(" \"goal\", \"%s\",", UnitReference(*this->GetGoal()).c_str());
 	}
@@ -134,6 +137,8 @@ bool COrder_SpellCast::ParseSpecificData(lua_State *l,
 	} else if (value == "range") {
 		++j;
 		this->Range = LuaToNumber(l, -1, j + 1);
+	} else if (value == "autocast") {
+		this->isAutocast = true;
 	} else if (value == "state") {
 		++j;
 		this->State = LuaToNumber(l, -1, j + 1);

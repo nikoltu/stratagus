@@ -38,6 +38,10 @@
 
 #include "ui.h"
 
+#include "action/action_research.h"
+#include "action/action_train.h"
+#include "action/action_upgradeto.h"
+#include "cursor.h"
 #include "font.h"
 #include "interface.h"
 #include "iolib.h"
@@ -57,6 +61,7 @@
 #include "icons.h"
 #include "settings.h"
 #include "unittype.h"
+#include "upgrade.h"
 
 #include <cctype>
 #include <cmath>
@@ -175,12 +180,27 @@ CUserInterface::CUserInterface()
 */
 CPopup &PopupByIdent(std::string_view ident)
 {
-	const auto it = ranges::find(UI.ButtonPopups, ident, &CPopup::Ident);
-	if (it != UI.ButtonPopups.end()) {
-		return **it;
+	if (CPopup *popup = FindPopupByIdent(ident)) {
+		return *popup;
 	}
 	ErrorPrint("Unknown popup '%s'\n", ident.data());
 	ExitFatal(1);
+}
+
+/**
+**  Find a popup by string identifier.
+**
+**  The scripts define the button popups only while "Show button popups" is on, but the buttons
+**  keep their popup ident, so a missing popup is not an error when drawing.
+**
+**  @param ident  Popup identifier.
+**
+**  @return       popup class pointer, or nullptr when no popup has that ident.
+*/
+CPopup *FindPopupByIdent(std::string_view ident)
+{
+	const auto it = ranges::find(UI.ButtonPopups, ident, &CPopup::Ident);
+	return it != UI.ButtonPopups.end() ? it->get() : nullptr;
 }
 
 // Magnification applied to the in-game map viewports. Only the play area is scaled. Used both when
@@ -387,6 +407,17 @@ void ApplyClassicViewLayout()
 		ErrorPrint("ClassicView: the layout is not switched in the big map mode\n");
 		return;
 	}
+	// Nothing that points into the old layout crosses the switch: a building being placed is
+	// let go, an open pie menu is closed, and the pointer is on nothing until it moves again.
+	if (CursorBuilding != nullptr) {
+		CancelBuildingMode();
+	}
+	if (CursorState == CursorStates::PieMenu) {
+		CursorState = CursorStates::Point;
+	}
+	ButtonAreaUnderCursor.reset();
+	ButtonUnderCursor = -1;
+	CursorOn = ECursorOn::Unknown;
 
 	const CViewport &old = UI.Viewports[0];
 	const PixelPos oldTopLeft = old.GetTopLeftPos();
@@ -526,8 +557,11 @@ static void DrawClassicNineSlice(const CAtlasGraphic &atlas, const hdatlas::Clas
 /// graphic (the rule of the Remastered icons, CGraphic::Load). Where Portrait-mask has
 /// "<set>_<N>_team" the picture takes the player's colour there: colour x the mask's grey / 255
 /// (o11_16, o11_84: greys 255 / 215 / 175 / 135 give 164 / 138 / 112 / 87 of red 164).
+/// `srcX`, `srcW`: the columns of the picture that dst shows (the narrow cell of a large group
+/// shows a part of it at the picture's own size).
 static void DrawClassicPicture(const hdatlas::ClassicScreen &box, const CIcon &icon, int playerColor,
-                               const classichud::Rect &dst)
+                               const classichud::Rect &dst, int srcX = 0,
+                               int srcW = classichud::PictureW)
 {
 	const CAtlasGraphic *faces = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-face.json");
 	if (faces == nullptr || !icon.G) {
@@ -546,7 +580,12 @@ static void DrawClassicPicture(const hdatlas::ClassicScreen &box, const CIcon &i
 	if (frame < 0) {
 		return;
 	}
-	const SDL_Rect r = ClassicScreenRect(box, dst);
+	const SDL_Rect shown = ClassicScreenRect(box, dst);
+	// The whole picture's rect; a window of it is cut out by the clip rect (the pattern of
+	// DrawClassicFramePart).
+	const bool window = srcX != 0 || srcW != classichud::PictureW;
+	const SDL_Rect r = window ? ClassicScreenRect(box, {dst.x - srcX, dst.y, classichud::PictureW, dst.h})
+	                          : shown;
 	// Black under the picture: where a picture has no pixel the original shows black
 	// (o11_16, "Repair": its 38 empty pixels).
 	Uint8 oldR;
@@ -555,19 +594,24 @@ static void DrawClassicPicture(const hdatlas::ClassicScreen &box, const CIcon &i
 	Uint8 oldA;
 	SDL_GetRenderDrawColor(TheRenderer, &oldR, &oldG, &oldB, &oldA);
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
-	SDL_RenderFillRect(TheRenderer, &r);
+	SDL_RenderFillRect(TheRenderer, &shown);
 	SDL_SetRenderDrawColor(TheRenderer, oldR, oldG, oldB, oldA);
-	faces->DrawAtlasFramePart(frame, classichud::PictureW, classichud::PictureH, r);
-	if (playerColor < 0 || playerColor >= (int) PlayerColorsRGB.size()
-		|| PlayerColorsRGB[playerColor].empty()) {
-		return;
+	if (window) {
+		SDL_RenderSetClipRect(TheRenderer, &shown);
 	}
-	if (const CAtlasGraphic *masks = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-mask.json")) {
-		const int mask = masks->FrameByName((name + "_team").c_str());
-		if (mask >= 0) {
-			const CColor &c = PlayerColorsRGB[playerColor][0];
-			masks->DrawAtlasFrameClipScaled(mask, r.x, r.y, r.w, r.h, false, c.R, c.G, c.B);
+	faces->DrawAtlasFramePart(frame, classichud::PictureW, classichud::PictureH, r);
+	if (playerColor >= 0 && playerColor < (int) PlayerColorsRGB.size()
+		&& !PlayerColorsRGB[playerColor].empty()) {
+		if (const CAtlasGraphic *masks = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-mask.json")) {
+			const int mask = masks->FrameByName((name + "_team").c_str());
+			if (mask >= 0) {
+				const CColor &c = PlayerColorsRGB[playerColor][0];
+				masks->DrawAtlasFrameClipScaled(mask, r.x, r.y, r.w, r.h, false, c.R, c.G, c.B);
+			}
 		}
+	}
+	if (window) {
+		SDL_RenderSetClipRect(TheRenderer, nullptr);
 	}
 }
 
@@ -577,8 +621,142 @@ static int ClassicPlayerColor(const CUnit &unit)
 	return player ? GameSettings.Presets[player->Index].PlayerColor : -1;
 }
 
-/// The widgets of the classic HUD that are art: header buttons, resource icons, the panel of one
-/// selected unit (frame, portrait, hit point bar) and the command card.
+/// A header button (user button `index`) is held down: the pointer is on it with the left
+/// button down, the engine's own state of a pressed button.
+static bool ClassicUserButtonHeld(int index)
+{
+	return ButtonAreaUnderCursor == ButtonArea::User && ButtonUnderCursor == index
+	       && (MouseButtons & LeftButton) != 0;
+}
+
+/// An in-game window is up: the scripts' mark of it, the dim caption of the Pause button
+/// (user button 1, set with the "Resume" caption when the first window comes up).
+static bool ClassicWindowUp()
+{
+	return UI.UserButtons.size() > 1 && UI.UserButtons[1].Dim;
+}
+
+/// The one selected unit is shown with what it carries: a transport with units aboard, of the
+/// player or an ally (the units DrawUnitInfo shows the passengers of). Its panel has no text.
+static bool ClassicTransportShown(const CUnit &unit)
+{
+	return unit.Type->CanTransport() && unit.BoardCount > 0 && ThisPlayer != nullptr
+	       && (unit.Player == ThisPlayer || ThisPlayer->IsAllied(*unit.Player));
+}
+
+/// Passenger n of a transport in the order of its cells (DrawUnitInfo_transporter), or nullptr.
+static const CUnit *ClassicPassenger(const CUnit &transport, int n)
+{
+	for (const CUnit *inside : transport.InsideUnits) {
+		if (inside != nullptr && inside->Boarded && n-- == 0) {
+			return inside;
+		}
+	}
+	return nullptr;
+}
+
+/// The variable that holds the progress of what the unit makes, for a unit the Remastered panel
+/// shows its bar for (not of an opponent, not neutral); -1 for any other unit.
+static int ClassicProgressVariable(const CUnit &unit)
+{
+	if (ThisPlayer == nullptr || ThisPlayer->IsEnemy(unit)
+		|| unit.Player->Type == PlayerTypes::PlayerNeutral) {
+		return -1;
+	}
+	switch (unit.CurrentAction()) {
+		case UnitAction::Built: return BUILD_INDEX;
+		case UnitAction::Train: return TRAINING_INDEX;
+		case UnitAction::Research: return RESEARCH_INDEX;
+		case UnitAction::UpgradeTo: return UPGRADINGTO_INDEX;
+		default: return -1;
+	}
+}
+
+/// The picture of what the unit trains, researches or upgrades to (the icons of
+/// DrawUnitInfo_single_selection), or nullptr.
+static const CIcon *ClassicProgressIcon(const CUnit &unit)
+{
+	switch (unit.CurrentAction()) {
+		case UnitAction::Train:
+			return static_cast<const COrder_Train *>(unit.CurrentOrder())->GetUnitType().Icon.Icon;
+		case UnitAction::UpgradeTo:
+			return static_cast<const COrder_UpgradeTo *>(unit.CurrentOrder())->GetUnitType().Icon.Icon;
+		case UnitAction::Research:
+			return static_cast<const COrder_Research *>(unit.CurrentOrder())->GetUpgrade().Icon;
+		default:
+			return nullptr;
+	}
+}
+
+/// The "Magic:" row of the one selected unit is shown: a caster the stat rows are shown for.
+/// A caster is a unit with the Mana variable enabled, the rule of the Remastered panel's row
+/// (Mana = "only"); every unit type has the variable's default maximum, casters or not.
+static bool ClassicMagicShown(const CUnit &unit)
+{
+	return unit.Variable[MANA_INDEX].Enable && unit.Variable[MANA_INDEX].Max > 0
+	       && ThisPlayer != nullptr && !ThisPlayer->IsEnemy(unit)
+	       && unit.Player->Type != PlayerTypes::PlayerNeutral && ClassicProgressVariable(unit) < 0
+	       && !ClassicTransportShown(unit);
+}
+
+/// A unit in a cell of the info panel (a unit of a group, a passenger): the cell, its picture
+/// and the hit point bar under it. `wide`: the cell of the portrait's size.
+static void DrawClassicUnitCell(const CAtlasGraphic &widgets, const hdatlas::ClassicScreen &box,
+                                const CUnit &unit, const classichud::Rect &cell, bool wide, bool pointerOn)
+{
+	DrawClassicNineSlice(widgets, box, pointerOn ? "portrait_button_hovered" : "portrait_button",
+	                     classichud::CellSprite, classichud::CellSlice, cell);
+	if (unit.Type != nullptr && unit.Type->Icon.Icon) {
+		if (wide) {
+			DrawClassicPicture(box, *unit.Type->Icon.Icon, ClassicPlayerColor(unit),
+			                   classichud::cellPicture(cell));
+		} else {
+			DrawClassicPicture(box, *unit.Type->Icon.Icon, ClassicPlayerColor(unit),
+			                   classichud::cellPicture(cell), classichud::GroupSmallPictureSrcX,
+			                   classichud::GroupSmallPictureW);
+		}
+	}
+	DrawClassicNineSlice(widgets, box, "hp_bar", classichud::HitPointSprite, classichud::HitPointSlice,
+	                     classichud::groupBar(cell));
+	classichud::Rect fill = classichud::groupFill(cell);
+	int colour = 0;
+	fill.w = classichud::groupHitPointFill(unit.Variable[HP_INDEX].Value, unit.Variable[HP_INDEX].Max,
+	                                       fill.w, colour);
+	if (fill.w > 0) {
+		const char *sprite = colour == 0 ? "bar_green" : colour == 1 ? "bar_yellow" : "bar_red";
+		widgets.DrawAtlasFramePart(widgets.FrameByName(sprite), 1, 1, ClassicScreenRect(box, fill));
+	}
+}
+
+int ClassicGroupCellAt(int screenX, int screenY)
+{
+	int bx;
+	int by;
+	if (!ClassicLayoutOn
+		|| !hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenX, screenY, bx, by)) {
+		return -1;
+	}
+	const std::vector<CUnit *> &cells = GetSelectionCells();
+	const int cell = classichud::groupCellAt(bx, by, (int) cells.size() <= classichud::GroupWideMax);
+	return cell >= 0 && cell < (int) cells.size() && cells[cell] != nullptr ? cell : -1;
+}
+
+int ClassicPassengerCellAt(int screenX, int screenY)
+{
+	int bx;
+	int by;
+	if (!ClassicLayoutOn || Selected.size() != 1 || Selected[0] == nullptr || Selected[0]->Type == nullptr
+		|| !ClassicTransportShown(*Selected[0])
+		|| !hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenX, screenY, bx, by)) {
+		return -1;
+	}
+	const int n = classichud::passengerCellAt(bx, by);
+	return n >= 0 && ClassicPassenger(*Selected[0], n) != nullptr ? n : -1;
+}
+
+/// The widgets of the classic HUD that are art: header buttons, resource icons, the panel of the
+/// selected unit or units (frame, portraits, hit point bars, what a unit makes or carries) and
+/// the command card.
 static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::string &race)
 {
 	const CAtlasGraphic *widgets = ClassicHudAtlas("Data/skins/Classic_HUD_Widgets.json");
@@ -603,9 +781,9 @@ static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::
 	}
 	widgets->DrawAtlasFramePart(widgets->FrameByName("f5"), classichud::F5Face.w,
 	                            classichud::F5Face.h, ClassicScreenRect(box, classichud::F5Face));
-	widgets->DrawAtlasFramePart(widgets->FrameByName(("hud_" + race + "_small").c_str()),
-	                            classichud::PauseFace.w, classichud::PauseFace.h,
-	                            ClassicScreenRect(box, classichud::PauseFace));
+	widgets->DrawAtlasFramePart(
+		widgets->FrameByName(classichud::faceName("hud_" + race + "_small", ClassicUserButtonHeld(1)).c_str()),
+		classichud::PauseFace.w, classichud::PauseFace.h, ClassicScreenRect(box, classichud::PauseFace));
 	// Resource row: the icons, about the middle of the logical screen.
 	for (int i = 0; i < classichud::ResourceIconCount; ++i) {
 		const std::string name = "icons_" + std::to_string(classichud::ResourceIconSprite[i]);
@@ -616,6 +794,7 @@ static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::
 	}
 	// One selected unit: panel, portrait, hit points.
 	if (Selected.size() == 1 && Selected[0] != nullptr && Selected[0]->Type != nullptr) {
+		UpdateUnitVariables(*Selected[0]);
 		const CUnit &unit = *Selected[0];
 		DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
 		                     classichud::CellSlice, classichud::InfoPanel);
@@ -636,6 +815,67 @@ static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::
 			const char *sprite = colour == 0 ? "bar_green" : colour == 1 ? "bar_yellow" : "bar_red";
 			widgets->DrawAtlasFramePart(widgets->FrameByName(sprite), 1, 1, ClassicScreenRect(box, r));
 		}
+		// A building under construction, a unit that trains, researches or upgrades: the bar and
+		// its done part, for the units the Remastered panel shows its bar for.
+		const int progress = ClassicProgressVariable(unit);
+		if (progress >= 0) {
+			widgets->DrawAtlasFramePart(widgets->FrameByName("complete_bar"), classichud::CompleteBar.w,
+			                            classichud::CompleteBar.h,
+			                            ClassicScreenRect(box, classichud::CompleteBar));
+			const int done = classichud::completeFill(unit.Variable[progress].Value,
+			                                          unit.Variable[progress].Max);
+			if (done > 0) {
+				const classichud::Rect r = {classichud::CompleteFill.x, classichud::CompleteFill.y, done,
+				                            classichud::CompleteFill.h};
+				widgets->DrawAtlasFramePart(widgets->FrameByName("bar_green"), 1, 1,
+				                            ClassicScreenRect(box, r));
+			}
+			// What is made, in its cell beside the label (o30_C01_*, o30_C02_*, o30_C03_*).
+			if (const CIcon *icon = ClassicProgressIcon(unit)) {
+				DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
+				                     classichud::CellSlice, classichud::TrainingCell);
+				DrawClassicPicture(box, *icon, ClassicPlayerColor(unit),
+				                   classichud::cellPicture(classichud::TrainingCell));
+			}
+		}
+		// A caster: the bar of the "Magic:" row (o30_C14_mage_selected).
+		if (ClassicMagicShown(unit)) {
+			const classichud::Rect bar = classichud::magicBar(classichud::MagicRow);
+			DrawClassicNineSlice(*widgets, box, "magic_bar", classichud::MagicSprite,
+			                     classichud::MagicSlice, bar);
+			classichud::Rect r = classichud::magicFillArea(bar);
+			r.w = classichud::magicFill(unit.Variable[MANA_INDEX].Value, unit.Variable[MANA_INDEX].Max);
+			if (r.w > 0) {
+				widgets->DrawAtlasFramePart(widgets->FrameByName("bar_magic"), 1, 1,
+				                            ClassicScreenRect(box, r));
+			}
+		}
+		// A transport: its passengers in the cells under the portrait's row (o30_C13_*).
+		if (ClassicTransportShown(unit)) {
+			for (int n = 0; n < classichud::PassengerMax; ++n) {
+				const CUnit *inside = ClassicPassenger(unit, n);
+				if (inside == nullptr) {
+					break;
+				}
+				DrawClassicUnitCell(*widgets, box, *inside, classichud::passengerCell(n), true,
+				                    ButtonAreaUnderCursor == ButtonArea::Transporting
+				                    && ButtonUnderCursor == n);
+			}
+		}
+	} else if (Selected.size() > 1) {
+		// Several units: the cells of the selection grid (GetSelectionCells: a unit that died
+		// leaves its cell empty), 3 columns up to 9 cells, 4 narrow ones above (o30_C06_*).
+		const std::vector<CUnit *> &cells = GetSelectionCells();
+		const bool wide = (int) cells.size() <= classichud::GroupWideMax;
+		DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
+		                     classichud::CellSlice, classichud::InfoPanel);
+		for (int i = 0; i < (int) cells.size() && i < classichud::groupCellCount(wide); ++i) {
+			if (cells[i] != nullptr && cells[i]->Type != nullptr) {
+				DrawClassicUnitCell(*widgets, box, *cells[i], classichud::groupCell(i, wide), wide,
+				                    ButtonAreaUnderCursor == ButtonArea::Selected
+				                    && ButtonUnderCursor == i);
+			}
+		}
 	}
 	// Command card.
 	if (!Selected.empty() && Selected[0] != nullptr) {
@@ -647,12 +887,17 @@ static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::
 				continue;
 			}
 			const classichud::Rect cell = classichud::commandCell(i);
-			DrawClassicNineSlice(*widgets, box, "portrait_button", classichud::CellSprite,
-			                     classichud::CellSlice, cell);
+			// Held down: the pointer on the cell with the left button down (a button that may
+			// not be used never has the pointer, HandleMouseOn).
+			const bool held = ButtonAreaUnderCursor == ButtonArea::Button && ButtonUnderCursor == i
+			                  && (MouseButtons & LeftButton) != 0;
+			DrawClassicNineSlice(*widgets, box, classichud::faceName("portrait_button", held).c_str(),
+			                     classichud::CellSprite, classichud::CellSlice, cell);
 			DrawClassicPicture(box, *CurrentButtons[i].Icon.Icon, playerColor,
 			                   classichud::cellPicture(cell));
 			if (marked) {
-				DrawClassicNineSlice(*widgets, box, "portrait_button_highlight",
+				DrawClassicNineSlice(*widgets, box,
+				                     classichud::faceName("portrait_button_highlight", held).c_str(),
 				                     classichud::CellSprite, classichud::CellSlice, cell);
 			}
 			if (!allowed) {
@@ -732,6 +977,117 @@ static double DrawClassicText(const hdatlas::ClassicScreen &box, int capBox, dou
 	return k > 0.0 ? width / k : 0.0;
 }
 
+/// The tooltip of a command button: the box, then the lines the Remastered tooltip has for the
+/// button (GetRemasteredTooltipTexts; the costs DrawPopup reads): title, the cost row, the
+/// description, and for a button that may not be used the yellow line of what it needs.
+static void DrawClassicTooltip(const hdatlas::ClassicScreen &box, const ButtonAction &button, bool allowed)
+{
+	using classichud::TextAlign;
+	std::string title;
+	std::string body;
+	std::string requirement;
+	GetRemasteredTooltipTexts(button, allowed, title, body, requirement);
+	if (title.empty()) {
+		title = button.Hint;
+	}
+	// Gold, lumber, oil: the resources with a cost, packed from the left.
+	static const int resources[classichud::TooltipCostMax] = {GoldCost, WoodCost, OilCost};
+	const int *costs = nullptr;
+	switch (button.Action) {
+		case ButtonCmd::Research:
+			costs = AllUpgrades[button.Value]->Costs;
+			break;
+		case ButtonCmd::Build:
+		case ButtonCmd::Train:
+		case ButtonCmd::UpgradeTo:
+			costs = ThisPlayer != nullptr ? getUnitTypes()[button.Value]->Stats[ThisPlayer->Index].Costs : nullptr;
+			break;
+		default:
+			break;
+	}
+	int cost[classichud::TooltipCostMax];
+	int costCount = 0;
+	for (int i = 0; costs != nullptr && i < classichud::TooltipCostMax; ++i) {
+		if (costs[resources[i]] > 0) {
+			cost[costCount++] = i;
+		}
+	}
+	// The description and the requirement, wrapped to the box's text columns.
+	double scale = 1.0;
+	const CFont *font = ClassicTextFace(classichud::TextCap, box, scale);
+	if (font == nullptr || scale <= 0.0) {
+		return;
+	}
+	const unsigned int wrap = (unsigned int) (classichud::TooltipTextW * box.s / scale);
+	std::string_view line[classichud::TooltipLineMax];
+	int lines = 0;
+	line[lines++] = title;
+	const int costLine = costCount > 0 ? lines++ : -1;
+	std::string_view part;
+	for (unsigned int n = 1; lines < classichud::TooltipLineMax
+							 && !(part = GetLineFont(n, body, wrap, font)).empty(); ++n) {
+		line[lines++] = part;
+	}
+	const int requirementLine = lines;
+	for (unsigned int n = 1; lines < classichud::TooltipLineMax
+							 && !(part = GetLineFont(n, requirement, wrap, font)).empty(); ++n) {
+		line[lines++] = part;
+	}
+
+	// The box: black at a third over the map (its two rects overlap: the middle one whole, of
+	// the wide one the two side strips), then the line.
+	const classichud::TooltipBox parts = classichud::tooltipBox(box.lh, lines);
+	const classichud::Rect &mid = parts.fill[0];
+	const classichud::Rect &wide = parts.fill[1];
+	const classichud::Rect fills[3] = {mid, {wide.x, wide.y, mid.x - wide.x, wide.h},
+	                                   {mid.x + mid.w, wide.y, wide.x + wide.w - mid.x - mid.w, wide.h}};
+	Uint8 oldR;
+	Uint8 oldG;
+	Uint8 oldB;
+	Uint8 oldA;
+	SDL_BlendMode oldMode = SDL_BLENDMODE_NONE;
+	SDL_GetRenderDrawColor(TheRenderer, &oldR, &oldG, &oldB, &oldA);
+	SDL_GetRenderDrawBlendMode(TheRenderer, &oldMode);
+	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, (Uint8) classichud::TooltipBoxAlpha);
+	for (const classichud::Rect &r : fills) {
+		const SDL_Rect dst = ClassicScreenRect(box, r);
+		SDL_RenderFillRect(TheRenderer, &dst);
+	}
+	SDL_SetRenderDrawBlendMode(TheRenderer, oldMode);
+	SDL_SetRenderDrawColor(TheRenderer, (Uint8) classichud::TooltipBoxLineRGB[0],
+	                       (Uint8) classichud::TooltipBoxLineRGB[1],
+	                       (Uint8) classichud::TooltipBoxLineRGB[2], 255);
+	for (const classichud::Rect &r : parts.line) {
+		const SDL_Rect dst = ClassicScreenRect(box, r);
+		SDL_RenderFillRect(TheRenderer, &dst);
+	}
+	SDL_SetRenderDrawColor(TheRenderer, oldR, oldG, oldB, oldA);
+
+	const SDL_Color yellow = {(Uint8) classichud::TooltipYellowRGB[0], (Uint8) classichud::TooltipYellowRGB[1],
+	                          (Uint8) classichud::TooltipYellowRGB[2], 255};
+	const CAtlasGraphic *widgets = ClassicHudAtlas("Data/skins/Classic_HUD_Widgets.json");
+	for (int n = 0; n < lines; ++n) {
+		const bool needs = n >= requirementLine;
+		const double midY = classichud::tooltipLineMidY(box.lh, lines, n, needs);
+		if (n != costLine) {
+			DrawClassicText(box, classichud::TextCap, classichud::TooltipX, midY, TextAlign::Left, line[n],
+			                needs ? &yellow : nullptr);
+			continue;
+		}
+		for (int k = 0; k < costCount; ++k) {
+			const classichud::Rect icon = classichud::tooltipCostIcon(k, midY);
+			if (widgets != nullptr) {
+				const std::string name = "icons_" + std::to_string(classichud::ResourceIconSprite[cost[k]]);
+				widgets->DrawAtlasFramePart(widgets->FrameByName(name.c_str()), icon.w, icon.h,
+				                            ClassicScreenRect(box, icon));
+			}
+			DrawClassicText(box, classichud::TextCap, icon.x + classichud::TooltipCostTextDX, midY,
+			                TextAlign::Left, std::to_string(costs[resources[cost[k]]]));
+		}
+	}
+}
+
 /// The texts of the classic HUD, at the places measured in the original (hd_classic_hud.h).
 static void DrawClassicHudTexts(const hdatlas::ClassicScreen &box)
 {
@@ -763,20 +1119,27 @@ static void DrawClassicHudTexts(const hdatlas::ClassicScreen &box)
 		                classichud::CaptionMidY, TextAlign::Centre, UI.UserButtons[0].Button.Text);
 	}
 	if (UI.UserButtons.size() > 1) {
+		// With a window up the scripts give it the "Resume" caption and mark it dim (o11_28);
+		// the level is the Remastered header's, 127 of 255 (DrawUserDefinedButtons).
+		const SDL_Color dim = {127, 127, 127, 255};
 		DrawClassicText(box, classichud::TextCap,
 		                classichud::PauseFace.x + classichud::PauseFace.w / 2.0,
-		                classichud::CaptionMidY, TextAlign::Centre, UI.UserButtons[1].Button.Text);
+		                classichud::CaptionMidY, TextAlign::Centre, UI.UserButtons[1].Button.Text,
+		                UI.UserButtons[1].Dim ? &dim : nullptr);
 	}
 	// One selected unit: the texts of the Remastered info panel at their classic places
-	// (classichud::panelX / panelMidY). A unit that is built, trains, researches or upgrades has
-	// another panel in the original, which is not drawn.
+	// (classichud::panelX / panelMidY). A building under construction has its name, its hit point
+	// figure and the words on the bar, which that panel gives by its own conditions (o21_52); a
+	// unit that trains, researches or upgrades likewise, with the label "Training:" /
+	// "Upgrading:" on stat row 1 (o30_C01_*, o30_C02_*, o30_C03_*). A transport with units aboard
+	// has no text (o30_C13_*).
 	if (Selected.size() == 1 && Selected[0] != nullptr && Selected[0]->Type != nullptr
 		&& Video.HudCanvas.Scale > 0.0) {
 		CUnit &unit = *Selected[0];
-		const UnitAction action = unit.CurrentAction();
-		if (action != UnitAction::Built && action != UnitAction::Train
-			&& action != UnitAction::Research && action != UnitAction::UpgradeTo) {
+		if (!ClassicTransportShown(unit)) {
 			UpdateUnitVariables(unit);
+			const bool magic = ClassicMagicShown(unit);
+			const classichud::Rect magicBar = classichud::magicBar(classichud::MagicRow);
 			std::vector<ClassicPanelText> texts;
 			ClassicInfoPanelTexts(unit, texts);
 			const CFont *small = CFont::Get("remaster_hud_small");
@@ -797,6 +1160,13 @@ static void DrawClassicHudTexts(const hdatlas::ClassicScreen &box)
 					DrawClassicText(box, classichud::TextCap, x, midY, TextAlign::Tab, label);
 					DrawClassicText(box, classichud::TextCap, classichud::PanelValueX, midY, TextAlign::Left,
 					                value);
+					continue;
+				}
+				// The mana figure: centred on the bar of the "Magic:" row.
+				if (magic && !smallFace && t.centred && classichud::contains(magicBar, (int) x, (int) midY)) {
+					DrawClassicText(box, classichud::TextCap, classichud::MagicTextMidX,
+					                classichud::PanelStatMidY + classichud::PanelStatPitch * classichud::MagicRow,
+					                TextAlign::Centre, t.text);
 					continue;
 				}
 				DrawClassicText(box, smallFace ? classichud::TextCapSmall : classichud::TextCap, x, midY,
@@ -826,16 +1196,40 @@ static void DrawClassicHudTexts(const hdatlas::ClassicScreen &box)
 			                allowed ? nullptr : &dim);
 		}
 	}
-	// The command under the pointer: its hint, the first line of the Remastered tooltip.
-	if (ButtonAreaUnderCursor == ButtonArea::Button && ButtonUnderCursor >= 0
-		&& ButtonUnderCursor < (int) CurrentButtons.size()) {
-		bool allowed = false;
-		bool marked = false;
-		if (ClassicCommandButtonShown(ButtonUnderCursor, allowed, marked)) {
-			DrawClassicText(box, classichud::TextCap, classichud::TooltipX, classichud::tooltipMidY(box.lh),
-			                TextAlign::Left, CurrentButtons[ButtonUnderCursor].Hint);
-		}
+	// The command under the pointer: the texts of the Remastered tooltip in the classic box. A
+	// button that may not be used has no pointer state (HandleMouseOn); its cell under the
+	// pointer shows the tooltip all the same (o30_C05_hover_dim_keep).
+	int tip = ButtonAreaUnderCursor == ButtonArea::Button ? ButtonUnderCursor : -1;
+	if (tip < 0 && !ButtonAreaUnderCursor.has_value() && CursorOn == ECursorOn::Unknown) {
+		tip = ClassicCommandCellAt(CursorScreenPos.x, CursorScreenPos.y);
 	}
+	bool allowed = false;
+	bool marked = false;
+	if (tip >= 0 && tip < (int) CurrentButtons.size() && ClassicCommandButtonShown(tip, allowed, marked)
+		&& !CurrentButtons[tip].Hint.empty()) {
+		DrawClassicTooltip(box, CurrentButtons[tip], allowed);
+	}
+}
+
+void DrawClassicMessage(std::string_view text)
+{
+	if (!ClassicLayoutOn || !TheRenderer || text.empty()) {
+		return;
+	}
+	const hdatlas::ClassicScreen box = ClassicBoxOnScreen();
+	const SDL_Color yellow = {(Uint8) classichud::TooltipYellowRGB[0], (Uint8) classichud::TooltipYellowRGB[1],
+	                          (Uint8) classichud::TooltipYellowRGB[2], 255};
+	DrawClassicText(box, classichud::TextCap, classichud::MessageX, classichud::messageMidY(box.lh),
+	                classichud::TextAlign::Left, text, &yellow);
+}
+
+void DrawClassicObjective(int n, std::string_view text)
+{
+	if (!ClassicLayoutOn || !TheRenderer || text.empty()) {
+		return;
+	}
+	DrawClassicText(ClassicBoxOnScreen(), classichud::TextCap, classichud::ObjectivesX,
+	                classichud::objectiveMidY(n), classichud::TextAlign::Left, text);
 }
 
 /**
@@ -871,7 +1265,10 @@ void DrawClassicHud()
 		}
 	}
 	if (const CAtlasGraphic *widgets = ClassicHudAtlas("Data/skins/Classic_HUD_Widgets.json")) {
-		const std::string face = "hud_" + race + "_small";
+		// The Menu button's face: the held one while it is held down and while its window is up
+		// (o11_28: the face with the light frame under the Game Menu).
+		const std::string face =
+			classichud::faceName("hud_" + race + "_small", ClassicUserButtonHeld(0) || ClassicWindowUp());
 		const hdatlas::ClassicRect r = hdatlas::classicToScreen(
 			box, hdatlas::ClassicMenuX, hdatlas::ClassicMenuY, hdatlas::ClassicMenuW, hdatlas::ClassicMenuH);
 		const SDL_Rect dst = {r.x, r.y, r.w, r.h};
@@ -988,6 +1385,13 @@ static void SaveViewports(CFile &file, const CUserInterface &ui)
 void SaveUserInterface(CFile &file)
 {
 	SaveViewports(file, UI);
+	// The stored map positions. Guarded: a build that does not know the call reads the file all the same.
+	file.printf("if (SetSavedMapPosition ~= nil) then\n");
+	for (unsigned i = 0; i < SavedMapPositionCount; ++i) {
+		const Vec2i pos = GetSavedMapPosition(i);
+		file.printf("  SetSavedMapPosition(%u, %d, %d)\n", i, pos.x, pos.y);
+	}
+	file.printf("end\n\n");
 }
 
 /**

@@ -28,8 +28,8 @@ android {
         applicationId 'net.wargushd.game'
         minSdk 24
         targetSdk 34
-        versionCode 340043
-        versionName '3.4.43'
+        versionCode 340056
+        versionName '3.4.56'
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -57,6 +57,15 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        // The release configuration signed with the debug key, so that it can be installed on
+        // the emulator and the test tablets and checked there. Never distributed.
+        releaseCheck {
+            initWith release
+            debuggable false
+            jniDebuggable false
+            signingConfig signingConfigs.debug
+            matchingFallbacks = ['release']
         }
     }
 

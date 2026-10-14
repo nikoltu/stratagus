@@ -362,6 +362,16 @@ extern CUnit *AttackUnitsInRange(const CUnit &unit);
 extern CUnit *AttackUnitsInReactRange(const CUnit &unit, CUnitFilter pred);
 extern CUnit *AttackUnitsInReactRange(const CUnit &unit);
 
+/// Range of the idle target search (original VA 0x4958D3 - 0x4958FF): a computer's unit looks in
+/// its type's computer reaction range; a person's unit on the idle order looks in its own attack
+/// range (the person column is read only for the orders whose flag word has 4 without 0x400).
+inline int IdleSearchRange(bool computer, int attackRange, int reactRangeComputer)
+{
+	return computer ? reactRangeComputer : attackRange;
+}
+/// Find best enemy for a unit that stands idle
+extern CUnit *AttackUnitsInIdleRange(const CUnit &unit);
+
 
 
 //@}

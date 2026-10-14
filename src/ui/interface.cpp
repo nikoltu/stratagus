@@ -71,7 +71,7 @@ static int ScrollMarginLeft = 15;
 static int ScrollMarginRight = 16;
 
 static const char Cursor[] = "~!_";  /// Input cursor
-static Vec2i SavedMapPosition[3];    /// Saved map position
+static Vec2i SavedMapPosition[SavedMapPositionCount];    /// Saved map position
 static std::array<char, 80> Input{}; /// line input for messages/long commands
 static int InputIndex;               /// current index into input
 static std::array<decltype(Input), 16> InputHistory = {}; /// History of inputs
@@ -346,7 +346,8 @@ bool UiTouchGroupStripShown()
 {
 	// Not for an observer and not in a replay: there are no own units to group.
 	// Not in the map-only mode: it has no HUD, and the unit is taken from the side bar.
-	return UiTouchMode() && GameRunning && !BigMapMode && !GameObserve
+	// Not in the classic view: its picture is the original's, which has no such strip.
+	return UiTouchMode() && GameRunning && !BigMapMode && !GameObserve && !ClassicHudActive()
 		   && ReplayGameType == EReplayType::NoReplay
 		   && ThisPlayer != nullptr && UI.SelectedViewport != nullptr
 		   && TouchHudUnit() >= 1;
@@ -697,6 +698,18 @@ static void UiCenterOnSelected()
 static void UiSaveMapPosition(unsigned position)
 {
 	SavedMapPosition[position] = UI.SelectedViewport->MapPos;
+}
+
+Vec2i GetSavedMapPosition(unsigned position)
+{
+	return position < SavedMapPositionCount ? SavedMapPosition[position] : Vec2i(0, 0);
+}
+
+void SetSavedMapPosition(unsigned position, const Vec2i &pos)
+{
+	if (position < SavedMapPositionCount) {
+		SavedMapPosition[position] = pos;
+	}
 }
 
 /**

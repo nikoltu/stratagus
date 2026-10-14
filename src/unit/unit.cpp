@@ -47,11 +47,13 @@
 #include "construct.h"
 #include "editor.h"
 #include "game.h"
+#include "home_leash.h"
 #include "interface.h"
 #include "luacallback.h"
 #include "map.h"
 #include "missile.h"
 #include "network.h"
+#include "pathfinder.h"
 #include "player.h"
 #include "script.h"
 #include "settings.h"
@@ -67,6 +69,7 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "video.h"
+#include "wc2ai.h"
 #include "wc2mission.h"
 
 #include <cmath>
@@ -442,6 +445,10 @@ void CUnit::Init()
 	JustMoved = 0;
 	TeamSelected = 0;
 	RescuedFrom = nullptr;
+	TakeOver = 0;
+	MapFixed = 0;
+	HomePos = Vec2i(-1, -1);
+	HomeRole = 0;
 	ranges::fill(VisCount, 0);
 	memset(&Seen, 0, sizeof(Seen));
 	Variable.clear();
@@ -1917,9 +1924,39 @@ static void ChangePlayerOwner(CPlayer &oldplayer, CPlayer &newplayer)
 }
 
 /**
+**  The per-unit condition of the original's take-over check: the unit carries the mark and its
+**  slot is not a person's. The mark is set at map load on the units of the rescue slots; a mission
+**  start action may clear it on some of them or set it on a unit of another slot.
+**
+**  @param mark   CUnit::TakeOver of the unit.
+**  @param owner  Type of the unit's player.
+*/
+bool UnitCanBeTakenOver(int mark, PlayerTypes owner)
+{
+	if (owner == PlayerTypes::PlayerPerson || mark == 1) {
+		return false;
+	}
+	return mark == 2 || owner == PlayerTypes::PlayerRescuePassive || owner == PlayerTypes::PlayerRescueActive;
+}
+
+/**
+**  Who takes a marked unit over: a mobile unit of a person that can attack. No stance between
+**  the two slots is looked at. Seen in the original: a soldier and a worker take over, a
+**  Flying Machine and a Zeppelin do not; tankers and transports were not seen.
+**
+**  @param owner      Type of the player of the unit that stands next to the marked one.
+**  @param building   That unit is a building.
+**  @param canAttack  That unit can attack.
+*/
+bool UnitCanTakeOver(PlayerTypes owner, bool building, bool canAttack)
+{
+	return owner == PlayerTypes::PlayerPerson && !building && canAttack;
+}
+
+/**
 **  Rescue units.
 **
-**  Look through all rescuable players, if they could be rescued.
+**  Look through all units that can be taken over, if they could be rescued.
 */
 void RescueUnits()
 {
@@ -1929,16 +1966,23 @@ void RescueUnits()
 	NoRescueCheck = true;
 
 	//  Look if player could be rescued.
-	for (CPlayer *p = Players; p < Players + NumPlayers; ++p) {
-		if (p->Type != PlayerTypes::PlayerRescuePassive && p->Type != PlayerTypes::PlayerRescueActive) {
+	for (CPlayer *p = Players; p < Players + PlayerMax; ++p) {
+		if (p->Type == PlayerTypes::PlayerPerson || p->Type == PlayerTypes::PlayerNobody) {
 			continue;
 		}
+		const bool rescuePlayer = p->Type == PlayerTypes::PlayerRescuePassive || p->Type == PlayerTypes::PlayerRescueActive;
 		if (!p->GetUnits().empty()) {
-			NoRescueCheck = false;
+			if (rescuePlayer) {
+				NoRescueCheck = false;
+			}
 			// NOTE: table is changed.
 			std::vector<CUnit *> table = p->GetUnits();
 
 			for (CUnit *unit : table) {
+				if (!UnitCanBeTakenOver(unit->TakeOver, p->Type)) {
+					continue;
+				}
+				NoRescueCheck = false;
 				// Do not rescue removed units. Units inside something are
 				// rescued by ChangeUnitOwner
 				if (unit->Removed) {
@@ -1960,9 +2004,11 @@ void RescueUnits()
 						return other->tilePos.x <= unitEnd.x + 1 && otherEnd.x >= unit->tilePos.x - 1
 							&& other->tilePos.y <= unitEnd.y + 1 && otherEnd.y >= unit->tilePos.y - 1;
 					});
-				//  Look if ally near the unit.
+				//  Look if a person's unit is near the unit.
 				for (size_t i = 0; i != around.size(); ++i) {
-					if (around[i]->Type->CanAttack && unit->IsAllied(*around[i]) && around[i]->Player->Type != PlayerTypes::PlayerRescuePassive && around[i]->Player->Type != PlayerTypes::PlayerRescueActive) {
+					if (around[i]->IsAlive()
+						&& UnitCanTakeOver(around[i]->Player->Type, around[i]->Type->Building,
+										   around[i]->Type->CanAttack)) {
 						//  City center converts complete race
 						//  NOTE: I use a trick here, centers could
 						//        store gold. FIXME!!!
@@ -2521,6 +2567,12 @@ void LetUnitDie(CUnit &unit, bool suicide)
 	UnitLost(unit);
 	UnitClearOrders(unit);
 
+	// A computer player the original's script runs goes all out when it is down to its last
+	// buildings.
+	if (type->Building && !type->BoolFlag[WALL_INDEX].value && unit.Player->Type == PlayerTypes::PlayerComputer
+		&& Wc2AiIdOf(unit.Player->Index) >= 0) {
+		Wc2AiBuildingLost(unit);
+	}
 
 	// Unit has death animation.
 
@@ -3011,6 +3063,276 @@ static void HitUnit_RunAway(CUnit &target, const CUnit &attacker)
 	}
 }
 
+/**
+**  The original's map loader for a unit record with a non-zero data word: the unit is fixed by
+**  the map, and a fighter that is no building and no worker gets the tile it stands on as home.
+**
+**  @param unit  Unit the map placed.
+*/
+void SetUnitMapFixed(CUnit &unit)
+{
+	unit.MapFixed = 1;
+	if (unit.Type->CanAttack && !unit.Type->Building && unit.CanMove()
+		&& !unit.Type->BoolFlag[HARVESTER_INDEX].value) {
+		unit.HomePos = unit.tilePos;
+		unit.HomeRole = HomeRoleGuard;
+	}
+}
+
+/**
+**  Is the unit held to its home tile? Only a unit of a computer player has the original's
+**  50-cycle pass; a unit in a force of the player's script is led by the force.
+**
+**  @param unit  Unit to check.
+*/
+bool UnitHeldByHome(const CUnit &unit)
+{
+	return unit.HomePos.x >= 0 && unit.HomeRole == HomeRoleGuard
+		&& unit.Player->Type == PlayerTypes::PlayerComputer && unit.GroupId == 0;
+}
+
+/**
+**  Is the unit type a submarine (Gnomish Submarine, Giant Turtle)?
+*/
+static bool IsSubmarineType(const CUnitType &type)
+{
+	return type.MoveType == EMovement::Naval
+		&& (type.BoolFlag[PERMANENTCLOAK_INDEX].value || type.Ident == "unit-human-submarine"
+			|| type.Ident == "unit-orc-submarine");
+}
+
+/**
+**  The nearest living enemy of the whole map the unit can attack, by the original's tile
+**  distance, the lower unit number of equals. The original's search asks no sight.
+**
+**  @param unit  Unit that looks for an enemy.
+**
+**  @return      The enemy, nullptr when none is left.
+*/
+static CUnit *NearestEnemyOnMap(const CUnit &unit)
+{
+	CUnit *nearest = nullptr;
+	int best = 0;
+
+	for (CUnit *otherPtr : UnitManager->GetUnits()) {
+		CUnit &other = *otherPtr;
+
+		if (!other.IsAliveOnMap() || !unit.IsEnemy(other) || !CanTarget(*unit.Type, *other.Type)) {
+			continue;
+		}
+		const int distance = HelpCallDistance(unit.tilePos.x, unit.tilePos.y, other.tilePos.x, other.tilePos.y,
+		                                      other.Type->TileWidth, other.Type->TileHeight);
+		if (!nearest || distance < best
+			|| (distance == best && UnitNumber(other) < UnitNumber(*nearest))) {
+			nearest = &other;
+			best = distance;
+		}
+	}
+	return nearest;
+}
+
+/**
+**  The 50-cycle pass for a unit held to a place it was sent to (a wave unit, a called guard) and
+**  for a wanderer. Too far from the place and not attacking: back to it, attacking on the way.
+**  Idle: at the nearest enemy of the map; with none left the unit becomes a wanderer, which
+**  goes, whenever it stands idle, to a point up to a quarter of the map away.
+**
+**  @param unit  Unit of a computer player with role 2 or 4.
+*/
+static void HomeLeashPointPass(CUnit &unit)
+{
+	if (unit.HomeRole == HomeRoleWanderer) {
+		if (unit.IsIdle()) {
+			const int x = WanderAxis(unit.tilePos.x, Map.Info.MapWidth, static_cast<unsigned>(SyncRand()));
+			const int y = WanderAxis(unit.tilePos.y, Map.Info.MapHeight, static_cast<unsigned>(SyncRand()));
+
+			CommandAttack(unit, Vec2i(x, y), nullptr, EFlushMode::On);
+		}
+		return;
+	}
+	const bool idle = unit.IsIdle();
+	const bool attacking = unit.CurrentAction() == UnitAction::Attack && unit.CurrentOrder()->HasGoal();
+	const bool far = HomeLeashSendsHome(unit.tilePos.x, unit.tilePos.y, unit.HomePos.x, unit.HomePos.y,
+	                                    unit.Type->ReactRangeComputer);
+	CUnit *enemy = (idle && !far) ? NearestEnemyOnMap(unit) : nullptr;
+
+	switch (Role2Action(far, attacking, idle, enemy != nullptr)) {
+		case Role2::BackToPoint:
+			// Already on its way there: the order stands.
+			if (unit.CurrentAction() == UnitAction::Attack && unit.CurrentOrder()->GetGoalPos() == unit.HomePos) {
+				break;
+			}
+			// A ship and a land unit only where a path leads there.
+			if (unit.Type->MoveType != EMovement::Fly) {
+				const int path = PlaceReachable(unit, unit.HomePos, 1, 1, 0, 1, false);
+
+				if (path == PF_UNREACHABLE || path == PF_FAILED) {
+					break;
+				}
+			}
+			CommandAttack(unit, unit.HomePos, nullptr, EFlushMode::On);
+			break;
+		case Role2::NearestEnemy:
+			// An enemy the player does not see cannot be the goal of an order here: the unit goes
+			// to its tile, attacking on the way.
+			CommandAttack(unit, enemy->tilePos, enemy->IsVisibleAsGoal(*unit.Player) ? enemy : nullptr,
+			              EFlushMode::On);
+			break;
+		case Role2::BecomeWanderer:
+			unit.HomeRole = HomeRoleWanderer;
+			unit.HomePos = unit.tilePos;
+			break;
+		case Role2::Nothing:
+			break;
+	}
+}
+
+/**
+**  The original's pass over the units of the computer players, once in 50 game cycles: a unit
+**  that stands idle at "computer reaction range / 2 + 4" tiles or more from its home tile is
+**  ordered to walk home by a plain move. A unit on any other order is left alone, but for the
+**  guard that breaks off a fight it is outmatched in.
+**
+**  @param units  All units, in the order of the unit actions.
+*/
+void UnitsHomeLeashPass(const std::vector<CUnit *> &units)
+{
+	for (CUnit *unitPtr : units) {
+		CUnit &unit = *unitPtr;
+
+		if (unit.Destroyed || unit.Removed) {
+			continue;
+		}
+		if (unit.HomeRole >= HomeRolePoint) {
+			if (unit.HomePos.x >= 0 && unit.Player->Type == PlayerTypes::PlayerComputer && unit.GroupId == 0
+				&& unit.IsAlive()) {
+				HomeLeashPointPass(unit);
+			}
+			continue;
+		}
+		if (!UnitHeldByHome(unit)) {
+			continue;
+		}
+		const bool idle = unit.IsIdle();
+
+		// Nearer than the limit nothing happens; the strength map is asked only from there on.
+		if (!HomeLeashGuardWalksHome(true, false, unit.tilePos.x, unit.tilePos.y, unit.HomePos.x, unit.HomePos.y,
+		                             unit.Type->ReactRangeComputer)) {
+			continue;
+		}
+		// A guard of a player the original's script runs breaks off, although it fights, where
+		// another slot holds the cell it stands in with over 2.5 times its own slot's strength.
+		const bool retreats = !idle && Wc2AiIdOf(unit.Player->Index) >= 0
+			&& wc2ai::GuardRetreats(Wc2AiCells(), unit.tilePos.x, unit.tilePos.y, unit.Player->Index,
+			                        unit.Type->MoveType == EMovement::Naval);
+
+		if (!HomeLeashGuardWalksHome(idle, retreats, unit.tilePos.x, unit.tilePos.y, unit.HomePos.x, unit.HomePos.y,
+		                             unit.Type->ReactRangeComputer)) {
+			continue;
+		}
+		// Already walking home: the order stands.
+		if (unit.CurrentAction() == UnitAction::Move && unit.CurrentOrder()->GetGoalPos() == unit.HomePos) {
+			continue;
+		}
+		CommandMove(unit, unit.HomePos, EFlushMode::On);
+	}
+}
+
+/**
+**  The original's call for help: a hit sends the idle fighters of the struck unit's player at
+**  the attacker. A computer player's units come from 13 tiles around the struck unit, one fixed
+**  by the map only from 4 tiles; a person's units from 2 tiles, from 4 when a ship is struck.
+**
+**  @param attacker  Unit that attacks.
+**  @param target    Unit that is hit.
+*/
+static void HitUnit_CallIdleFriends(CUnit &attacker, CUnit &target)
+{
+	const PlayerTypes owner = target.Player->Type;
+
+	if (owner != PlayerTypes::PlayerComputer && owner != PlayerTypes::PlayerPerson) {
+		return;
+	}
+	if (attacker.Player == target.Player || !target.IsEnemy(attacker)) {
+		return;
+	}
+	// A person's units do not answer a building.
+	if (owner == PlayerTypes::PlayerPerson && attacker.Type->Building) {
+		return;
+	}
+	const bool computer = owner == PlayerTypes::PlayerComputer;
+	const bool ship = target.Type->MoveType == EMovement::Naval;
+	const int range = HelpCallRange(computer, ship);
+	const Vec2i size(target.Type->TileWidth, target.Type->TileHeight);
+	const Vec2i offset(range, range);
+	std::vector<CUnit *> table = Select(target.tilePos - offset, target.tilePos + size - Vec2i(1, 1) + offset);
+
+	// The same order on every machine.
+	ranges::sort(table, [](const CUnit *a, const CUnit *b) { return UnitNumber(*a) < UnitNumber(*b); });
+	for (CUnit *friendPtr : table) {
+		CUnit &unit = *friendPtr;
+
+		if (&unit == &target || unit.Player != target.Player || unit.Removed || !unit.IsAlive()
+			|| !unit.IsIdle() || !unit.Type->CanAttack || unit.Type->Building || !unit.CanMove()
+			|| unit.Type->BoolFlag[HARVESTER_INDEX].value) {
+			continue;
+		}
+		// A unit in a force of the player's script is called by its force.
+		if (computer && unit.GroupId != 0) {
+			continue;
+		}
+		if (!HelpCallReaches(computer, ship, unit.MapFixed != 0, unit.tilePos.x, unit.tilePos.y,
+		                     target.tilePos.x, target.tilePos.y, size.x, size.y)) {
+			continue;
+		}
+		if (!CanTarget(*unit.Type, *attacker.Type) || !attacker.IsVisibleAsGoal(*unit.Player)) {
+			continue;
+		}
+		std::unique_ptr<COrder> savedOrder;
+
+		// A called guard of a player the original's script runs is no guard any more: it is held
+		// to the tile it stands on when called, and its map tile is forgotten.
+		if (computer && unit.MapFixed && unit.HomeRole == HomeRoleGuard && Wc2AiIdOf(unit.Player->Index) >= 0) {
+			unit.HomeRole = HomeRolePoint;
+			unit.HomePos = unit.tilePos;
+		}
+		// A unit held by its home tile or to a place is led by the 50-cycle pass.
+		if (!UnitHeldByHome(unit) && !(computer && unit.HomeRole >= HomeRolePoint)) {
+			savedOrder = COrder::NewActionAttack(unit, unit.tilePos);
+		}
+		CommandAttack(unit, attacker.tilePos, &attacker, EFlushMode::On);
+		if (savedOrder != nullptr) {
+			unit.SavedOrder = std::move(savedOrder);
+		}
+	}
+	// A submarine is answered, besides, by the player's nearest flyer or submarine that attacks
+	// nothing yet, from anywhere on the map, fighter or not: it goes to the attacker's tile.
+	if (computer && IsSubmarineType(*attacker.Type)) {
+		std::vector<SubmarineAnswerUnit> own;
+		std::vector<CUnit *> ownUnits;
+
+		for (CUnit *unitPtr : target.Player->GetUnits()) {
+			if (!unitPtr || !unitPtr->IsAliveOnMap() || !unitPtr->CanMove()) {
+				continue;
+			}
+			SubmarineAnswerUnit entry;
+
+			entry.x = unitPtr->tilePos.x;
+			entry.y = unitPtr->tilePos.y;
+			entry.flyerOrSubmarine = unitPtr->Type->MoveType == EMovement::Fly || IsSubmarineType(*unitPtr->Type);
+			entry.busyWithAttacker = unitPtr->CurrentAction() == UnitAction::Attack && unitPtr->CurrentOrder()->HasGoal();
+			entry.isStruck = unitPtr == &target;
+			own.push_back(entry);
+			ownUnits.push_back(unitPtr);
+		}
+		const int answer = SubmarineAnswer(own, target.tilePos.x, target.tilePos.y);
+
+		if (answer >= 0) {
+			CommandAttack(*ownUnits[answer], attacker.tilePos, nullptr, EFlushMode::On);
+		}
+	}
+}
+
 static void HitUnit_AttackBack(CUnit &attacker, CUnit &target)
 {
 	const int underAttack = 128;
@@ -3076,7 +3398,10 @@ static void HitUnit_AttackBack(CUnit &attacker, CUnit &target)
 				std::unique_ptr<COrder> savedOrder;
 				if (targetCurrAction == UnitAction::Still
 				    || targetCurrAction == UnitAction::StandGround) {
-					savedOrder = COrder::NewActionAttack(target, target.tilePos);
+					// A unit held by its home tile is brought back by the 50-cycle pass.
+					if (!UnitHeldByHome(target)) {
+						savedOrder = COrder::NewActionAttack(target, target.tilePos);
+					}
 				} else if (target.CanStoreOrder(target.CurrentOrder())) {
 					savedOrder = target.CurrentOrder()->Clone();
 				}
@@ -3202,6 +3527,10 @@ void HitUnit(CUnit *attacker, CUnit &target, int damage, const Missile *missile)
 
 	if (type->Building && !target.Burning) {
 		HitUnit_Burning(target);
+	}
+
+	if (attacker) {
+		HitUnit_CallIdleFriends(*attacker, target);
 	}
 
 	/* Target Reaction on Hit */

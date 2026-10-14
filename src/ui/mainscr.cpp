@@ -49,6 +49,7 @@
 #include "network.h"
 #include "player.h"
 #include "script.h"
+#include "selection_cells.h"
 #include "settings.h"
 #include "sound.h"
 #include "spells.h"
@@ -242,16 +243,20 @@ static void UiDrawCellLifeBar(const CUnit &unit, int x, int y, int cellW, int ce
 **  PANEL-A: the cells of the selection grid.
 **  In the original a selected unit that dies leaves its cell EMPTY and the others stay where
 **  they are (captures u09, k19). `Selected` cannot carry that: UnSelectUnit moves the last
-**  unit into the freed place. So the panel keeps its own list of cells. It stands as long as
-**  the units in it are exactly the selected ones; LetUnitDie empties the cell of a unit that
-**  dies; any other change of the selection (a unit added, taken out, gone into a building, a
-**  new selection, a new game) makes the list anew from `Selected`. Only pointers are compared,
-**  a unit in the list is never touched unless it is selected.
+**  unit into the freed place. So the panel keeps its own list of cells, for the Remastered grid
+**  and the classic view's group panel alike. The cells are kept places (KeepSelectionCells,
+**  measured in the original, run 33 item 6): a unit that leaves the selection leaves its cell
+**  empty, a unit that stays keeps its cell, new units take the lowest free cells, and only a
+**  selection that shares no unit with the one before is laid out from the first cell again.
+**  LetUnitDie empties the cell of a unit that dies. Only pointers are compared, a unit in the
+**  list is never touched unless it is selected. `Selected` itself is never changed from here.
 **  Not established in the original: what the panel shows when one unit is left of a group
-**  (here: the single unit's panel), and whether a cell also stays for a unit that leaves the
-**  selection alive (here: it does not).
+**  (here: the single unit's panel; its cell is still kept for the selection after it), and a
+**  unit taken out of the selection by a Shift-click (here: as a unit that died, its cell stays
+**  empty).
 */
 static std::vector<CUnit *> SelectionCells;
+static const std::vector<CUnit *> NoSelectionCells;
 
 void SelectionCellUnitDied(const CUnit &unit)
 {
@@ -262,12 +267,8 @@ void SelectionCellUnitDied(const CUnit &unit)
 	}
 }
 
-const std::vector<CUnit *> &GetSelectionCells()
+void SelectionCellsUpdate()
 {
-	if (Selected.size() < 2) {
-		SelectionCells.clear();
-		return SelectionCells;
-	}
 	size_t live = 0;
 	bool same = true;
 	for (const CUnit *cell : SelectionCells) {
@@ -281,9 +282,15 @@ const std::vector<CUnit *> &GetSelectionCells()
 		}
 	}
 	if (!same || live != Selected.size()) {
-		SelectionCells.assign(Selected.begin(), Selected.end());
+		SelectionCells = KeepSelectionCells<CUnit *>(SelectionCells, Selected, nullptr);
 	}
-	return SelectionCells;
+}
+
+const std::vector<CUnit *> &GetSelectionCells()
+{
+	SelectionCellsUpdate();
+	// one unit has its own panel, no grid
+	return Selected.size() < 2 ? NoSelectionCells : SelectionCells;
 }
 
 const std::vector<CUIButton> &GetSelectionCellButtons(size_t cells)
@@ -912,6 +919,13 @@ void MessagesDisplay::UpdateMessages()
 void MessagesDisplay::DrawMessages()
 {
 	if (show && Preference.ShowMessages) {
+		// Classic view: the newest message alone, on the classic line (classichud::MessageX).
+		if (ClassicHudActive()) {
+			if (MessagesCount > 0) {
+				DrawClassicMessage(std::string(Messages[MessagesCount - 1]));
+			}
+			return;
+		}
 		CLabel label(*UI.MessageFont);
 #ifdef DEBUG
 		if (showBuilList && ThisPlayer->Ai) {
@@ -1635,6 +1649,18 @@ void DrawObjectives()
 	lua_pop(Lua, 1);
 
 	if (text.empty()) {
+		return;
+	}
+
+	// Classic view: the same strings, a line each, at the classic block's place
+	// (classichud::ObjectivesX, objectiveMidY).
+	if (ClassicHudActive()) {
+		int n = 0;
+		for (std::string::size_type from = 0; from <= text.size(); ++n) {
+			const std::string::size_type to = std::min(text.find('\n', from), text.size());
+			DrawClassicObjective(n, std::string_view(text).substr(from, to - from));
+			from = to + 1;
+		}
 		return;
 	}
 

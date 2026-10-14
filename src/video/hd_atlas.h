@@ -23,9 +23,14 @@
 
 #pragma once
 
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace hdatlas
@@ -234,6 +239,20 @@ inline int classicMinimapSlot(int p, int tiles, int pixels)
 	return slot >= shown ? shown - 1 : slot;
 }
 
+/// Classic view: the record of a megatile in a colour file of `count` records whose first one
+/// is the megatile `base`, or -1 when the file has none for it.
+constexpr int classicMinimapRecord(int megatile, int base, int count)
+{
+	return megatile >= base && megatile - base < count ? megatile - base : -1;
+}
+
+/// A tileset sheet of `rows` rows of `pitch` tiles holds the tile: a map that names a tile past
+/// the sheet's end must not be sampled there.
+constexpr bool tileSheetHolds(int tile, int pitch, int rows)
+{
+	return tile >= 0 && pitch > 0 && tile / pitch < rows;
+}
+
 /// Classic view: the classic group names to try for a sprite, from its entry in the HD sprite map
 /// (atlas stem and frame prefix). The group's base name is the prefix without a trailing "_<digits>";
 /// the folder is Human or Orc when the atlas stem says so, then Other, Monster, Human, Orc.
@@ -262,6 +281,27 @@ inline std::vector<std::string> classicGroupNames(const std::string &hdAtlas, co
 		}
 	}
 	return names;
+}
+
+/// HD-ATLAS-CACHE-GROWS: the unit atlas `stem` (units_<race|common>_<group>_<sprites|masks>) belongs
+/// to a biome other than `biome`. Whole tokens are compared, so "swamp" is not found in "xswamp";
+/// a race's common pages carry no biome token and belong to every biome.
+inline bool stemIsOfOtherBiome(const std::string &stem, const std::string &biome)
+{
+	size_t begin = 0;
+	while (begin <= stem.size()) {
+		size_t end = stem.find('_', begin);
+		if (end == std::string::npos) {
+			end = stem.size();
+		}
+		const std::string token = stem.substr(begin, end - begin);
+		if ((token == "forest" || token == "winter" || token == "swamp" || token == "xswamp")
+			&& token != biome) {
+			return true;
+		}
+		begin = end + 1;
+	}
+	return false;
 }
 
 /// Flyer shadow. Both views: the place is measured from the centre of the unit's tile on the
@@ -339,6 +379,16 @@ inline ClassicFlyerShadowPlace classicFlyerShadowPlace(int tilesW, int tilesH, i
 inline int minimapMarkPixels(int tiles, int scale, int fac)
 {
 	return tiles * scale / fac + 1;
+}
+
+/// Classic view (the minimap of 128 logical pixels): the mark is the pixels the unit's tiles
+/// cover, rounded down, and never under 2. Measured in the original's classic view: a one-tile
+/// unit 2 x 2 on a 128 map (o14_03), 2 x 2 on 96 and 64, 4 x 4 on 32; Town Hall 8 x 8 on 64,
+/// 16 x 16 on 32; Gold Mine 4 x 4 on 96, 6 x 6 on 64, 12 x 12 on 32.
+inline int classicMinimapMarkPixels(int tiles, int scale, int fac)
+{
+	const int covered = tiles * scale / fac;
+	return covered < 2 ? 2 : covered;
 }
 
 // Classic view: the picture of the original is a 4:3 box fitted into the window and centred. In
@@ -532,6 +582,109 @@ inline int classicHudFramePieces(int lw, int lh, ClassicHudPiece out[ClassicHudP
 	out[n++] = {"TopRight", right, 0, Bar, Bar};
 	out[n++] = {"BottomRight", right, bottom, Bar, Bar};
 	return n;
+}
+
+/// Alpha of a team mask pixel: its luminance (the mask page is white with this alpha).
+inline uint8_t maskAlpha(unsigned r, unsigned g, unsigned b)
+{
+	return (uint8_t) ((r * 77 + g * 150 + b * 29) >> 8);
+}
+
+/// Runs decode(i) for i = 0 .. count-1 on `workers` threads and hands every result to
+/// consume(i, result) on the calling thread, in the order of i whatever order the work ends in.
+/// A worker does not start i while `window` results are started and not yet consumed (the one
+/// being consumed counts until consume returns), so at most `window` results exist at a time.
+/// While the caller waits for a result idle(i) is called on it every `idleMs`. decode must not
+/// throw. All workers are joined before the function returns. Returns the largest number of
+/// results that were started and not yet consumed.
+template <typename Result, typename DecodeFn, typename ConsumeFn, typename IdleFn>
+int runOrdered(int count, int workers, int window, int idleMs, DecodeFn decode, ConsumeFn consume,
+               IdleFn idle)
+{
+	struct Shared {
+		std::mutex lock;
+		std::condition_variable changed;
+		std::vector<Result> slot;
+		std::vector<char> done;
+		int count = 0;
+		int next = 0;      // the first index no worker has taken
+		int consumed = 0;  // results the caller is through with
+		int highWater = 0;
+	} shared;
+	if (count <= 0) {
+		return 0;
+	}
+	if (workers < 1) { workers = 1; }
+	if (window < 1) { window = 1; }
+	shared.slot.resize((size_t) count);
+	shared.done.assign((size_t) count, 0);
+	shared.count = count;
+
+	auto work = [&shared, &decode, window]() {
+		for (;;) {
+			int i;
+			{
+				std::unique_lock<std::mutex> guard(shared.lock);
+				shared.changed.wait(guard, [&shared, window]() {
+					return shared.next >= shared.count || shared.next - shared.consumed < window;
+				});
+				if (shared.next >= shared.count) {
+					return;
+				}
+				i = shared.next++;
+				if (shared.next - shared.consumed > shared.highWater) {
+					shared.highWater = shared.next - shared.consumed;
+				}
+			}
+			Result result = decode(i);
+			{
+				std::lock_guard<std::mutex> guard(shared.lock);
+				shared.slot[(size_t) i] = std::move(result);
+				shared.done[(size_t) i] = 1;
+			}
+			shared.changed.notify_all();
+		}
+	};
+	// Joined on every way out, a throwing consume included.
+	struct Joiner {
+		Shared &shared;
+		std::vector<std::thread> threads;
+		~Joiner()
+		{
+			{
+				std::lock_guard<std::mutex> guard(shared.lock);
+				shared.next = shared.count;
+			}
+			shared.changed.notify_all();
+			for (std::thread &t : threads) {
+				if (t.joinable()) { t.join(); }
+			}
+		}
+	} joiner{shared, {}};
+	for (int w = 0; w < workers && w < count; ++w) {
+		joiner.threads.emplace_back(work);
+	}
+
+	for (int i = 0; i < count; ++i) {
+		Result result;
+		{
+			std::unique_lock<std::mutex> guard(shared.lock);
+			while (!shared.changed.wait_for(guard, std::chrono::milliseconds(idleMs),
+			                                [&shared, i]() { return shared.done[(size_t) i] != 0; })) {
+				guard.unlock();
+				idle(i);
+				guard.lock();
+			}
+			result = std::move(shared.slot[(size_t) i]);
+		}
+		consume(i, std::move(result));
+		{
+			std::lock_guard<std::mutex> guard(shared.lock);
+			++shared.consumed;
+		}
+		shared.changed.notify_all();
+	}
+	return shared.highWater;
 }
 
 } // namespace hdatlas

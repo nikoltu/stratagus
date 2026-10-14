@@ -383,6 +383,12 @@ extern void SetHoldClickDelay(int delay);
 
 /// Toggle pause mode
 extern void UiTogglePause();
+/// How many map positions the player can store and recall
+constexpr unsigned SavedMapPositionCount = 3;
+/// A stored map position (for the saved game)
+extern Vec2i GetSavedMapPosition(unsigned position);
+/// Put a stored map position back (from the saved game)
+extern void SetSavedMapPosition(unsigned position, const Vec2i &pos);
 /// Toggle big map
 extern void UiToggleBigMap();
 /// Toggle terrain display on/off.

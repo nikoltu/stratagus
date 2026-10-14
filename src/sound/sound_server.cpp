@@ -35,6 +35,7 @@
 --  Includes
 ----------------------------------------------------------------------------*/
 
+#include <atomic>
 #include <numeric>
 
 #include "stratagus.h"
@@ -71,6 +72,10 @@ static bool MusicEnabled = true;
 static bool EffectsEnabled = true;
 static double VolumeScale = 1.0;
 static int MusicVolume = 0;
+
+/// Audio-focus state asked by the host (any thread) and the one the mixer is in
+static std::atomic<int> FocusAsked{0};
+static AudioFocus FocusApplied = AudioFocus::Full;
 
 #ifdef USE_WIN32
 static bool externalPlayerIsPlaying = false;
@@ -321,7 +326,11 @@ void HandleSoundEvent(SDL_Event &event)
 */
 int SetChannelVolume(int channel, int volume)
 {
-	return Mix_Volume(channel, volume * VolumeScale);
+	const int scaled = volume * VolumeScale;
+	if (scaled < 0) {
+		return Mix_Volume(channel, scaled);
+	}
+	return Mix_Volume(channel, FocusScaledVolume(std::min<int>(scaled, MIX_MAX_VOLUME), FocusApplied));
 }
 
 /**
@@ -630,7 +639,7 @@ void SetMusicVolume(int volume)
 	// so we adjust the music
 	int oldVolume = MusicVolume;
 	MusicVolume = volume;
-	Mix_VolumeMusic(MusicVolume);
+	Mix_VolumeMusic(FocusScaledVolume(std::min<int>(MusicVolume, MIX_MAX_VOLUME), FocusApplied));
 	External_Volume(MusicVolume, oldVolume);
 }
 
@@ -681,6 +690,39 @@ bool IsMusicPlaying()
 bool SoundEnabled()
 {
 	return SoundInitialized;
+}
+
+/**
+**  Ask for an audio-focus state. Only stores it: the caller may be any thread.
+**
+**  @param f  the state the host platform grants
+*/
+void SetAudioFocus(AudioFocus f)
+{
+	FocusAsked.store(static_cast<int>(f));
+}
+
+/**
+**  Bring the mixer to the asked audio-focus state. Engine thread only.
+**  Paused music and channels keep their position.
+*/
+void ApplyAudioFocus()
+{
+	const AudioFocus asked = static_cast<AudioFocus>(FocusAsked.load());
+	if (!SoundEnabled() || asked == FocusApplied) {
+		return;
+	}
+	if (asked == AudioFocus::Silent) {
+		Mix_PauseMusic();
+		Mix_Pause(-1);
+	} else if (FocusApplied == AudioFocus::Silent) {
+		Mix_ResumeMusic();
+		Mix_Resume(-1);
+	}
+	FocusApplied = asked;
+	Mix_VolumeMusic(FocusScaledVolume(std::min<int>(MusicVolume, MIX_MAX_VOLUME), FocusApplied));
+	SetChannelVolume(-1, 255); // every channel; each sound sets its own again when it starts
+	ErrorPrint("AUDIO focus %d\n", static_cast<int>(FocusApplied));
 }
 
 /**
@@ -748,6 +790,7 @@ bool InitSound()
 	Mix_ChannelFinished(ChannelFinished);
 
 	// Now we're ready for the callback to run
+	FocusApplied = AudioFocus::Full;
 	Mix_ResumeMusic();
 	Mix_Resume(-1);
 	return true;

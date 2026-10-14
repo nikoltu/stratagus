@@ -104,17 +104,6 @@ static int KeyIndex(const std::string &campaignKey)
 	return -1;
 }
 
-int GetGlobalCampaignProgress(const std::string &campaignKey)
-{
-	const int idx = KeyIndex(campaignKey);
-	if (idx < 0) {
-		return 0;
-	}
-	std::array<int, 4> values{};
-	ReadProgress(values);
-	return values[idx];
-}
-
 void SetGlobalCampaignProgress(const std::string &campaignKey, int missionsCompleted)
 {
 	const int idx = KeyIndex(campaignKey);

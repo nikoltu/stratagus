@@ -25,7 +25,13 @@ final class MenuMusic implements AudioManager.OnAudioFocusChangeListener {
     private final Context context;
     private final AudioManager audio;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    /** Its own handler, so that clearing the fade steps never drops a prepared player. */
+    private final Handler arrivals = new Handler(Looper.getMainLooper());
     private MediaPlayer player;
+    /** A player is being made on the worker thread. */
+    private boolean preparing;
+    /** Counts stops; a player made before the latest stop is let go when it arrives. */
+    private int generation;
     /** The screen is in front and wants music. */
     private boolean wanted;
     /** The switch in the rail's footer. */
@@ -77,26 +83,8 @@ final class MenuMusic implements AudioManager.OnAudioFocusChangeListener {
 
     private void start() {
         if (player == null) {
-            final String folder = GateActivity.rememberedFolder(context);
-            final File track = (folder == null) ? null : new File(folder, TRACK);
-            if (track == null || !track.isFile()) {
-                return;   // no game folder, or the game has no music: silence
-            }
-            try {
-                final MediaPlayer p = new MediaPlayer();
-                p.setAudioAttributes(new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
-                p.setDataSource(track.getPath());
-                p.setLooping(true);
-                p.prepare();
-                player = p;
-                volume = 0f;
-                p.setVolume(0f, 0f);
-            } catch (Exception e) {
-                player = null;
-                return;
-            }
+            prepareInBackground();
+            return;   // the prepared player comes back through apply()
         }
         if (audio.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
             != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
@@ -108,7 +96,82 @@ final class MenuMusic implements AudioManager.OnAudioFocusChangeListener {
         fadeTo(ceiling, FADE_IN_MS, false);
     }
 
+    /**
+     * Find the track and make its player on a worker thread: creating a MediaPlayer waits for
+     * the media service, which is not up yet in the first seconds after a boot, and preparing
+     * it reads the file. The result is handed back on the main thread; a result that arrives
+     * after a stop is let go.
+     */
+    private void prepareInBackground() {
+        if (preparing) {
+            return;
+        }
+        preparing = true;
+        final int ticket = ++generation;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final long t0 = System.nanoTime();
+                MediaPlayer made = null;
+                final String folder = GateActivity.rememberedFolder(context);
+                final File track = (folder == null) ? null : new File(folder, TRACK);
+                if (track != null && track.isFile()) {   // else no game folder or no music: silence
+                    MediaPlayer p = null;
+                    try {
+                        p = new MediaPlayer();
+                        p.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_GAME)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
+                        p.setDataSource(track.getPath());
+                        p.setLooping(true);
+                        p.prepare();
+                        p.setVolume(0f, 0f);
+                        made = p;
+                    } catch (Exception e) {
+                        if (p != null) {
+                            try {
+                                p.release();
+                            } catch (RuntimeException ignored) {
+                            }
+                        }
+                    }
+                }
+                final MediaPlayer ready = made;
+                android.util.Log.i("WargusHD", "LAUNCHER music " + (ready != null ? "prepared" : "silent")
+                    + " in " + (System.nanoTime() - t0) / 1000000L + " ms (worker)");
+                arrivals.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        prepared(ticket, ready);
+                    }
+                });
+            }
+        }, "menu-music").start();
+    }
+
+    /** Main thread: a prepared player (or null for silence) is back from the worker. */
+    private void prepared(int ticket, MediaPlayer p) {
+        if (ticket != generation) {   // stopped while it was being made
+            if (p != null) {
+                try {
+                    p.release();
+                } catch (RuntimeException ignored) {
+                }
+            }
+            return;
+        }
+        preparing = false;
+        if (p == null) {
+            return;
+        }
+        player = p;
+        volume = 0f;
+        apply();
+    }
+
     private void stopNow() {
+        generation++;
+        preparing = false;
         if (player != null) {
             try {
                 player.release();

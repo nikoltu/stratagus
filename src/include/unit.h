@@ -402,6 +402,17 @@ public:
 
 	unsigned TeamSelected = 0;  /// unit is selected by a team member.
 	CPlayer *RescuedFrom = nullptr;        /// The original owner of a rescued unit.
+	/// The original's per-unit "can be taken over" mark, where a mission start action changed it:
+	/// 0 as the owner's type says (a unit of a rescue player can be taken over), 1 never, 2 always.
+	unsigned char TakeOver = 0;
+	/// The original's "fixed by the map" mark: the map placed the unit with a non-zero data word.
+	unsigned char MapFixed = 0;
+	/// The original's home tile of a fighter fixed by the map: the tile the map put it on.
+	/// x < 0: the unit has no home and is never sent back to one.
+	Vec2i HomePos{-1, -1};
+	/// What holds the unit to HomePos (home_leash.h, HomeRole): 0 nothing, 1 a guard on its map
+	/// tile, 2 held to the place it was sent to, 4 a wanderer.
+	unsigned char HomeRole = 0;
 	/// nullptr if the unit was not rescued.
 	/* Seen stuff. */
 	int VisCount[PlayerMax]{}; /// Unit visibility counts
@@ -591,6 +602,18 @@ extern void UnitCountSeen(CUnit &unit);
 
 /// Check for rescue each second
 extern void RescueUnits();
+/// The part of the rescue condition that needs no map: may a unit with this mark (CUnit::TakeOver)
+/// and an owner of this type be taken over at all ...
+extern bool UnitCanBeTakenOver(int mark, PlayerTypes owner);
+/// ... and may a unit of a player of this type take it over when it stands next to it.
+extern bool UnitCanTakeOver(PlayerTypes owner, bool building, bool canAttack);
+
+/// Mark a unit as placed by the map with a non-zero data word; a fighter gets its tile as home
+extern void SetUnitMapFixed(CUnit &unit);
+/// Is the unit held to its home tile: a homed unit of a computer player that is in no force
+extern bool UnitHeldByHome(const CUnit &unit);
+/// The original's 50-cycle pass: idle units of computer players that stand too far from home walk home
+extern void UnitsHomeLeashPass(const std::vector<CUnit *> &units);
 
 /// Convert direction (dx,dy) to heading (0-255)
 extern int DirectionToHeading(const Vec2i &dir);
@@ -679,6 +702,8 @@ extern std::string UnitReference(const CUnit &unit);
 
 /// save unit-structure
 extern void SaveUnit(const CUnit &unit, CFile &file);
+/// The unit's small counters as saved-game text: each only when set (format 2)
+extern std::string UnitSmallFieldsText(int underAttack, int justMoved, bool zDisplaced, int colors);
 
 /// Initialize unit module
 extern void InitUnits();

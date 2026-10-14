@@ -55,6 +55,7 @@ public:
 
 private:
 	int Range = 0;
+	int GoalHolderWaits = 0; /// cycles waited for the unit on the goal to walk off (not saved)
 	Vec2i goalPos{-1, -1};
 };
 

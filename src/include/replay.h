@@ -86,6 +86,8 @@ extern void SaveReplayList(CFile &file);
 extern void ReplayCclRegister();
 
 extern bool IsReplayGame();
+/// True when a replayed "input" line is Lua text to run (a debug build's console line only)
+extern bool ReplayInputRunsLua(const std::string &value, bool debugBuild);
 
 //@}
 

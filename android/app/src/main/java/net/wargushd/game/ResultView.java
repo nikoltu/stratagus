@@ -61,6 +61,8 @@ final class ResultView extends View {
     private boolean campaign, expansion, orcSide;
     /** A game continued from a save: there is nothing to play again or go on to. */
     private boolean loaded;
+    /** A campaign mission, started from the list or continued from a save: its lines are shown. */
+    private boolean story;
     private int mission;
     private String code = "";
     private String map = "";
@@ -159,11 +161,19 @@ final class ResultView extends View {
             // campaigns/<human|orc|human-exp|orc-exp>/…: the strings name the four "human", "orc",
             // "xhuman", "xorc".
             final String[] part = path.split("/");
-            if (campaign && part.length >= 2) {
+            // A campaign mission continued from a save names its campaign itself (todHuman, todOrc,
+            // bdpHuman, bdpOrc).
+            final String named = game.optString("campaign", "");
+            if (!named.isEmpty()) {
+                expansion = named.startsWith("bdp");
+                orcSide = named.endsWith("Orc");
+                code = (expansion ? "x" : "") + (orcSide ? "orc" : "human");
+            } else if (campaign && part.length >= 2) {
                 expansion = part[1].endsWith("-exp");
                 orcSide = part[1].startsWith("orc");
                 code = (expansion ? "x" : "") + (orcSide ? "orc" : "human");
             }
+            story = campaign || !named.isEmpty();
             final String base = path.substring(path.lastIndexOf('/') + 1);
             // A map's file name without its extension; a save's without ".sav" and what follows.
             final int cut = loaded ? base.lastIndexOf(".sav") : base.lastIndexOf('.');
@@ -183,7 +193,7 @@ final class ResultView extends View {
                     rows.add(who);
                 }
             }
-            if (campaign && progressText != null) {
+            if (story && progressText != null) {
                 // The progress file names the four campaigns todHuman, todOrc, bdpHuman, bdpOrc.
                 final String key = (expansion ? "bdp" : "tod") + (orcSide ? "Orc" : "Human");
                 length = expansion ? 12 : 14;
@@ -317,7 +327,7 @@ final class ResultView extends View {
         final String who = kit.own(opponents == 1 ? "{0} opponent" : "{0} opponents", opponents);
         final String missionName = (mission >= 1 && mission <= ROMAN.length)
             ? ROMAN[mission - 1] + ". " + kit.string(code + "_" + mission + "_name", "") : map;
-        if (campaign) {
+        if (story) {
             kit.textTop(c, kit.string(expansion ? "campaign_expansion" : "campaign_base",
                                       expansion ? "Expansion" : "Campaign")
                         + " - " + kit.string(orcSide ? "orc" : "human", orcSide ? "Orc" : "Human")
@@ -344,7 +354,7 @@ final class ResultView extends View {
             kit.textCentreTop(c, kit.fit(values[i], CAP_TITLE, TILE_W - 60f), gx + 30f, TILE_Y + 162f,
                               TILE_W - 60f, CAP_TITLE, victory ? GOLD : INK, true);
         }
-        if (campaign) {
+        if (story) {
             kit.textTop(c, kit.fit(missionName, CAP_BODY, 1620f), ix, 744f, CAP_BODY, GOLD, true);
             if (completed >= 0) {
                 kit.textTop(c, kit.own(victory ? "Progress saved" : "Progress unchanged") + ": " + completed + " / "

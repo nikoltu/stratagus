@@ -560,6 +560,8 @@ extern void UserInterfaceCclRegister();
 
 /// return popup by ident string
 extern CPopup &PopupByIdent(std::string_view ident);
+/// return popup by ident string, nullptr when there is none
+extern CPopup *FindPopupByIdent(std::string_view ident);
 
 /// Find a button style
 extern ButtonStyle *FindButtonStyle(const std::string &style);

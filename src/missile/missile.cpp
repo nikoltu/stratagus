@@ -42,6 +42,7 @@
 #include "iolib.h"
 #include "luacallback.h"
 #include "map.h"
+#include "missile_cadence.h"
 #include "player.h"
 #include "sound.h"
 #include "spells.h"
@@ -201,6 +202,7 @@ Missile::Init(const MissileType &mtype, const PixelPos &startPos, const PixelPos
 		case MissileClass::ClipToTarget: missile = std::make_unique<MissileClipToTarget>(); break;
 		case MissileClass::Continuous: missile = std::make_unique<MissileContinious>(); break;
 		case MissileClass::StraightFly: missile = std::make_unique<MissileStraightFly>(); break;
+		case MissileClass::DeathAndDecay: missile = std::make_unique<MissileDeathAndDecay>(); break;
 	}
 	const PixelPos halfSize = mtype.size / 2;
 	missile->position = startPos - halfSize;
@@ -253,6 +255,182 @@ Missile *MakeLocalMissile(const MissileType &mtype, const PixelPos &startPos, co
 }
 
 /**
+**  Damage of one hit, from the numbers of the two units and one random draw.
+**
+**  The armor takes from the basic damage only and can take all of it; the piercing
+**  damage passes whole. Half of that sum, rounded up, is certain; the draw adds
+**  0 .. that half on top, every value equally likely. Bloodlust doubles the basic
+**  and the piercing damage before the armor is taken off. A sum of 0 gives 0.
+**
+**  @param basic_damage     Basic damage of the attacker (upgrades included).
+**  @param piercing_damage  Piercing damage of the attacker (upgrades included).
+**  @param armor            Armor of the goal (upgrades included).
+**  @param bloodlust        If attacker has bloodlust
+**  @param draw             The random draw of this hit.
+**
+**  @return                 damage inflicted to goal, 0 .. 255.
+*/
+int HitDamage(int basic_damage, int piercing_damage, int armor, bool bloodlust, unsigned int draw)
+{
+	if (bloodlust) {
+		basic_damage *= 2;
+		piercing_damage *= 2;
+	}
+
+	const int total = std::max<int>(basic_damage - armor, 0) + std::max<int>(piercing_damage, 0);
+	const int half = (total + 1) / 2;
+	const int damage = half + static_cast<int>(draw % static_cast<unsigned int>(half + 1));
+
+	return std::min<int>(damage, 255);
+}
+
+/**
+**  Zone of a zone-splash missile the centre of a unit lies in.
+**
+**  The offset is taken on each axis; the larger one decides. Up to 22/32 of a
+**  tile the unit is in the inner zone, up to 42/32 of a tile in the outer one.
+**
+**  @param impact    Map pixel position of the impact.
+**  @param centre    Map pixel position of the centre of the unit.
+**  @param tileSize  Size of a tile in map pixels.
+**
+**  @return          0 inner zone, 2 outer zone (the right shift of the damage),
+**                   -1 out of reach.
+*/
+int SplashZone(const PixelPos &impact, const PixelPos &centre, const PixelSize &tileSize)
+{
+	const int dx = std::abs(impact.x - centre.x) * 32;
+	const int dy = std::abs(impact.y - centre.y) * 32;
+
+	if (dx <= 22 * tileSize.x && dy <= 22 * tileSize.y) {
+		return 0;
+	}
+	if (dx <= 42 * tileSize.x && dy <= 42 * tileSize.y) {
+		return 2;
+	}
+	return -1;
+}
+
+/**
+**  Damage a zone-splash missile carries: the basic and the piercing damage of
+**  the unit that fired it, both doubled by Bloodlust, at most 255.
+**
+**  @param basic_damage     Basic damage of the attacker (upgrades included).
+**  @param piercing_damage  Piercing damage of the attacker (upgrades included).
+**  @param bloodlust        If attacker has bloodlust
+**
+**  @return                 the damage before zone and armor, 0 .. 255.
+*/
+int SplashRawDamage(int basic_damage, int piercing_damage, bool bloodlust)
+{
+	const int raw = std::max<int>(basic_damage, 0) + std::max<int>(piercing_damage, 0);
+
+	return std::min<int>(bloodlust ? raw * 2 : raw, 255);
+}
+
+/**
+**  What is left of the damage of a zone-splash missile for one unit: the outer
+**  zone takes a quarter of it, then the armor is taken off the whole of it.
+**
+**  @param raw    Damage the missile carries.
+**  @param zone   Zone of the unit (SplashZone).
+**  @param armor  Armor of the unit (upgrades included).
+**
+**  @return       the damage left; nothing is dealt at 0 or below.
+*/
+int SplashLeft(int raw, int zone, int armor)
+{
+	return (raw >> zone) - armor;
+}
+
+/**
+**  Damage of a zone-splash missile on one unit: half of what is left, rounded
+**  up, is certain; the draw adds 0 .. that half on top.
+**
+**  @param raw    Damage the missile carries.
+**  @param zone   Zone of the unit (SplashZone).
+**  @param armor  Armor of the unit (upgrades included).
+**  @param draw   The random draw of this unit.
+**
+**  @return       damage inflicted to the unit.
+*/
+int SplashDamage(int raw, int zone, int armor, unsigned int draw)
+{
+	const int left = SplashLeft(raw, zone, armor);
+
+	if (left <= 0) {
+		return 0;
+	}
+	return HitDamage(left, 0, 0, false, draw);
+}
+
+/**
+**  If a zone-splash missile takes the unit at all. The owner of the unit is
+**  not asked: units of the shooter's player and of his allies are hit like any
+**  other. Flying units are in the area only when the missile was fired at one.
+**
+**  @param shooter        The unit is the one that fired the missile.
+**  @param flying         The unit flies.
+**  @param aimedAtFlying  The missile was fired at a flying unit.
+**
+**  @return               true if the unit is hit by its zone.
+*/
+bool SplashTakesUnit(bool shooter, bool flying, bool aimedAtFlying)
+{
+	return !shooter && (!flying || aimedAtFlying);
+}
+
+/**
+**  Steps a wall loses by a hit. A wall stands 20 steps; a hit takes a quarter
+**  of its damage in steps, at least one.
+**
+**  @param damage  Damage that reaches the wall tile.
+**
+**  @return        the steps taken, 1 or more.
+*/
+int WallSteps(int damage)
+{
+	return std::max<int>(damage >> 2, 1);
+}
+
+/**
+**  What a death coil takes from the units in its area. The unit with the
+**  fewest hit points is served first (units with equal hit points in the
+**  given order): each gives all it has while the sum stays within the budget;
+**  the first that does not fit gives what is left of the budget, the rest
+**  nothing.
+**
+**  @param hitPoints  Hit points of the units in the area.
+**  @param budget     Hit points the coil can take in all.
+**
+**  @return           the hit points taken from each unit, in the given order.
+*/
+std::vector<int> DeathCoilShares(const std::vector<int> &hitPoints, int budget)
+{
+	std::vector<size_t> order(hitPoints.size());
+	for (size_t i = 0; i != order.size(); ++i) {
+		order[i] = i;
+	}
+	std::stable_sort(order.begin(), order.end(),
+					 [&](size_t a, size_t b) { return hitPoints[a] < hitPoints[b]; });
+
+	std::vector<int> shares(hitPoints.size(), 0);
+	int sum = 0;
+	for (const size_t i : order) {
+		if (sum >= budget) {
+			break;
+		}
+		if (sum + hitPoints[i] > budget) {
+			shares[i] = budget - sum;
+			break;
+		}
+		shares[i] = hitPoints[i];
+		sum += hitPoints[i];
+	}
+	return shares;
+}
+
+/**
 **  Calculate damage.
 **
 **  @todo NOTE: different targets (big are hit by some missiles better)
@@ -269,20 +447,10 @@ Missile *MakeLocalMissile(const MissileType &mtype, const PixelPos &startPos, co
 static int CalculateDamageStats(const CUnitStats &attacker_stats,
 								const CUnitStats &goal_stats, int bloodlust)
 {
-	int basic_damage = attacker_stats.Variables[BASICDAMAGE_INDEX].Value;
-	int piercing_damage = attacker_stats.Variables[PIERCINGDAMAGE_INDEX].Value;
-
-	if (bloodlust) {
-		basic_damage *= 2;
-		piercing_damage *= 2;
-	}
-
-	int damage = std::max<int>(basic_damage - goal_stats.Variables[ARMOR_INDEX].Value, 1);
-	damage += piercing_damage;
-	damage -= SyncRand() % ((damage + 2) / 2);
-	Assert(damage >= 0);
-
-	return damage;
+	// One draw for every hit, whatever the numbers are.
+	return HitDamage(attacker_stats.Variables[BASICDAMAGE_INDEX].Value,
+					 attacker_stats.Variables[PIERCINGDAMAGE_INDEX].Value,
+					 goal_stats.Variables[ARMOR_INDEX].Value, bloodlust != 0, SyncRand());
 }
 
 /**
@@ -310,6 +478,37 @@ int CalculateDamage(const CUnit &attacker, const CUnit &goal, const INumberDesc 
 	TriggerData.Attacker = nullptr;
 	TriggerData.Defender = nullptr;
 	return res;
+}
+
+/**
+**  Hit of a unit on something without armor (a wall, a point): one draw.
+**
+**  @param attacker  Unit that hits.
+**
+**  @return          the damage of the hit.
+*/
+static int WallHitDamage(const CUnit &attacker)
+{
+	return HitDamage(attacker.Stats->Variables[BASICDAMAGE_INDEX].Value,
+					 attacker.Stats->Variables[PIERCINGDAMAGE_INDEX].Value,
+					 0, attacker.Variable[BLOODLUST_INDEX].Value != 0, SyncRand());
+}
+
+/**
+**  A wall tile is hit: it loses the steps of the damage (WallSteps) out of the
+**  20 it stands, counted in the hit points of the wall type.
+**
+**  @param tilePos  Map tile position.
+**  @param damage   Damage that reaches the tile.
+*/
+static void HitWallBySteps(const Vec2i &tilePos, int damage)
+{
+	if (!Map.Info.IsPointOnMap(tilePos) || !Map.WallOnMap(tilePos)) {
+		return;
+	}
+	const CUnitType *wall = Map.HumanWallOnMap(tilePos) ? UnitTypeHumanWall : UnitTypeOrcWall;
+
+	Map.HitWall(tilePos, (WallSteps(damage) * wall->MapDefaultStat.Variables[HP_INDEX].Max + 19) / 20);
 }
 
 /**
@@ -351,15 +550,8 @@ void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos)
 		// No goal, take target coordinates
 		if (!goal) {
 			if (Map.WallOnMap(goalPos)) {
-				if (Map.HumanWallOnMap(goalPos)) {
-					Map.HitWall(goalPos,
-								CalculateDamageStats(*unit.Stats,
-													 *UnitTypeHumanWall->Stats, unit.Variable[BLOODLUST_INDEX].Value));
-				} else {
-					Map.HitWall(goalPos,
-								CalculateDamageStats(*unit.Stats,
-													 *UnitTypeOrcWall->Stats, unit.Variable[BLOODLUST_INDEX].Value));
-				}
+				// A wall has no armor: the hit as against nothing, in steps of the wall.
+				HitWallBySteps(goalPos, WallHitDamage(unit));
 				return;
 			}
 			DebugPrint("Missile-none hits no unit, shouldn't happen!\n");
@@ -399,6 +591,10 @@ void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos)
 		missile->TargetUnit = goal;
 	}
 	missile->SourceUnit = &unit;
+	if (missile->Type->ZoneNoArmor) {
+		// The number is drawn at the shot, against the unit fired at.
+		missile->Damage = goal ? CalculateDamage(unit, *goal, Damage.get()) : WallHitDamage(unit);
+	}
 }
 
 /**
@@ -649,6 +845,20 @@ static void EnsureHDMissileSprite(const MissileType &type)
 	}
 }
 
+// HD-ATLAS-CACHE-GROWS: an effect resolved for a biome other than the map's lets its atlas go and
+// is resolved again at its next draw (the preload drops that atlas from the shared cache).
+void ReleaseHDMissileArtOfOtherBiomes()
+{
+	const std::string ts = CurrentEffectTileset();
+	for (auto &[key, type] : MissileTypes) {
+		if (type->HDTried && type->HDTileset != ts) {
+			type->HDTried = false;
+			type->HDG.reset();
+			type->HDPrefix.clear();
+		}
+	}
+}
+
 void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 {
 #ifdef DYNAMIC_LOAD
@@ -858,7 +1068,19 @@ bool MissileInitMove(Missile &missile, bool pointToPoint)
 		return false;
 	}
 	Assert(missile.TotalStep != 0);
-	missile.CurrentStep += missile.Type->Speed;
+	if (missile.Type->Class == MissileClass::Hit) {
+		// the damage number is not a missile of the original: its own pixels
+		missile.CurrentStep += missile.Type->Speed;
+	} else {
+		// Speed is in pixels of the classic 32 pixel tile along the longer axis of the line;
+		// a bouncing missile goes at half of it close to its aimed point and behind it.
+		const PixelPos line = missile.destination - missile.source;
+		const int major = std::max(abs(line.x), abs(line.y));
+		const int left = (missile.TotalStep - missile.CurrentStep) * major / missile.TotalStep;
+		const bool slow = missile.Type->Class == MissileClass::PointToPointBounce
+		                  && (missile.State > 1 || left < MissileSlowDistance * PixelTileSize.x / 32);
+		missile.CurrentStep += MissileFlightStep(missile.Type->Speed, PixelTileSize.x, major, missile.TotalStep, slow);
+	}
 	if (missile.CurrentStep >= missile.TotalStep) {
 		missile.CurrentStep = missile.TotalStep;
 		return true;
@@ -1069,24 +1291,85 @@ static void MissileHitsGoal(const Missile &missile, CUnit &goal, int splash)
 */
 static void MissileHitsWall(const Missile &missile, const Vec2i &tilePos, int splash)
 {
-	CUnitStats *stats; // stat of the wall.
-
 	if (!Map.WallOnMap(tilePos)) {
 		return;
 	}
 	if (missile.Damage) {  // direct damage, spells mostly
-		Map.HitWall(tilePos, missile.Damage / splash);
+		HitWallBySteps(tilePos, missile.Damage / splash);
 		return;
 	}
 
 	Assert(missile.SourceUnit != nullptr);
-	if (Map.HumanWallOnMap(tilePos)) {
-		stats = UnitTypeHumanWall->Stats;
-	} else {
-		Assert(Map.OrcWallOnMap(tilePos));
-		stats = UnitTypeOrcWall->Stats;
+	// A wall has no armor: the hit as against nothing, in steps of the wall.
+	HitWallBySteps(tilePos, WallHitDamage(*missile.SourceUnit) / splash);
+}
+
+/**
+**  A zone-splash missile hits a wall tile. A wall stands 20 steps; a hit takes
+**  a quarter of its damage in steps, at least one.
+**
+**  @param tilePos  Map tile position.
+**  @param damage   Damage that reaches the tile.
+*/
+static void SplashHitsWall(const Vec2i &tilePos, int damage)
+{
+	HitWallBySteps(tilePos, damage);
+}
+
+/**
+**  A zone-splash missile comes down: every unit around the impact point is hit
+**  by the zone its centre lies in.
+**
+**  @param missile  Missile that comes down.
+**  @param impact   Map pixel position of the impact.
+**  @param pos      Map tile of the impact.
+*/
+static void MissileHitsZones(const Missile &missile, const PixelPos &impact, const Vec2i &pos)
+{
+	const CUnit &source = *missile.SourceUnit;
+	// A finished number is carried as it is and meets no armor; flying units are in its area.
+	const bool finished = missile.Type->ZoneNoArmor;
+	const int raw = finished ? std::min<int>(missile.Damage, 255)
+							 : SplashRawDamage(source.Stats->Variables[BASICDAMAGE_INDEX].Value,
+											   source.Stats->Variables[PIERCINGDAMAGE_INDEX].Value,
+											   source.Variable[BLOODLUST_INDEX].Value != 0);
+	const bool aimedAtFlying = finished || (missile.TargetUnit != nullptr
+											&& missile.TargetUnit->Type->MoveType == EMovement::Fly);
+
+	if (raw <= 0) {
+		return;
 	}
-	Map.HitWall(tilePos, CalculateDamageStats(*missile.SourceUnit->Stats, *stats, 0) / splash);
+	// The unit a missile belongs to is left out: the shooter, for a flame of the Flame Shield the
+	// unit it circles.
+	const CUnit *spared = missile.Type->Class == MissileClass::FlameShield ? static_cast<CUnit *>(missile.TargetUnit)
+	                                                                       : static_cast<CUnit *>(missile.SourceUnit);
+
+	// The wall under the impact takes the whole damage, the four beside it a quarter.
+	SplashHitsWall(pos, raw);
+	SplashHitsWall(pos + Vec2i(1, 0), raw >> 2);
+	SplashHitsWall(pos + Vec2i(-1, 0), raw >> 2);
+	SplashHitsWall(pos + Vec2i(0, 1), raw >> 2);
+	SplashHitsWall(pos + Vec2i(0, -1), raw >> 2);
+
+	// Three tiles each way hold every unit whose centre can lie in the outer zone.
+	const Vec2i range(3, 3);
+	std::vector<CUnit *> table = Select(pos - range, pos + range);
+	for (CUnit *goal : table) {
+		if (!goal->IsAliveOnMap() || goal->CurrentAction() == UnitAction::Die
+			|| !SplashTakesUnit(goal == spared, goal->Type->MoveType == EMovement::Fly, aimedAtFlying)) {
+			continue;
+		}
+		const int zone = SplashZone(impact, goal->GetMapPixelPosCenter(), PixelTileSize);
+		if (zone < 0) {
+			continue;
+		}
+		const int armor = finished ? 0 : goal->Stats->Variables[ARMOR_INDEX].Value;
+		// No draw for a unit whose armor takes it all.
+		if (SplashLeft(raw, zone, armor) <= 0) {
+			continue;
+		}
+		HitUnit(missile.SourceUnit, *goal, SplashDamage(raw, zone, armor, SyncRand()), &missile);
+	}
 }
 
 /**
@@ -1162,6 +1445,19 @@ void Missile::MissileHit(CUnit *unit)
 			}
 		}
 		MissileHitsGoal(*this, *unit, 1);
+		return;
+	}
+	if (mtype.ZoneSplash) {
+		MissileHitsZones(*this, pixelPos, pos);
+		return;
+	}
+	if (this->TargetUnit
+		&& AimedHitTakes(mtype.AimedHit, this->TargetUnit->IsAliveOnMap(),
+						 mtype.FriendlyFire && this->TargetUnit->Player->Index == this->SourceUnit->Player->Index)) {
+		//
+		// The unit fired at takes the hit where it stands now.
+		//
+		MissileHitsGoal(*this, *this->TargetUnit, 1);
 		return;
 	}
 	if (!mtype.Range) {
@@ -1471,6 +1767,16 @@ void Missile::SaveMissile(CFile &file) const
 	file.printf(" \"ttl\", %d,", this->TTL);
 	if (this->Hidden) {
 		file.printf(" \"hidden\", ");
+	}
+	if (!this->PiercedUnits.empty()) {
+		file.printf(" \"pierced\", {");
+		for (const CUnit *pierced : this->PiercedUnits) {
+			file.printf("\"%s\", ", UnitReference(*pierced).c_str());
+		}
+		file.printf("},");
+	}
+	if (this->DestroyMissile) {
+		file.printf(" \"destroy\", ");
 	}
 	file.printf(" \"step\", {%d, %d}", this->CurrentStep, this->TotalStep);
 

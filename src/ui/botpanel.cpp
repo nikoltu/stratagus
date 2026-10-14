@@ -406,125 +406,6 @@ static void GetPopupSize(const CPopup &popup, const ButtonAction &button,
 }
 
 
-#if 0 // Fixme: need to remove soon
-void DrawPopupUnitInfo(const CUnitType *type,
-					   int player_index, CFont *font, Uint32 backgroundColor,
-					   int buttonX, int buttonY)
-{
-
-	const CGraphic *G;
-	const CUnitStats *stats = &type->Stats[player_index];
-
-	//detect max Height
-	int popupHeight = 85;//
-	if (type->CanAttack) {
-		popupHeight += 30;
-	}
-
-	//detect max Width
-	int popupWidth = GetPopupCostsWidth(font, stats->Costs);
-	if (stats->Variables[DEMAND_INDEX].Value) {
-		if (UI.Resources[FoodCost].IconWidth != -1) {
-			popupWidth += (UI.Resources[FoodCost].IconWidth + 5);
-		} else {
-			G = UI.Resources[FoodCost].G;
-			if (G) {
-				popupWidth += (G->Width + 5);
-			}
-		}
-		popupWidth += (font->Width(stats->Variables[DEMAND_INDEX].Value) + 5);
-	}
-	popupWidth += 10;
-	popupWidth = std::max<int>(popupWidth, font->Width(type->Name) + 10);
-
-	if (popupWidth < 120) {
-		popupWidth = 120;
-	}
-
-	int start_x = std::min<int>(buttonX, Video.Width - 1 - popupWidth);
-	int y = buttonY - popupHeight - 10;
-	int x = start_x;
-	CLabel label(font, "white", "red");
-
-	// Background
-	Video.FillTransRectangle(backgroundColor, x, y,
-							 popupWidth, popupHeight, 128);
-	Video.DrawRectangle(ColorWhite, x, y, popupWidth, popupHeight);
-
-	// Name
-	label.Draw(x + 5, y + 5, type->Name);
-	Video.DrawHLine(ColorWhite, x, y + 15, popupWidth - 1);
-
-	y += 20;
-
-	// Costs
-	x = DrawPopupCosts(x + 5, y, label,  stats->Costs);
-
-	if (stats->Variables[DEMAND_INDEX].Value) {
-		int y_offset = 0;
-		G = UI.Resources[FoodCost].G;
-		if (G) {
-			int x_offset = UI.Resources[FoodCost].IconWidth;
-			G->DrawFrameClip(UI.Resources[FoodCost].IconFrame, x, y);
-			x += ((x_offset != -1 ? x_offset : G->Width) + 5);
-			y_offset = G->Height;
-			y_offset -= font->Height();
-			y_offset /= 2;
-		}
-		label.Draw(x, y + y_offset, stats->Variables[DEMAND_INDEX].Value);
-		//x += 5;
-	}
-
-	y += 20;//15;
-	x = start_x;
-
-	// Hit Points
-	{
-		std::ostringstream hitPoints;
-		hitPoints << "Hit Points: " << type->Variable[HP_INDEX].Value;
-		label.Draw(x + 5, y, hitPoints.str());
-		y += 15;
-	}
-
-	if (type->CanAttack) {
-		// Damage
-		int min_damage = std::max<int>(1, type->Variable[PIERCINGDAMAGE_INDEX].Value / 2);
-		int max_damage = type->Variable[PIERCINGDAMAGE_INDEX].Value +
-						 type->Variable[BASICDAMAGE_INDEX].Value;
-		std::ostringstream damage;
-		damage << "Damage: " << min_damage << "-" << max_damage;
-		label.Draw(x + 5, y, damage.str());
-		y += 15;
-
-		// Attack Range
-		std::ostringstream attackRange;
-		attackRange << "Attack Range: " << type->Variable[ATTACKRANGE_INDEX].Value;
-		label.Draw(x + 5, y, attackRange.str());
-		y += 15;
-	}
-
-	// Armor
-	{
-		std::ostringstream armor;
-		armor << "Armor: " << type->Variable[ARMOR_INDEX].Value;
-		label.Draw(x + 5, y, armor.str());
-		y += 15;
-	}
-
-	if (type->Variable[RADAR_INDEX].Value) {
-		// Radar Range
-		std::ostringstream radarRange;
-		radarRange << "Radar Range: " << type->Variable[RADAR_INDEX].Value;
-		label.Draw(x + 5, y, radarRange.str());
-	} else {
-		// Sight Range
-		std::ostringstream sightRange;
-		sightRange << "Sight Range: " << type->Variable[SIGHTRANGE_INDEX].Value;
-		label.Draw(x + 5, y, sightRange.str());
-	}
-	//y += 15;
-}
-#endif
 
 static struct PopupDrawCache {
 	int popupWidth;
@@ -539,7 +420,12 @@ void DrawPopup(const ButtonAction &button, const CUIButton &uibutton, int x, int
 	if (button.Popup.empty()) {
 		return;
 	}
-	CPopup &popup = PopupByIdent(button.Popup);
+	CPopup *popupPtr = FindPopupByIdent(button.Popup);
+	if (popupPtr == nullptr) {
+		// "Show button popups" off: the scripts defined no popups.
+		return;
+	}
+	CPopup &popup = *popupPtr;
 	bool useCache = false;
 
 	if (&button == LastDrawnButtonPopup) {
@@ -642,120 +528,6 @@ void DrawPopup(const ButtonAction &button, const CUIButton &uibutton, int x, int
 		}
 	}
 
-#if 0 // Fixme: need to remove soon
-	switch (button.Action) {
-		case ButtonCmd::Research: {
-			CLabel label(font, "white", "red");
-			int *Costs = AllUpgrades[button->Value]->Costs;
-			popupWidth = GetPopupCostsS(font, Costs);
-			popupWidth = std::max<int>(popupWidth, font->Width(button->Hint) + 10);
-
-			popupHeight = 40;
-
-			start_x = std::min<int>(uibutton->X, Video.Width - 1 - popupWidth);
-
-			y = uibutton->Y - popupHeight - 10;
-			x = start_x;
-
-			// Background
-			Video.FillTransRectangle(backgroundColor, x, y,
-									 popupWidth, popupHeight, 128);
-			Video.DrawRectangle(ColorWhite, x, y, popupWidth, popupHeight);
-
-			// Name
-			label.Draw(x + 5, y + 5, button->Hint);
-			Video.DrawHLine(ColorWhite, x, y + 15, popupWidth - 1);
-
-			y += 20;
-			x = start_x;
-			DrawPopupCosts(x + 5, y, label, Costs);
-		}
-		break;
-		case ButtonCmd::SpellCast: {
-			CLabel label(font, "white", "red");
-			// FIXME: hardcoded image!!!
-			const int IconID = GoldCost;
-			//SetCosts(SpellTypeTable[button->Value]->ManaCost, 0, nullptr);
-			const CGraphic *G = UI.Resources[IconID].G;
-			const SpellType *spell = SpellTypeTable[button->Value];
-
-			if (spell->ManaCost) {
-				popupHeight = 40;
-				popupWidth = 10;
-				if (UI.Resources[IconID].IconWidth != -1) {
-					popupWidth += (UI.Resources[IconID].IconWidth + 5);
-				} else {
-					if (G) {
-						popupWidth += (G->Width + 5);
-					}
-				}
-				popupWidth += font->Width(spell->ManaCost);
-				popupWidth = std::max<int>(popupWidth, font->Width(spell->Name) + 10);
-			} else {
-				popupWidth = font->Width(button->Hint) + 10;
-				popupHeight = font_height + 10;
-			}
-
-			popupWidth = std::max<int>(popupWidth, 100);
-
-			x = std::min<int>(uibutton->X, Video.Width - 1 - popupWidth);
-			y = uibutton->Y - popupHeight - 10;
-
-			// Background
-			Video.FillTransRectangle(backgroundColor, x, y,
-									 popupWidth, popupHeight, 128);
-			Video.DrawRectangle(ColorWhite, x, y, popupWidth, popupHeight);
-
-			if (spell->ManaCost) {
-				int y_offset = 0;
-				// Name
-				label.Draw(x + 5, y + 5, spell->Name);
-				Video.DrawHLine(ColorWhite, x, y + 15, popupWidth - 1);
-				y += 20;
-				if (G) {
-					int x_offset =  UI.Resources[IconID].IconWidth;
-					x += 5;
-					// FIXME: hardcoded image!!!
-					G->DrawFrameClip(3, x, y);
-					x += ((x_offset != -1 ? x_offset : G->Width) + 5);
-					y_offset = G->Height;
-					y_offset -= font_height;
-					y_offset /= 2;
-				}
-				label.Draw(x, y + y_offset, spell->ManaCost);
-			} else {
-				// Only Hint
-				label.Draw(x + 5, y + (popupHeight - font_height) / 2, button->Hint);
-			}
-		}
-		break;
-
-		case ButtonCmd::Build:
-		case ButtonCmd::Train:
-		case ButtonCmd::UpgradeTo:
-			DrawPopupUnitInfo(UnitTypes[button->Value],
-							  ThisPlayer->Index, font, backgroundColor,
-							  uibutton->X, uibutton->Y);
-			break;
-
-
-		default:
-			popupWidth = font->Width(button->Hint) + 10;
-			popupHeight = font_height + 10;//19;
-			x = std::min<int>(uibutton->X, Video.Width - 1 - popupWidth);
-			y = uibutton->Y - popupHeight - 10;
-
-			// Background
-			Video.FillTransRectangle(backgroundColor, x, y, popupWidth, popupHeight, 128);
-			Video.DrawRectangle(ColorWhite, x, y, popupWidth, popupHeight);
-
-			// Hint
-			CLabel(font, "white", "red").Draw(x + 5,
-											  y + (popupHeight - font_height) / 2, button->Hint);
-			break;
-
-	}
-#endif
 }
 
 /**

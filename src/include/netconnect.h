@@ -34,6 +34,7 @@
 #include "net_message.h"
 #include "network/netsockets.h"
 
+#include <string_view>
 #include <vector>
 
 class CHost;
@@ -126,6 +127,8 @@ extern bool NoRandomPlacementMultiplayer; /// Disable the random placement of pl
 
 extern int FindHostIndexBy(const CHost &host);
 extern bool NetworkIsDedicatedServerHost(const CNetworkHost &host, const CServerSetup &setup);
+/// Map transfer: a received file name stays under the library path and is a map file
+extern bool IsSafeMapTransferName(std::string_view name);
 extern int NetworkGetPlayerIndexForHost(int hostIndex);
 extern bool NetworkIsLocalSetupInSync(const CServerSetup &state1,
                                       const CServerSetup &state2,

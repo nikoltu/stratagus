@@ -871,6 +871,73 @@ static bool IsSafeMapName(const char *mapname)
 	return true;
 }
 
+/**
+**  Check a file name received with a map fragment (ICMMapNeeded).
+**
+**  The name is relative to the library path: no ".." component, no leading slash, no
+**  backslash, no drive colon, and it names a map file (.pud / .smp / .sms, compressed or not).
+*/
+bool IsSafeMapTransferName(std::string_view name)
+{
+	if (name.empty() || name.front() == '/') {
+		return false;
+	}
+	if (name.find('\\') != std::string_view::npos || name.find(':') != std::string_view::npos
+	    || name.find('\0') != std::string_view::npos) {
+		return false;
+	}
+	for (size_t start = 0; start <= name.size();) {
+		size_t end = name.find('/', start);
+		if (end == std::string_view::npos) {
+			end = name.size();
+		}
+		if (name.substr(start, end - start) == "..") {
+			return false;
+		}
+		start = end + 1;
+	}
+	std::string lower(name);
+	std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
+	for (const char *suffix : {".gz", ".bz2"}) {
+		if (lower.size() > strlen(suffix) && lower.compare(lower.size() - strlen(suffix), std::string::npos, suffix) == 0) {
+			lower.resize(lower.size() - strlen(suffix));
+			break;
+		}
+	}
+	for (const char *ext : {".pud", ".smp", ".sms"}) {
+		if (lower.size() > strlen(ext) && lower.compare(lower.size() - strlen(ext), std::string::npos, ext) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// The map file being received; its data goes to "<name>.part" until it is complete.
+static fs::path MapTransferFile;
+
+/**
+**  Give the file being received its real name.
+**
+**  @return false when the rename failed (the transfer is then a bad map).
+*/
+static bool FinishMapTransferFile()
+{
+	if (MapTransferFile.empty()) {
+		return true;
+	}
+	fs::path partpath = MapTransferFile;
+	partpath += ".part";
+	std::error_code ec;
+	fs::remove(MapTransferFile, ec);
+	fs::rename(partpath, MapTransferFile, ec);
+	const bool ok = !ec;
+	if (!ok) {
+		ErrorPrint("Could not rename '%s': %s\n", partpath.u8string().c_str(), ec.message().c_str());
+	}
+	MapTransferFile.clear();
+	return ok;
+}
+
 void CClient::Parse_Map(const unsigned char *buf)
 {
 	if (networkState.State != ccs_connected) {
@@ -930,8 +997,16 @@ void CClient::Parse_MapFragment(const unsigned char *buf)
 		return;
 	}
 
+	if (msg.FragmentIndex == 0) {
+		MapTransferFile.clear(); // a new transfer: a part left by a broken one is not continued
+	}
+
 	if (msg.PathSize == 0) {
 		// this is the last fragment, nothing left, we got the map.
+		if (!FinishMapTransferFile()) {
+			networkState.State = ccs_badmap;
+			return;
+		}
 		// go back to the state just after connecting
 		networkState.State = ccs_connected;
 		networkState.MsgCnt = 0;
@@ -941,23 +1016,37 @@ void CClient::Parse_MapFragment(const unsigned char *buf)
 
 	// this is the fragment we requested, open the file and write it
 
-	// FIXME: what if the file exists before even the first fragment creates it?
-
-	fs::path mappath(StratagusLibPath);
 	// msg.PathSize is 8bits, so smaller than msg.Data by construction
 	NetworkMapFragmentName = std::string(msg.Data, msg.PathSize);
-	if (NetworkMapFragmentName.find("..") != std::string::npos) {
+	if (!IsSafeMapTransferName(NetworkMapFragmentName)) {
 		// bad path
 		networkState.State = ccs_badmap;
 		ErrorPrint("Bad network filename '%s'\n", NetworkMapFragmentName.c_str());
 		return;
 	}
-	mappath /= NetworkMapFragmentName;
+	const fs::path mappath = fs::path(StratagusLibPath) / NetworkMapFragmentName;
 
-	std::ofstream mapfile(mappath.c_str(), std::ios::out | std::ios::app | std::ios::binary);
+	// Each file is written to "<name>.part" and renamed when the next file or the end comes, so
+	// a broken transfer never leaves a cut map under the real name; a new file starts empty.
+	bool firstFragmentOfFile = false;
+	if (MapTransferFile != mappath) {
+		if (!FinishMapTransferFile()) {
+			networkState.State = ccs_badmap;
+			return;
+		}
+		std::error_code ec;
+		fs::create_directories(mappath.parent_path(), ec);
+		MapTransferFile = mappath;
+		firstFragmentOfFile = true;
+	}
+	fs::path partpath = mappath;
+	partpath += ".part";
+	std::ofstream mapfile(partpath.c_str(),
+	                      std::ios::out | std::ios::binary | (firstFragmentOfFile ? std::ios::trunc : std::ios::app));
 	if (!mapfile.is_open()) {
 		networkState.State = ccs_badmap;
-		ErrorPrint("Could not open '%s' for appending map data\n", mappath.u8string().c_str());
+		ErrorPrint("Could not open '%s' for map data\n", partpath.u8string().c_str());
+		MapTransferFile.clear();
 		return;
 	} else {
 		Assert(msg.DataSize + msg.PathSize <= sizeof(msg.Data));
@@ -1678,6 +1767,9 @@ void CServer::Parse(unsigned long frameCounter, const unsigned char *buf, const 
 			}
 			// Special case: a new client has arrived
 			index = Parse_Hello(-1, msg, host);
+			if (index < 0) {
+				return; // game full (ICMGameFull already sent) or the client was kicked
+			}
 			networkStates[index].LastFrame = frameCounter;
 		}
 		return;

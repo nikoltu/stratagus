@@ -30,6 +30,7 @@
 #include "commands.h"
 #include "cursor.h"
 #include "filesystem.h"
+#include "group_move.h"
 #include "interface.h"
 #include "map.h"
 #include "net_message.h"
@@ -53,6 +54,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <chrono>
@@ -91,8 +93,9 @@ extern std::unique_ptr<gcn::Gui> Gui;
 
 static bool DbgInited = false;
 /// Whether the command file is read and the debug Lua calls exist. On Android only a build
-/// marked debuggable asks for it (the game activity keeps the file "debug_bridge" in the app's files folder); elsewhere always.
-static bool DbgCommands = true;
+/// marked debuggable asks for it (the game activity keeps the file "debug_bridge" in the app's files folder); elsewhere
+/// the environment variable WARGUSHD_DEBUG_BRIDGE=1 does. Off until DebugBridge_Init has found one of them.
+static bool DbgCommands = false;
 static fs::path DbgDir;       /// <UserDirectory>/wdbg
 static fs::path DbgCmdFile;   /// wdbg/cmd
 static fs::path DbgOutFile;   /// wdbg/out.json
@@ -819,9 +822,12 @@ std::string CmdMove(const std::vector<std::string> &tok)
 	Vec2i pos(std::strtol(tok[1].c_str(), nullptr, 10), std::strtol(tok[2].c_str(), nullptr, 10));
 	if (!Map.Info.IsPointOnMap(pos)) return InjectorResult(false, "tile off map");
 
+	// The same goals as a move order given with the pointer.
+	const std::vector<Vec2i> goals = GroupMoveGoalsForUnits(Selected, pos);
 	int n = 0;
-	for (CUnit *u : Selected) {
-		if (u) { SendCommandMove(*u, pos, EFlushMode::On); ++n; }
+	for (size_t i = 0; i < Selected.size(); ++i) {
+		CUnit *u = Selected[i];
+		if (u) { SendCommandMove(*u, goals[i], EFlushMode::On); ++n; }
 	}
 	return InjectorResult(n > 0, "move ordered for " + std::to_string(n) + " unit(s)");
 }
@@ -1479,7 +1485,7 @@ void WatchdogThreadMain()
 				"WATCHDOG: main loop STALLED %ds at checkpoint '%s' (frame=%ld cycle=%ld paused=%d)",
 				stalledSec, cp, (long)FrameCounter, (long)GameCycle, (int)GamePaused);
 #endif
-			if (DbgCrashPath[0]) {
+			if (DbgCrashPath[0] && WatchdogWritesCrashFile(cp)) {
 				FILE *f = std::fopen(DbgCrashPath, "wb");
 				if (f) {
 					std::fprintf(f,
@@ -1499,6 +1505,14 @@ void WatchdogThreadMain()
 /*----------------------------------------------------------------------------
 --  Public API
 ----------------------------------------------------------------------------*/
+
+bool WatchdogWritesCrashFile(const char *label)
+{
+	if (label == nullptr) {
+		return true;
+	}
+	return std::strncmp(label, "loading", 7) != 0 && std::strncmp(label, "movie:", 6) != 0;
+}
 
 void DebugBridge_RecordFatal(const char *kind, const char *what)
 {
@@ -1541,6 +1555,13 @@ void DebugBridge_RecordFatal(const char *kind, const char *what)
 #endif
 }
 
+/// The command channel is on (true for a debug start only).
+static int CclDebugBridgeOn(lua_State *l)
+{
+	lua_pushboolean(l, DbgCommands);
+	return 1;
+}
+
 void DebugBridge_Init()
 {
 	if (DbgInited) {
@@ -1579,14 +1600,25 @@ void DebugBridge_Init()
 		DbgCommands = files != nullptr && fs::exists(fs::path(files) / "debug_bridge", markEc);
 	}
 	__android_log_print(ANDROID_LOG_INFO, DBG_LOG_TAG, "debug bridge commands %s", DbgCommands ? "on" : "off");
+#else
+	{
+		const char *wanted = std::getenv("WARGUSHD_DEBUG_BRIDGE");
+		DbgCommands = wanted != nullptr && std::strcmp(wanted, "1") == 0;
+	}
+	ErrorPrint("debug bridge commands %s\n", DbgCommands ? "on" : "off");
 #endif
 	if (Lua && DbgCommands) {
 		lua_register(Lua, "DebugNetQuitPlayer", CclDebugNetQuitPlayer);
 		lua_register(Lua, "DebugNetFakeWait", CclDebugNetFakeWait);
 		lua_register(Lua, "DebugNetForceWatchChoice", CclDebugNetForceWatchChoice);
 	}
+	if (Lua) {
+		lua_register(Lua, "DebugBridgeOn", CclDebugBridgeOn); // the in-game Debug row asks
+	}
 
-	WriteStatus();
+	if (DbgCommands) {
+		WriteStatus();
+	}
 
 	DebugBridge_StartWatchdog();
 }
@@ -1610,11 +1642,11 @@ void DebugBridge_Poll()
 		return;
 	}
 
+	if (!DbgCommands) {
+		return; // crash records only: no status file, no command read
+	}
 	WriteStatus();
 
-	if (!DbgCommands) {
-		return; // status and crash records only
-	}
 	std::error_code ec;
 	if (!fs::exists(DbgCmdFile, ec)) {
 		return;

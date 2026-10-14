@@ -366,6 +366,20 @@ public:
 	std::shared_ptr<CPlayerColorGraphic> Clone(bool grayscale = false) const;
 };
 
+// One atlas page decoded and ready for the upload, with the time its two steps took.
+struct AtlasPageDecode {
+	SDL_Surface *surface = nullptr;
+	unsigned decodeMs = 0;   // file read + PNG decode
+	unsigned convertMs = 0;  // to RGBA32, team mask to alpha
+};
+/// A decoded page brought to RGBA32, a team mask to white with its luminance for alpha. Takes the
+/// surface over; null on failure. `maskInOnePass` false: the two-pass way, kept for its test.
+extern SDL_Surface *AtlasPageToRGBA(SDL_Surface *surface, bool teamMask, bool fogMask,
+                                    bool maskInOnePass = true);
+/// The renderer-free part of an atlas load (may run on a worker thread); surface null on failure.
+extern AtlasPageDecode DecodeAtlasPage(const fs::path &pngPath, bool teamMask, bool fogMask,
+                                       bool indexedForPalette);
+
 // World HD (P0): atlas-backed graphic. Loads a .hdatlas binary (see video/hd_atlas.h) plus its
 // packed RGBA PNG pages produced by the hd_atlas_import host tool, and draws a single trimmed
 // frame with correct src-rect / trim-offset / canvas placement through the existing GPU zoom path
@@ -406,10 +420,12 @@ public:
 	// groupMark: with a palette only. The frames named "<group><groupMark><N>" (classic sprite
 	// groups, e.g. "Orc/peon.grp/indexed_3") are listed but not cut at load; the indexed page and
 	// the palette are kept so that ClassicGroup() can cut a group when it is first drawn.
+	// decoded: the page as DecodeAtlasPage gave it (same teamMask / fogMask / palette choice); the
+	// loader takes it instead of decoding and frees it. Null: the loader decodes the page itself.
 	bool LoadTexturePacker(const std::string &jsonPath, bool teamMask = false, bool fogMask = false,
 	                       const unsigned char *palette = nullptr, bool nearest = false,
 	                       const char *framePrefix = nullptr, const char *maskPrefix = nullptr,
-	                       const char *groupMark = nullptr);
+	                       const char *groupMark = nullptr, const AtlasPageDecode *decoded = nullptr);
 	bool IsLoaded() const { return !pages.empty(); }
 
 	// Frame lookup by TexturePacker name (e.g. "arrow_0"); returns -1 if absent.
@@ -716,6 +732,9 @@ extern unsigned long FrameCounter;
 
 /// Counts quantity of slow frames
 extern unsigned long SlowFrameCounter;
+
+/// Counts quantity of frames that came a whole frame period late
+extern unsigned long LongFrameCounter;
 
 /// Initialize Pixels[] for all players.
 /// (bring Players[] in sync with Pixels[])

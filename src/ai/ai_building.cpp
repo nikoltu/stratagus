@@ -45,6 +45,9 @@
 #include "unit_find.h"
 #include "unit_manager.h"
 #include "unittype.h"
+#include "wc2ai.h"
+
+#include <deque>
 
 /*----------------------------------------------------------------------------
 --  Variables
@@ -641,6 +644,73 @@ AiFindMiningPlace(const CUnit &worker, const CUnitType &type, const Vec2i &start
 	return BuildingPlaceFinder::find(worker, type, startPos, false);
 }
 
+/// The two placement rules of this port that the original does not have (the ground stays in one
+/// piece, no building on the way between a depot and its resource) are still asked for a player
+/// run by its original script (local evidence record AI-PLACE-001 shows no such test); each place
+/// they refuse is logged. To be set false once the original's grid is seen in a game.
+constexpr bool PlaceSafetyRulesForScripted = true;
+
+namespace
+{
+/// What the original's placement walk asks about a tile, for one worker and one building type.
+struct ScriptedPlace {
+	const CUnit &worker;
+	const CUnitType &type;
+	std::vector<char> ground; ///< tiles the worker's ground holds (terrain only), filled when first asked
+};
+} // namespace
+
+/// Is the tile on the worker's ground: joined to the worker's own tile over terrain a unit of
+/// its kind can stand on, units and buildings not looked at (the original compares region
+/// numbers of the terrain). One fill of the map per walk.
+static bool ScriptedPlaceSameGround(int x, int y, void *context)
+{
+	ScriptedPlace &place = *static_cast<ScriptedPlace *>(context);
+	const int width = Map.Info.MapWidth;
+	const int height = Map.Info.MapHeight;
+	if (place.ground.empty()) {
+		place.ground.assign(static_cast<size_t>(width) * height, 0);
+		const tile_flags mask = place.worker.Type->MovementMask
+		                        & ~(MapFieldLandUnit | MapFieldSeaUnit | MapFieldAirUnit | MapFieldBuilding);
+		std::deque<Vec2i> open;
+		open.push_back(place.worker.tilePos);
+		place.ground[static_cast<size_t>(place.worker.tilePos.y) * width + place.worker.tilePos.x] = 1;
+		while (!open.empty()) {
+			const Vec2i tile = open.front();
+			open.pop_front();
+			for (int dy = -1; dy <= 1; ++dy) {
+				for (int dx = -1; dx <= 1; ++dx) {
+					const Vec2i next(tile.x + dx, tile.y + dy);
+					if (!Map.Info.IsPointOnMap(next)) {
+						continue;
+					}
+					char &seen = place.ground[static_cast<size_t>(next.y) * width + next.x];
+					if (!seen && !Map.Field(next)->CheckMask(mask)) {
+						seen = 1;
+						open.push_back(next);
+					}
+				}
+			}
+		}
+	}
+	return x >= 0 && y >= 0 && x < width && y < height && place.ground[static_cast<size_t>(y) * width + x] != 0;
+}
+
+static bool ScriptedPlaceFits(int x, int y, void *context)
+{
+	const ScriptedPlace &place = *static_cast<const ScriptedPlace *>(context);
+	const Vec2i pos(x, y);
+	if (!CanBuildUnitType(&place.worker, place.type, pos, 1)) {
+		return false;
+	}
+	if (PlaceSafetyRulesForScripted
+		&& (!AiPlaceKeepsGroundJoined(place.worker, place.type, pos) || AiPlaceOnHaulWay(place.worker, place.type, pos))) {
+		LogPrint("wc2ai: place vetoed (port rule) %s %d %d\n", place.type.Ident.c_str(), x, y);
+		return false;
+	}
+	return true;
+}
+
 /**
 **  Find free building place.
 **
@@ -660,6 +730,22 @@ std::optional<Vec2i> AiFindBuildingPlace(const CUnit &worker, const CUnitType &t
 	           AiPlayer->Player->Index,
 	           type.Ident.c_str(),
 	           type.Name.c_str());
+
+	// A player run by its original script: farms and the land buildings go on the original's grid
+	// round the hall (wc2ai::PlaceWalk). Without a place the worker gives up for this time. The
+	// shore buildings, the halls and the oil platform stay with the finders below.
+	if (Wc2AiRuns(worker.Player->Index)) {
+		const int step = Wc2AiPlaceStepOf(type);
+		if (step > 1) {
+			int refX;
+			int refY;
+			Wc2AiPlaceReference(worker, refX, refY);
+			ScriptedPlace context{worker, type, {}};
+			const wc2ai::Place place = wc2ai::PlaceWalk(refX, refY, step, Map.Info.MapWidth,
+			                                            ScriptedPlaceSameGround, ScriptedPlaceFits, &context);
+			return place.found ? std::make_optional(Vec2i(place.x, place.y)) : std::nullopt;
+		}
+	}
 
 	const Vec2i &startPos = Map.Info.IsPointOnMap(nearPos) ? nearPos : worker.tilePos;
 

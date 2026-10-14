@@ -112,6 +112,28 @@ void PathFinderOutput::Save(CFile &file) const
 **  @param unit  Unit pointer to be saved.
 **  @param file  Output file.
 */
+/**
+**  The unit's small counters as saved-game text. A field at its fresh value
+**  is left out, so a unit that has none set is written as before.
+*/
+std::string UnitSmallFieldsText(int underAttack, int justMoved, bool zDisplaced, int colors)
+{
+	std::string text;
+	if (underAttack != 0) {
+		text += " \"under-attack\", " + std::to_string(underAttack) + ",";
+	}
+	if (justMoved != 0) {
+		text += " \"just-moved\", " + std::to_string(justMoved) + ",";
+	}
+	if (zDisplaced) {
+		text += " \"z-displaced\",";
+	}
+	if (colors != -1) {
+		text += " \"colors\", " + std::to_string(colors) + ",";
+	}
+	return text;
+}
+
 void SaveUnit(const CUnit &unit, CFile &file)
 {
 	file.printf("\nUnit(%d, {", UnitNumber(unit));
@@ -180,6 +202,19 @@ void SaveUnit(const CUnit &unit, CFile &file)
 	if (unit.RescuedFrom) {
 		file.printf(" \"rescued-from\", %d,", unit.RescuedFrom->Index);
 	}
+	if (unit.TakeOver) {
+		file.printf(" \"take-over\", %d,", unit.TakeOver);
+	}
+	if (unit.MapFixed) {
+		file.printf(" \"map-fixed\", %d,", unit.MapFixed);
+	}
+	if (unit.HomePos.x >= 0) {
+		file.printf(" \"home\", {%d, %d},", unit.HomePos.x, unit.HomePos.y);
+	}
+	// After "home": a file without it is read as before roles were saved (a home makes a guard).
+	if (unit.HomeRole) {
+		file.printf(" \"home-role\", %d,", unit.HomeRole);
+	}
 	// n0b0dy: How is this useful?
 	// mr-russ: You can't always load units in order, it saved the information
 	// so you can load a unit whose Container hasn't been loaded yet.
@@ -212,6 +247,10 @@ void SaveUnit(const CUnit &unit, CFile &file)
 	}
 	file.printf("\"ttl\", %lu,\n  ", unit.TTL);
 	file.printf("\"threshold\", %d,\n  ", unit.Threshold);
+	const std::string smallFields = UnitSmallFieldsText(unit.UnderAttack, unit.JustMoved, unit.ZDisplaced, unit.Colors);
+	if (!smallFields.empty()) {
+		file.printf("%s\n  ", smallFields.c_str());
+	}
 
 	for (size_t i = 0; i < UnitTypeVar.GetNumberVariable(); ++i) {
 		if (unit.Variable[i] != unit.Type->DefaultStat.Variables[i]) {

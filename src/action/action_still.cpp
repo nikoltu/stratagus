@@ -59,11 +59,18 @@ enum {
 	SUB_STILL_ATTACK
 };
 
+/**
+**  The type's CanCastSpell and the unit's AutoCastSpell do not fit: both are empty for a unit
+**  that casts nothing and both have one entry per spell for a caster.
+*/
+bool AutoCastVectorsInconsistent(size_t canCastSpells, size_t autoCastSpells)
+{
+	return canCastSpells != autoCastSpells;
+}
+
 static bool CheckInvalidAutoCastVectors(const CUnit &unit)
 {
-	return ((unit.AutoCastSpell.empty() && unit.Type->CanCastSpell.empty())
-			|| (!unit.AutoCastSpell.empty() && !unit.Type->CanCastSpell.empty()
-				&& unit.AutoCastSpell.size() == unit.Type->CanCastSpell.size()));
+	return AutoCastVectorsInconsistent(unit.Type->CanCastSpell.size(), unit.AutoCastSpell.size());
 }
 
 static void WarnInvalidAutoCastVectors(const CUnit &unit, const char *context)
@@ -395,8 +402,10 @@ bool AutoAttack(CUnit &unit)
 	if (unit.Type->CanAttack == false) {
 		return false;
 	}
-	// Normal units react in reaction range.
-	CUnit *goal = AttackUnitsInReactRange(unit);
+	// Normal units react in reaction range; a unit that stands idle searches as the original's
+	// idle order does (a person's unit only in its attack range).
+	CUnit *goal = unit.CurrentAction() == UnitAction::Still ? AttackUnitsInIdleRange(unit)
+	                                                        : AttackUnitsInReactRange(unit);
 
 	if (goal == nullptr) {
 		return false;
@@ -404,7 +413,10 @@ bool AutoAttack(CUnit &unit)
 	std::unique_ptr<COrder> savedOrder;
 
 	if (unit.CurrentAction() == UnitAction::Still) {
-		savedOrder = COrder::NewActionAttack(unit, unit.tilePos);
+		// A unit held by its home tile is brought back by the 50-cycle pass.
+		if (!UnitHeldByHome(unit)) {
+			savedOrder = COrder::NewActionAttack(unit, unit.tilePos);
+		}
 	} else if (unit.CanStoreOrder(unit.CurrentOrder())) {
 		savedOrder = unit.CurrentOrder()->Clone();
 	}

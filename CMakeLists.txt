@@ -304,6 +304,7 @@ set(stratagusmain_SRCS
 	src/stratagus/iolib.cpp
 	src/stratagus/luacallback.cpp
 	src/stratagus/mainloop.cpp
+	src/stratagus/mods.cpp
 	src/stratagus/parameters.cpp
 	src/stratagus/player.cpp
 	src/stratagus/script.cpp
@@ -518,10 +519,12 @@ set(stratagus_generic_HDRS
 	src/include/iolib.h
 	src/include/luacallback.h
 	src/include/map.h
+	src/include/mods.h
 	src/include/mdns_wrapper.h
 	src/include/menus.h
 	src/include/minimap.h
 	src/include/missile.h
+	src/include/missile_cadence.h
 	src/include/missileconfig.h
 	src/include/movie.h
 	src/include/net_lowlevel.h
@@ -583,12 +586,20 @@ set(stratagus_tests_SRCS
 	tests/stratagus/test_command_quit.cpp
 	tests/stratagus/test_depend.cpp
 	tests/stratagus/test_format.cpp
+	tests/stratagus/test_group_move.cpp
+	tests/stratagus/test_idle_search.cpp
+	tests/stratagus/test_lua_libs.cpp
 	tests/stratagus/test_luacallback.cpp
 	tests/stratagus/test_missile_fire.cpp
+	tests/stratagus/test_mods.cpp
 	tests/stratagus/test_resource_cleanup.cpp
+	tests/stratagus/test_saveload.cpp
+	tests/stratagus/test_sound.cpp
 	tests/stratagus/test_trigger.cpp
 	tests/stratagus/test_unitptr.cpp
 	tests/stratagus/test_util.cpp
+	tests/stratagus/test_wc2ai.cpp
+	tests/stratagus/test_wc2mission.cpp
 	tests/network/test_net_lowlevel.cpp
 	tests/network/test_net_mesh.cpp
 	tests/network/test_net_mesh_glue.cpp
@@ -596,6 +607,7 @@ set(stratagus_tests_SRCS
 	tests/network/test_netconnect.cpp
 	tests/network/test_network.cpp
 	tests/network/test_udpsocket.cpp
+	tests/video/test_frame_pace.cpp
 	tests/video/test_hd_atlas.cpp
 	tests/video/test_hudcanvas.cpp
 	tests/video/test_nineslice.cpp

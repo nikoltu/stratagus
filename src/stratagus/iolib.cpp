@@ -40,6 +40,7 @@
 
 #include "game.h"
 #include "map.h"
+#include "mods.h"
 #include "parameters.h"
 #include "script.h"
 #include "stratagus.h"
@@ -703,6 +704,12 @@ const std::string *CurrentNativePudBytes()
 
 static fs::path LibraryFileNameImpl(const std::string_view file)
 {
+	// A file of an enabled mod is found in that mod's directory and nowhere else; with no mod
+	// enabled the name is looked up like any other.
+	if (ModsActive() && ModsIsPath(file)) {
+		return ModsLocate(file);
+	}
+
 	// Absolute path or in current directory.
 	fs::path candidate = file;
 	if (candidate.is_absolute()) {
@@ -788,6 +795,9 @@ static fs::path LibraryFileNameImpl(const std::string_view file)
 
 extern std::string LibraryFileName(const std::string &file)
 {
+	if (ModsActive() && ModsIsPath(file)) {
+		return LibraryFileNameImpl(file).string(); // not remembered: the set can change
+	}
 	static std::unordered_map<std::string, std::string> FileNameMap;
 	auto result = FileNameMap.find(file);
 	if (result == std::end(FileNameMap)) {

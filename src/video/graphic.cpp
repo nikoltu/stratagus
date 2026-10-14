@@ -855,6 +855,143 @@ static bool UploadPalettedFrames(SDL_Surface *indexed, const uint8_t rgba[256][4
 	return true;
 }
 
+// An atlas page as decoded brought to RGBA32, the form the upload takes; a team mask as white with
+// its luminance for alpha. Takes `surface` over (it is freed or returned); null on a failure.
+// An 8-bit team mask is written in one pass by a table of its palette (index 0 is the colour key
+// of the two-pass way below, so it gives alpha 0 whatever its colour); `maskInOnePass` false keeps
+// the two passes for the test that holds the two ways equal.
+SDL_Surface *AtlasPageToRGBA(SDL_Surface *surface, bool teamMask, bool fogMask, bool maskInOnePass)
+{
+	if (!surface) {
+		return nullptr;
+	}
+	if (maskInOnePass && teamMask && !fogMask && surface->format && surface->format->BytesPerPixel == 1
+		&& surface->format->palette) {
+		SDL_Surface *conv =
+		    SDL_CreateRGBSurfaceWithFormat(0, surface->w, surface->h, 32, SDL_PIXELFORMAT_RGBA32);
+		if (!conv) {
+			SDL_FreeSurface(surface);
+			return nullptr;
+		}
+		const SDL_Palette *pal = surface->format->palette;
+		Uint32 white[256];
+		for (int i = 0; i < 256; ++i) {
+			const Uint8 alpha = (i == 0 || i >= pal->ncolors)
+			                        ? 0 : hdatlas::maskAlpha(pal->colors[i].r, pal->colors[i].g, pal->colors[i].b);
+			white[i] = SDL_MapRGBA(conv->format, 255, 255, 255, alpha);
+		}
+		SDL_LockSurface(surface);
+		SDL_LockSurface(conv);
+		for (int y = 0; y < surface->h; ++y) {
+			const Uint8 *src = static_cast<const Uint8 *>(surface->pixels) + y * surface->pitch;
+			Uint32 *dst = reinterpret_cast<Uint32 *>(static_cast<Uint8 *>(conv->pixels) + y * conv->pitch);
+			for (int x = 0; x < surface->w; ++x) {
+				dst[x] = white[src[x]];
+			}
+		}
+		SDL_UnlockSurface(conv);
+		SDL_UnlockSurface(surface);
+		SDL_FreeSurface(surface);
+		return conv;
+	}
+	if (!surface->format || surface->format->BytesPerPixel != 4) {
+		const bool paletted = surface->format && surface->format->BytesPerPixel == 1;
+		if (paletted && !fogMask) {
+			SDL_SetColorKey(surface, SDL_TRUE, 0);
+		}
+		SDL_Surface *conv =
+		    SDL_CreateRGBSurfaceWithFormat(0, surface->w, surface->h, 32, SDL_PIXELFORMAT_RGBA32);
+		if (!conv) {
+			SDL_FreeSurface(surface);
+			return nullptr;
+		}
+		SDL_FillRect(conv, nullptr, SDL_MapRGBA(conv->format, 0, 0, 0, 0));
+		SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_NONE); // straight copy; colour-key still skips keyed pixels
+		SDL_BlitSurface(surface, nullptr, conv, nullptr);
+		SDL_FreeSurface(surface);
+		surface = conv;
+	}
+	if (teamMask) {
+		// A luminance mask converts to RGBA as (lum,lum,lum,255) -> opaque. Remap so the luminance
+		// becomes ALPHA and RGB is white: the _team overlay's colour-mod then tints only the bright
+		// (team-colourable) pixels and leaves the rest transparent.
+		SDL_LockSurface(surface);
+		const SDL_PixelFormat *f = surface->format;
+		Uint8 *base = static_cast<Uint8 *>(surface->pixels);
+		if (f->format == SDL_PIXELFORMAT_RGBA32) {
+			// STUTTER-LOAD-SPEED: the bytes stand as R, G, B, A; the same sum without two SDL
+			// calls per pixel (a mask page has up to 60 million of them).
+			for (int y = 0; y < surface->h; ++y) {
+				Uint8 *px = base + y * surface->pitch;
+				for (int x = 0; x < surface->w; ++x, px += 4) {
+					const Uint8 lum = hdatlas::maskAlpha(px[0], px[1], px[2]);
+					px[0] = 255;
+					px[1] = 255;
+					px[2] = 255;
+					px[3] = lum;
+				}
+			}
+		} else {
+			for (int y = 0; y < surface->h; ++y) {
+				Uint32 *row = reinterpret_cast<Uint32 *>(base + y * surface->pitch);
+				for (int x = 0; x < surface->w; ++x) {
+					Uint8 r, g, b, a;
+					SDL_GetRGBA(row[x], f, &r, &g, &b, &a);
+					const Uint8 lum = hdatlas::maskAlpha(r, g, b);
+					row[x] = SDL_MapRGBA(f, 255, 255, 255, lum);
+				}
+			}
+		}
+		SDL_UnlockSurface(surface);
+	} else if (fogMask) {
+		// bgs_Fow.png: palette is all-black, tRNS chunk carries per-index alpha (0-254).
+		// After palette→RGBA32 conversion above, pixels are already (0,0,0,alpha) —
+		// exactly the fog mask we need. No luminance conversion required.
+	}
+	return surface;
+}
+
+// The part of an atlas load that needs no renderer: the page PNG read, decoded and brought to the
+// form the upload takes (RGBA32; a team mask as white with its luminance for alpha; with
+// indexedForPalette the 8-bit page as it is). Touches nothing but its own file and surface, so it
+// may run on a worker thread. The surface is null on any failure.
+AtlasPageDecode DecodeAtlasPage(const fs::path &pngPath, bool teamMask, bool fogMask, bool indexedForPalette)
+{
+	AtlasPageDecode out;
+	const Uint32 ticksStart = SDL_GetTicks();
+	auto pf = std::make_unique<CFile>();
+	if (pf->open(pngPath.string().c_str(), CL_OPEN_READ) == -1) {
+		return out;
+	}
+	SDL_Surface *surface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(pf)), 1);
+	if (!surface) {
+		return out;
+	}
+	const Uint32 ticksDecoded = SDL_GetTicks();
+	// The classic_* terrain atlases are 8-bit PALETTED PNGs and the team masks are 8-bit LUMINANCE;
+	// UploadSurfaceToTexture only accepts RGBA. Convert to RGBA32 first.
+	// NG6: those paletted PNGs carry NO tRNS chunk and use the classic convention that palette
+	// index 0 is the transparent key (magenta 255,0,255). A plain SDL_ConvertSurfaceFormat keeps
+	// index-0 pixels OPAQUE, so tree/scenery/fog frames upload a red/pink halo. Colour-key index 0
+	// and colour-key-blit onto a transparent RGBA32 target so keyed pixels become alpha 0.
+	if (indexedForPalette) {
+		// Classic view: the page stays indexed; it is coloured by `palette` at the cut below.
+		if (!surface->format || surface->format->BytesPerPixel != 1) {
+			SDL_FreeSurface(surface);
+			return out;
+		}
+	} else {
+		surface = AtlasPageToRGBA(surface, teamMask, fogMask);
+		if (!surface) {
+			return out;
+		}
+	}
+	out.surface = surface;
+	out.decodeMs = (unsigned) (ticksDecoded - ticksStart);
+	out.convertMs = (unsigned) (SDL_GetTicks() - ticksDecoded);
+	return out;
+}
+
 // WargusHD: load a native Remastered TexturePacker atlas (<name>.json + its meta.image PNG page)
 // directly, with NO offline .hdatlas conversion step. Builds the same frames/pages/byHash model as
 // Load() so every draw method + FrameByName work unchanged. Frame keys keep their full TexturePacker
@@ -862,11 +999,19 @@ static bool UploadPalettedFrames(SDL_Surface *indexed, const uint8_t rgba[256][4
 bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask, bool fogMask,
                                       const unsigned char *palette, bool nearest,
                                       const char *framePrefix, const char *maskPrefix,
-                                      const char *groupMark)
+                                      const char *groupMark, const AtlasPageDecode *decoded)
 {
+	// A page decoded ahead is this function's to free, on every way out.
+	struct GivenPage : AtlasPageDecode {
+		~GivenPage() { if (surface) { SDL_FreeSurface(surface); } }
+	} given;
+	if (decoded) {
+		static_cast<AtlasPageDecode &>(given) = *decoded;
+	}
 	if (!pages.empty()) {
 		return true; // already loaded; single-shot
 	}
+	// Load timing (log only): where the time of one atlas goes.
 	const fs::path resolved = LibraryFileName(jsonPath);
 	if (resolved.empty()) {
 		return false;
@@ -903,92 +1048,26 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 	(void) meta; // meta.image holds the packing machine's absolute dev path (e.g. "C:/Projects/..."),
 	// which is useless on-device -- derive the page PNG from the .json filename instead (sibling
 	// <name>.png), which is how the Remastered atlases are actually laid out.
-	fs::path pagePath = resolved;
-	pagePath.replace_extension(".png");
-	SDL_Surface *pageSurface = nullptr; // D0: kept alive past frame parsing for possible re-pack
-	{
-		auto pf = std::make_unique<CFile>();
-		if (pf->open(pagePath.string().c_str(), CL_OPEN_READ) == -1) {
+	// D0: the GPU upload is deferred. An atlas page can exceed GL_MAX_TEXTURE_SIZE (baseline phones cap at
+	// 4096, but native unit atlases reach ~8000px) -> a single-texture upload would fail and drop the
+	// whole atlas to the classic path. Keep the CPU surface and, after frames are parsed, either upload
+	// it whole (fits) or re-pack it frame-by-frame into <=cap sub-textures (see below).
+	AtlasPageDecode page;
+	if (given.surface) {
+		page = given; // decoded ahead (HD preload); its times are the worker's
+		given.surface = nullptr;
+	} else {
+		fs::path pagePath = resolved;
+		pagePath.replace_extension(".png");
+		page = DecodeAtlasPage(pagePath, teamMask, fogMask, palette != nullptr);
+		if (!page.surface) {
 			return false;
 		}
-		SDL_Surface *surface = IMG_Load_RW(CFile::to_SDL_RWops(std::move(pf)), 1);
-		if (!surface) {
-			return false;
-		}
-		// The classic_* terrain atlases are 8-bit PALETTED PNGs and the team masks are 8-bit LUMINANCE;
-		// UploadSurfaceToTexture only accepts RGBA. Convert to RGBA32 first.
-		// NG6: those paletted PNGs carry NO tRNS chunk and use the classic convention that palette
-		// index 0 is the transparent key (magenta 255,0,255). A plain SDL_ConvertSurfaceFormat keeps
-		// index-0 pixels OPAQUE, so tree/scenery/fog frames upload a red/pink halo. Colour-key index 0
-		// and colour-key-blit onto a transparent RGBA32 target so keyed pixels become alpha 0.
-		if (palette) {
-			// Classic view: the page stays indexed; it is coloured by `palette` at the cut below.
-			if (!surface->format || surface->format->BytesPerPixel != 1) {
-				SDL_FreeSurface(surface);
-				return false;
-			}
-		} else if (!surface->format || surface->format->BytesPerPixel != 4) {
-			const bool paletted = surface->format && surface->format->BytesPerPixel == 1;
-			if (paletted && !fogMask) {
-				SDL_SetColorKey(surface, SDL_TRUE, 0);
-			}
-			SDL_Surface *conv =
-			    SDL_CreateRGBSurfaceWithFormat(0, surface->w, surface->h, 32, SDL_PIXELFORMAT_RGBA32);
-			if (!conv) {
-				SDL_FreeSurface(surface);
-				return false;
-			}
-			SDL_FillRect(conv, nullptr, SDL_MapRGBA(conv->format, 0, 0, 0, 0));
-			SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_NONE); // straight copy; colour-key still skips keyed pixels
-			SDL_BlitSurface(surface, nullptr, conv, nullptr);
-			SDL_FreeSurface(surface);
-			surface = conv;
-		}
-		if (palette) {
-			// nothing more to prepare
-		} else if (teamMask) {
-			// A luminance mask converts to RGBA as (lum,lum,lum,255) -> opaque. Remap so the luminance
-			// becomes ALPHA and RGB is white: the _team overlay's colour-mod then tints only the bright
-			// (team-colourable) pixels and leaves the rest transparent.
-			SDL_LockSurface(surface);
-			const SDL_PixelFormat *f = surface->format;
-			Uint8 *base = static_cast<Uint8 *>(surface->pixels);
-			if (f->format == SDL_PIXELFORMAT_RGBA32) {
-				// STUTTER-LOAD-SPEED: the bytes stand as R, G, B, A; the same sum without two SDL
-				// calls per pixel (a mask page has up to 60 million of them).
-				for (int y = 0; y < surface->h; ++y) {
-					Uint8 *px = base + y * surface->pitch;
-					for (int x = 0; x < surface->w; ++x, px += 4) {
-						const Uint8 lum = (Uint8)((px[0] * 77 + px[1] * 150 + px[2] * 29) >> 8);
-						px[0] = 255;
-						px[1] = 255;
-						px[2] = 255;
-						px[3] = lum;
-					}
-				}
-			} else {
-				for (int y = 0; y < surface->h; ++y) {
-					Uint32 *row = reinterpret_cast<Uint32 *>(base + y * surface->pitch);
-					for (int x = 0; x < surface->w; ++x) {
-						Uint8 r, g, b, a;
-						SDL_GetRGBA(row[x], f, &r, &g, &b, &a);
-						const Uint8 lum = (Uint8)((r * 77 + g * 150 + b * 29) >> 8);
-						row[x] = SDL_MapRGBA(f, 255, 255, 255, lum);
-					}
-				}
-			}
-			SDL_UnlockSurface(surface);
-		} else if (fogMask) {
-			// bgs_Fow.png: palette is all-black, tRNS chunk carries per-index alpha (0-254).
-			// After palette→RGBA32 conversion above, pixels are already (0,0,0,alpha) —
-			// exactly the fog mask we need. No luminance conversion required.
-		}
-		// D0: defer the GPU upload. An atlas page can exceed GL_MAX_TEXTURE_SIZE (baseline phones cap at
-		// 4096, but native unit atlases reach ~8000px) -> a single-texture upload would fail and drop the
-		// whole atlas to the classic path. Keep the CPU surface and, after frames are parsed, either upload
-		// it whole (fits) or re-pack it frame-by-frame into <=cap sub-textures (see below).
-		pageSurface = surface;
 	}
+	SDL_Surface *pageSurface = page.surface; // kept alive past frame parsing for possible re-pack
+	const Uint32 ticksConverted = SDL_GetTicks();
+	const int pageW = pageSurface->w;
+	const int pageH = pageSurface->h;
 
 	auto reqInt = [](const content::JsonValue *o, const char *k, int &out) -> bool {
 		const content::JsonValue *v = o ? o->find(k) : nullptr;
@@ -1209,6 +1288,12 @@ bool CAtlasGraphic::LoadTexturePacker(const std::string &jsonPath, bool teamMask
 			if (tex) { SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear); }
 		}
 	}
+	// "upload" holds the frame table and the upload (with the re-pack, when the page is cut).
+	ErrorPrint("ATLAS load %s %dx%d read+decode %u ms convert %u ms upload %u ms pages %d in-game %d\n",
+	           resolved.stem().string().c_str(), pageW, pageH,
+	           page.decodeMs, page.convertMs,
+	           (unsigned) (SDL_GetTicks() - ticksConverted), (int) pages.size(),
+	           (GameRunning && GameCycle > 0) ? 1 : 0);
 	return true;
 }
 

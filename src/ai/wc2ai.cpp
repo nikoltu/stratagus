@@ -28,20 +28,27 @@
 #include "action/action_resource.h"
 #include "commands.h"
 #include "depend.h"
+#include "home_leash.h"
 #include "iolib.h"
+#include "map.h"
+#include "pathfinder.h"
+#include "pud.h"
 #include "script.h"
 #include "player.h"
 #include "settings.h"
 #include "unit.h"
 #include "unit_find.h"
+#include "unit_manager.h"
 #include "unittype.h"
 #include "upgrade.h"
 #include "upgrade_structs.h"
 
 #include <algorithm>
 #include <array>
+#include <initializer_list>
 #include <iterator>
 #include <set>
+#include <utility>
 
 namespace wc2ai
 {
@@ -84,6 +91,43 @@ const Program &GameProgram()
 	return program;
 }
 
+/// Read Data/Rez/script.bin of the game folder once, for the attack rates. The file is the
+/// player's own; nothing of it is shipped. Absent or not decodable: every rate is 0.
+const uint8_t *GameAttackRates()
+{
+	static uint8_t rates[RateTypes] = {};
+	static bool tried = false;
+	if (tried) {
+		return rates;
+	}
+	tried = true;
+	const fs::path resolved = LibraryFileName("Data/Rez/script.bin");
+	if (resolved.empty()) {
+		LogPrint("wc2ai: no Data/Rez/script.bin in the game folder: no attack rates\n");
+		return rates;
+	}
+	std::error_code ec;
+	const uintmax_t size = fs::file_size(resolved, ec);
+	if (ec || size == 0 || size > 0xFFFF) {
+		LogPrint("wc2ai: Data/Rez/script.bin has an unexpected size: no attack rates\n");
+		return rates;
+	}
+	std::vector<uint8_t> data(static_cast<size_t>(size));
+	CFile file;
+	if (file.open(resolved.string().c_str(), CL_OPEN_READ) == -1) {
+		LogPrint("wc2ai: Data/Rez/script.bin cannot be opened: no attack rates\n");
+		return rates;
+	}
+	const bool whole = static_cast<size_t>(file.read(data.data(), data.size())) == data.size();
+	file.close();
+	if (!whole || !AttackRates(data.data(), data.size(), rates)) {
+		LogPrint("wc2ai: Data/Rez/script.bin not used: %s\n", whole ? "it does not decode" : "short read");
+		return rates;
+	}
+	LogPrint("wc2ai: attack rates of %d unit types\n", RateTypes);
+	return rates;
+}
+
 } // namespace wc2ai
 
 static std::array<int, PlayerMax> Wc2AiIds = [] {
@@ -99,22 +143,56 @@ int Wc2AiIdOf(int player)
 
 static std::array<wc2ai::State, PlayerMax> Wc2AiStates;
 
-/// Units already sent on an attack, by unit number, per player: they do not count as free
-/// fighters again (the original marks them the same way). Not saved with the game yet.
-static std::array<std::set<int>, PlayerMax> Wc2AiCommitted;
+/// What the strength map is built from and the map itself, kept for one map: the original's
+/// type number per engine unit type (by CUnitType::Slot; TypeNumberUnknown = not looked up yet),
+/// the kind of each cell, and the map of the stretch of 50 game cycles it was last asked for in.
+constexpr int TypeNumberUnknown = -2;
+static std::vector<int> Wc2AiTypeNumbers;
+static std::vector<uint8_t> Wc2AiCellKinds;
+static wc2ai::CellMap Wc2AiCellMap;
+static long Wc2AiCellTick = -1;
 
 void Wc2AiClearIds()
 {
 	Wc2AiIds.fill(-1);
 	Wc2AiStates.fill(wc2ai::State());
-	for (std::set<int> &committed : Wc2AiCommitted) {
-		committed.clear();
-	}
+	Wc2AiTypeNumbers.clear();
+	Wc2AiCellKinds.clear();
+	Wc2AiCellMap = wc2ai::CellMap();
+	Wc2AiCellTick = -1;
 }
 
-/// The player's fighters of one kind (land, sea, air) that have not been sent yet: alive, on the
-/// map, able to attack, not buildings and not workers.
-static std::vector<CUnit *> FreeFighters(int index, EMovement kind)
+/// The original's number of an engine unit type, by its ident in the map converter's table;
+/// -1 for a type that has none among the types with an attack rate.
+static int TypeNumberOf(const CUnitType &type)
+{
+	const size_t slot = static_cast<size_t>(type.Slot);
+	if (slot >= Wc2AiTypeNumbers.size()) {
+		Wc2AiTypeNumbers.resize(slot + 1, TypeNumberUnknown);
+	}
+	if (Wc2AiTypeNumbers[slot] == TypeNumberUnknown) {
+		Wc2AiTypeNumbers[slot] = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, wc2ai::RateTypes, type.Ident);
+	}
+	return Wc2AiTypeNumbers[slot];
+}
+
+/// What a unit type is worth in a fight (wc2ai::StrengthWeight), from the type's own damage
+/// numbers and its attack rate; 0 without the rates or for a type the original has no rate for.
+static int WeightOf(const CUnitType &type)
+{
+	const int number = TypeNumberOf(type);
+	if (number < 0) {
+		return 0;
+	}
+	const uint8_t *rates = wc2ai::GameAttackRates();
+	return wc2ai::StrengthWeight(type.DefaultStat.Variables[BASICDAMAGE_INDEX].Value,
+	                             type.DefaultStat.Variables[PIERCINGDAMAGE_INDEX].Value, rates[number], rates[1]);
+}
+
+/// The player's fighters of one kind (land, sea, air) that the map did not fix: alive, on the
+/// map, able to attack, not buildings and not workers. All of them are what conditions 4 / 5 / 6
+/// count (wc2ai::Counted); with `pickable` only the ones a wave may take (wc2ai::Pickable).
+static std::vector<CUnit *> Fighters(int index, EMovement kind, bool pickable)
 {
 	const CPlayer &player = Players[index];
 	const CUnitType *peasant = UnitTypeByIdentOrNull("unit-peasant");
@@ -125,16 +203,198 @@ static std::vector<CUnit *> FreeFighters(int index, EMovement kind)
 			continue;
 		}
 		const CUnitType &type = *unit->Type;
-		if (type.Building || !type.CanAttack || type.MoveType != kind || &type == peasant
-			|| &type == peon) {
-			continue;
-		}
-		if (Wc2AiCommitted[index].count(UnitNumber(*unit))) {
+		const bool fighter = !type.Building && type.CanAttack && &type != peasant && &type != peon;
+		const bool counted = wc2ai::Counted(true, fighter, type.MoveType == kind, unit->MapFixed != 0);
+		if (pickable ? !wc2ai::Pickable(counted, unit->HomeRole) : !counted) {
 			continue;
 		}
 		free.push_back(unit);
 	}
 	return free;
+}
+
+static int CountedFighters(int index, EMovement kind)
+{
+	return static_cast<int>(Fighters(index, kind, false).size());
+}
+
+static std::vector<CUnit *> PickableFighters(int index, EMovement kind)
+{
+	return Fighters(index, kind, true);
+}
+
+static bool IsOneOf(const CUnitType &type, std::initializer_list<const char *> idents)
+{
+	for (const char *ident : idents) {
+		if (type.Ident == ident) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// The living units of the player a wave is sent at, in the order of its unit list.
+static std::vector<wc2ai::PlaceUnit> TargetUnits(const CPlayer &target)
+{
+	std::vector<wc2ai::PlaceUnit> units;
+	for (const CUnit *unit : target.GetUnits()) {
+		if (!unit || !unit->IsAliveOnMap() || !unit->Type) {
+			continue;
+		}
+		const CUnitType &type = *unit->Type;
+		wc2ai::PlaceUnit entry;
+		entry.x = unit->tilePos.x;
+		entry.y = unit->tilePos.y;
+		entry.w = type.TileWidth;
+		entry.h = type.TileHeight;
+		entry.ship = type.MoveType == EMovement::Naval;
+		entry.flyer = type.MoveType == EMovement::Fly;
+		entry.building = type.Building;
+		entry.fighter = type.CanAttack && !type.Building;
+		entry.hall = IsOneOf(type, {"unit-town-hall", "unit-keep", "unit-castle", "unit-great-hall",
+		                            "unit-stronghold", "unit-fortress"});
+		entry.platform = IsOneOf(type, {"unit-human-oil-platform", "unit-orc-oil-platform"});
+		entry.shipyard = IsOneOf(type, {"unit-human-shipyard", "unit-orc-shipyard"});
+		units.push_back(entry);
+	}
+	return units;
+}
+
+/// The kind of every cell of the map in use, once per map: land tiles against water tiles, a
+/// coast tile in neither number.
+static const std::vector<uint8_t> &CellKinds()
+{
+	const int cellsX = Map.Info.MapWidth / wc2ai::CellTiles;
+	const int cellsY = Map.Info.MapHeight / wc2ai::CellTiles;
+	if (cellsX <= 0 || cellsY <= 0 || Wc2AiCellKinds.size() == static_cast<size_t>(cellsX) * cellsY) {
+		return Wc2AiCellKinds;
+	}
+	Wc2AiCellKinds.assign(static_cast<size_t>(cellsX) * cellsY, 2);
+	for (int cellY = 0; cellY < cellsY; ++cellY) {
+		for (int cellX = 0; cellX < cellsX; ++cellX) {
+			int land = 0;
+			int water = 0;
+			for (int y = cellY * wc2ai::CellTiles; y < (cellY + 1) * wc2ai::CellTiles; ++y) {
+				for (int x = cellX * wc2ai::CellTiles; x < (cellX + 1) * wc2ai::CellTiles; ++x) {
+					const CMapField &field = *Map.Field(x, y);
+					if (field.CoastOnMap()) {
+						continue;
+					}
+					++(field.WaterOnMap() ? water : land);
+				}
+			}
+			Wc2AiCellKinds[static_cast<size_t>(cellY) * cellsX + cellX] = wc2ai::CellKind(land, water);
+		}
+	}
+	return Wc2AiCellKinds;
+}
+
+/// The strength map of the units as they stand now.
+static wc2ai::CellMap BuildCells()
+{
+	const CUnitType *peasant = UnitTypeByIdentOrNull("unit-peasant");
+	const CUnitType *peon = UnitTypeByIdentOrNull("unit-peon");
+	std::vector<wc2ai::CellUnit> units;
+	for (const CUnit *unit : UnitManager->GetUnits()) {
+		if (!unit || !unit->IsAliveOnMap() || !unit->Type || unit->Player->Index >= wc2ai::CellSlots) {
+			continue;
+		}
+		const CUnitType &type = *unit->Type;
+		wc2ai::CellUnit entry;
+		entry.slot = unit->Player->Index;
+		entry.mobile = !type.Building;
+		entry.worker = &type == peasant || &type == peon;
+		entry.tanker = type.MoveType == EMovement::Naval && type.BoolFlag[HARVESTER_INDEX].value;
+		entry.transport = type.MoveType == EMovement::Naval && type.CanTransport();
+		entry.hall = IsOneOf(type, {"unit-town-hall", "unit-keep", "unit-castle", "unit-great-hall",
+		                            "unit-stronghold", "unit-fortress"});
+		entry.hitsLand = type.CanAttack && (type.CanTarget & ECanTargetFlag::Land) != ECanTargetFlag::NulFlag;
+		entry.hitsSea = type.CanAttack && (type.CanTarget & ECanTargetFlag::Sea) != ECanTargetFlag::NulFlag;
+		entry.hitPoints = unit->Variable[HP_INDEX].Value;
+		entry.maxHitPoints = unit->Variable[HP_INDEX].Max;
+		entry.weight = entry.mobile ? WeightOf(type) : 0;
+		// A unit of several tiles is met on each of them.
+		for (int dy = 0; dy < type.TileHeight; ++dy) {
+			for (int dx = 0; dx < type.TileWidth; ++dx) {
+				entry.x = unit->tilePos.x + dx;
+				entry.y = unit->tilePos.y + dy;
+				units.push_back(entry);
+			}
+		}
+	}
+	return wc2ai::BuildCellMap(Map.Info.MapWidth, Map.Info.MapHeight, CellKinds(), units);
+}
+
+const wc2ai::CellMap &Wc2AiCells()
+{
+	const long tick = static_cast<long>(GameCycle / HomeLeashPassCycles);
+	if (tick != Wc2AiCellTick) {
+		Wc2AiCellTick = tick;
+		Wc2AiCellMap = BuildCells();
+	}
+	return Wc2AiCellMap;
+}
+
+/// The player a wave of `self` is sent at: the person-controlled enemy with the most units.
+static const CPlayer *WaveTarget(const CPlayer &self)
+{
+	const CPlayer *target = nullptr;
+	for (int i = 0; i < PlayerMax; ++i) {
+		const CPlayer &other = Players[i];
+		if (other.Type == PlayerTypes::PlayerPerson && self.IsEnemy(other) && other.GetUnitCount() > 0
+			&& (!target || other.GetUnitCount() > target->GetUnitCount())) {
+			target = &other;
+		}
+	}
+	return target;
+}
+
+/// Where a land wave against `target` goes (wc2ai::LandPlace over a strength map).
+static wc2ai::Place LandPlaceOf(const CPlayer &target, const wc2ai::CellMap &cells)
+{
+	return wc2ai::LandPlace(target.Index, TargetUnits(target), cells);
+}
+
+/// Tiles around the place of a sea wave in which a ship looks for water to stand on. The
+/// original's search takes 0x10; that it counts tiles is not established.
+constexpr int ShipPlaceSearch = 16;
+
+/// The tile a ship of a wave is sent to: the place itself where the ship can stand, else the
+/// nearest tile around it where it can, looking outwards. False when there is none.
+static bool ShipTileNear(const CUnit &ship, const Vec2i &place, Vec2i &tile)
+{
+	for (int ring = 0; ring <= ShipPlaceSearch; ++ring) {
+		for (int y = place.y - ring; y <= place.y + ring; ++y) {
+			for (int x = place.x - ring; x <= place.x + ring; ++x) {
+				if (HomeLeashDistance(x, y, place.x, place.y) != ring) {
+					continue;
+				}
+				const Vec2i pos(x, y);
+				if (Map.Info.IsPointOnMap(pos) && UnitCanBeAt(ship, pos)) {
+					tile = pos;
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+/// The tile a unit of a wave or of the last stand is ordered to, for the place of the wave. A
+/// flyer: the place. A ship: water it can stand on at the place, and only when a path leads there.
+/// A land unit: the place, and only when a path leads there (how the original brings a unit
+/// across water is not established: it waits). False = no order for this unit.
+static bool WaveGoal(const CUnit &unit, const wc2ai::Place &place, Vec2i &goal)
+{
+	goal = Vec2i(place.x, place.y);
+	if (unit.Type->MoveType == EMovement::Fly) {
+		return true;
+	}
+	if (unit.Type->MoveType == EMovement::Naval && !ShipTileNear(unit, Vec2i(place.x, place.y), goal)) {
+		return false;
+	}
+	const int path = PlaceReachable(unit, goal, 1, 1, 0, 1, false);
+	return path != PF_UNREACHABLE && path != PF_FAILED;
 }
 
 /// How many units of the named types a player has.
@@ -150,7 +410,7 @@ static int CountOf(const CPlayer &player, std::initializer_list<const char *> id
 }
 
 /// The conditions a script can wait for. 0..3 are answered from the player's own counts; 4..6
-/// (enough free fighters, ships, flyers for the next wave) and 7 are not answered yet: a script
+/// (enough fighters, ships, flyers for the next wave: wc2ai::Counted) and 7 are not answered yet: a script
 /// stops at them, which is where the original's wave launcher would take over.
 static bool ConditionHolds(int condition, void *context)
 {
@@ -163,15 +423,15 @@ static bool ConditionHolds(int condition, void *context)
 		case 3: return CountOf(player, {"unit-peasant", "unit-peon"}) >= Wc2AiStates[index].params[0x13];
 		case 4: {
 			const wc2ai::State &state = Wc2AiStates[index];
-			return static_cast<int>(FreeFighters(index, EMovement::Land).size()) >= state.params[0x0D] * state.params[0x0E];
+			return CountedFighters(index, EMovement::Land) >= state.params[0x0D] * state.params[0x0E];
 		}
 		case 5: {
 			const wc2ai::State &state = Wc2AiStates[index];
-			return static_cast<int>(FreeFighters(index, EMovement::Naval).size()) >= state.params[0x0F] * state.params[0x10];
+			return CountedFighters(index, EMovement::Naval) >= state.params[0x0F] * state.params[0x10];
 		}
 		case 6: {
 			const wc2ai::State &state = Wc2AiStates[index];
-			return static_cast<int>(FreeFighters(index, EMovement::Fly).size()) >= state.params[0x11] * state.params[0x12];
+			return CountedFighters(index, EMovement::Fly) >= state.params[0x11] * state.params[0x12];
 		}
 		default: return false;
 	}
@@ -192,39 +452,24 @@ void Wc2AiCycle(int player)
 			return; // the script stopped on a damaged state: stay stopped
 		}
 		if (!wc2ai::Start(program, Wc2AiIds[player], state)) {
+			// A map may carry an id the definition file has no script for: reported, and the
+			// player keeps the engine's own script.
+			LogPrint("wc2ai: ERROR: player %d: no script with id %d in the definition file\n", player,
+			         Wc2AiIds[player]);
 			Wc2AiIds[player] = -1;
 			return;
 		}
 	}
-	// The sent marks are unit numbers, and the number of a dead unit is given to a new unit later:
-	// keep only the marks of this player's living units, so that a new unit does not start as sent.
-	if (GameCycle % 50 == 0 && !Wc2AiCommitted[player].empty()) {
-		std::set<int> kept;
-		for (const CUnit *unit : Players[player].GetUnits()) {
-			if (unit && unit->IsAlive() && Wc2AiCommitted[player].count(UnitNumber(*unit))) {
-				kept.insert(UnitNumber(*unit));
-			}
-		}
-		Wc2AiCommitted[player].swap(kept);
-	}
-
 	int index = player;
 	wc2ai::Step(program, state, ConditionHolds, &index);
 
 	// The wave launcher, every 50 cycles: a set "attack by land / sea / air now" sends `count`
-	// groups of up to `size` free fighters of that kind at a player that is not a computer, then the
-	// trigger is cleared. Where the original aims a group and how it travels is not established:
-	// the group is ordered to attack towards the target's start position with the engine's own orders.
+	// groups of up to `size` fighters of that kind a wave may take at a player that is not a computer, then the
+	// trigger is cleared. A wave goes to the place the original picks for its kind
+	// (wc2ai::LandPlace, wc2ai::SeaPlace, wc2ai::AirPlace). Every unit sent is held to the place
+	// ordered (role 2 of the home leash). How a group travels is the engine's own.
 	if (GameCycle % 50 == 0 && (state.params[0x09] | state.params[0x0A] | state.params[0x0B]) != 0) {
-		const CPlayer &self = Players[player];
-		const CPlayer *target = nullptr;
-		for (int i = 0; i < PlayerMax; ++i) {
-			const CPlayer &other = Players[i];
-			if (other.Type == PlayerTypes::PlayerPerson && self.IsEnemy(other) && other.GetUnitCount() > 0
-				&& (!target || other.GetUnitCount() > target->GetUnitCount())) {
-				target = &other;
-			}
-		}
+		const CPlayer *target = WaveTarget(Players[player]);
 		static const struct { int trigger, size, count; EMovement kind; } waves[] = {
 			{0x09, 0x0D, 0x0E, EMovement::Land},
 			{0x0A, 0x0F, 0x10, EMovement::Naval},
@@ -234,18 +479,82 @@ void Wc2AiCycle(int player)
 			if (state.params[wave.trigger] == 0) {
 				continue;
 			}
+			wc2ai::Place place;
 			if (target) {
-				std::vector<CUnit *> free = FreeFighters(player, wave.kind);
+				if (wave.kind == EMovement::Naval) {
+					place = wc2ai::SeaPlace(TargetUnits(*target));
+				} else if (wave.kind == EMovement::Fly) {
+					place = wc2ai::AirPlace(TargetUnits(*target));
+				} else {
+					place = LandPlaceOf(*target, Wc2AiCells());
+				}
+			}
+			// Without a place nobody is sent and nobody is marked; the trigger is cleared all the same.
+			if (place.found) {
+				std::vector<CUnit *> free = PickableFighters(player, wave.kind);
 				size_t next = 0;
 				for (int group = 0; group < state.params[wave.count]; ++group) {
 					for (int n = 0; n < state.params[wave.size] && next < free.size(); ++n, ++next) {
 						CUnit &unit = *free[next];
-						Wc2AiCommitted[player].insert(UnitNumber(unit));
-						CommandAttack(unit, target->StartPos, nullptr, EFlushMode::On);
+						Vec2i goal;
+						// A ship or a land unit that no path leads there stays, and its place in the
+						// group is used up.
+						if (!WaveGoal(unit, place, goal)) {
+							continue;
+						}
+						unit.HomeRole = HomeRolePoint;
+						unit.HomePos = goal;
+						CommandAttack(unit, goal, nullptr, EFlushMode::On);
 					}
 				}
 			}
 			state.params[wave.trigger] = 0;
+		}
+	}
+}
+
+void Wc2AiBuildingLost(const CUnit &building)
+{
+	const int index = building.Player->Index;
+	if (Wc2AiIdOf(index) < 0) {
+		return;
+	}
+	const CPlayer &self = Players[index];
+	int buildings = 0;
+	int platforms = 0;
+	for (const CUnit *unit : self.GetUnits()) {
+		if (!unit || unit == &building || !unit->IsAlive() || !unit->Type || !unit->Type->Building
+			|| unit->Type->BoolFlag[WALL_INDEX].value) {
+			continue;
+		}
+		++buildings;
+		platforms += IsOneOf(*unit->Type, {"unit-human-oil-platform", "unit-orc-oil-platform"}) ? 1 : 0;
+	}
+	if (!wc2ai::AllOutNow(buildings, platforms)) {
+		return;
+	}
+	const CPlayer *target = WaveTarget(self);
+	if (!target) {
+		return;
+	}
+	const wc2ai::Place place = LandPlaceOf(*target, Wc2AiCells());
+	if (!place.found) {
+		return;
+	}
+	// Every unit that can move is held to the place (the 50-cycle pass leads it there); the
+	// workers and the tankers are sent there at once besides, by a plain move.
+	for (CUnit *unit : self.GetUnits()) {
+		if (!unit || !unit->IsAliveOnMap() || !unit->Type || unit->Type->Building || !unit->CanMove()) {
+			continue;
+		}
+		Vec2i goal;
+		if (!WaveGoal(*unit, place, goal)) {
+			continue;
+		}
+		unit->HomeRole = HomeRolePoint;
+		unit->HomePos = goal;
+		if (unit->Type->BoolFlag[HARVESTER_INDEX].value) {
+			CommandMove(*unit, goal, EFlushMode::On);
 		}
 	}
 }
@@ -299,8 +608,10 @@ static const char *const ResearchIdents[][2] = {
 	{"upgrade-blizzard", "upgrade-death-and-decay"},                     // 0x97
 };
 
-/// Queue a research once (the engine drops it from its checks when it is done).
-static void WantResearch(PlayerAi &ai, const char *ident)
+/// Queue a research, or take the request back while it may not start: the engine's research path
+/// of a computer asks neither the upgrade's dependency rules nor a person's button, so they are
+/// asked here (the engine drops a done research from its checks by itself).
+static void WantResearch(PlayerAi &ai, const CPlayer &player, const char *ident)
 {
 	CUpgrade *upgrade = nullptr;
 	for (const auto &known : AllUpgrades) {
@@ -309,8 +620,16 @@ static void WantResearch(PlayerAi &ai, const char *ident)
 			break;
 		}
 	}
-	if (upgrade && std::find(ai.ResearchRequests.begin(), ai.ResearchRequests.end(), upgrade) == ai.ResearchRequests.end()) {
-		ai.ResearchRequests.push_back(upgrade);
+	if (!upgrade) {
+		return;
+	}
+	const auto found = std::find(ai.ResearchRequests.begin(), ai.ResearchRequests.end(), upgrade);
+	if (CheckDependByIdent(player, upgrade->Ident)) {
+		if (found == ai.ResearchRequests.end()) {
+			ai.ResearchRequests.push_back(upgrade);
+		}
+	} else if (found != ai.ResearchRequests.end()) {
+		ai.ResearchRequests.erase(found);
 	}
 }
 
@@ -357,6 +676,171 @@ static void Want(PlayerAi &ai, const char *ident, unsigned count)
 	request.Type = type;
 	request.Count = count;
 	ai.UnitTypeRequests.push_back(request);
+}
+
+/// What the engine's request table already stands for of a type: the units the player has, with
+/// the equivalent types the engine counts in (rangers with archers, paladins with knights), and
+/// the ones in its production queue.
+static int Standing(const CPlayer &player, const std::array<int, UnitTypeMax> &queued, const char *ident)
+{
+	const CUnitType *type = UnitTypeByIdentOrNull(ident);
+	if (!type) {
+		return 0;
+	}
+	int count = player.UnitTypesAiActiveCount[type->Slot] + queued[type->Slot];
+	if (static_cast<size_t>(type->Slot) < AiHelpers.Equiv().size()) {
+		for (const CUnitType *equiv : AiHelpers.Equiv()[type->Slot]) {
+			count += player.UnitTypesAiActiveCount[equiv->Slot];
+		}
+	}
+	return count;
+}
+
+/// How many decisions the player's buildings of one kind take now: one per building that does
+/// nothing, less the units of `classes` that are queued and not handed to a building yet. The
+/// queued units of a class that cannot be trained any more (`can` false) are taken back first:
+/// they would hold every later decision.
+static int OpenDecisions(PlayerAi &ai, const CPlayer &player, const char *building,
+                         std::initializer_list<std::pair<const char *, bool>> classes)
+{
+	int open = 0;
+	if (const CUnitType *type = UnitTypeByIdentOrNull(building)) {
+		for (const CUnit *unit : FindPlayerUnitsByType(player, *type, true)) {
+			open += unit->IsIdle() ? 1 : 0;
+		}
+	}
+	for (const auto &[ident, can] : classes) {
+		const CUnitType *type = UnitTypeByIdentOrNull(ident);
+		for (size_t i = 0; type && i < ai.UnitTypeBuilt.size();) {
+			AiBuildQueue &queue = ai.UnitTypeBuilt[i];
+			if (queue.Type == type && queue.Want > queue.Made) {
+				if (can) {
+					open -= static_cast<int>(queue.Want - queue.Made);
+				} else if ((queue.Want = queue.Made) == 0) {
+					ai.UnitTypeBuilt.erase(ai.UnitTypeBuilt.begin() + i);
+					continue;
+				}
+			}
+			++i;
+		}
+	}
+	return open;
+}
+
+/// The dice of a decision: the game's own synchronised random numbers.
+static bool SyncDice(int sides, void *)
+{
+	return SyncRand(sides) == 0;
+}
+
+bool Wc2AiRuns(int player)
+{
+	if (player < 0 || player >= PlayerMax || Wc2AiIds[player] < 0 || !Players[player].Ai) {
+		return false;
+	}
+	const wc2ai::Program &program = wc2ai::GameProgram();
+	return program.Loaded() && program.Get(Wc2AiStates[player].id) != nullptr;
+}
+
+/// Town hall, keep, castle and their orc forms.
+static bool IsHallClass(const CUnitType &type)
+{
+	static const char *const idents[] = {"unit-town-hall", "unit-keep", "unit-castle",
+	                                     "unit-great-hall", "unit-stronghold", "unit-fortress"};
+	for (const char *ident : idents) {
+		if (type.Ident == ident) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int Wc2AiPlaceStepOf(const CUnitType &type)
+{
+	// the map converter's table holds every type the original numbers, the buildings from 0x3A on
+	constexpr int types = 0x69;
+	const int number = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, types, type.Ident);
+	return number < 0 ? 0 : wc2ai::PlaceStep(number);
+}
+
+void Wc2AiPlaceReference(const CUnit &worker, int &x, int &y)
+{
+	x = worker.tilePos.x;
+	y = worker.tilePos.y;
+	int best = -1;
+	for (const CUnit *unit : worker.Player->GetUnits()) {
+		if (!unit || !unit->IsAliveOnMap() || !unit->Type || !unit->Type->Building || !IsHallClass(*unit->Type)) {
+			continue;
+		}
+		const int distance = worker.MapDistanceTo(*unit);
+		if (best < 0 || distance < best) {
+			best = distance;
+			x = unit->tilePos.x;
+			y = unit->tilePos.y;
+		}
+	}
+}
+
+int Wc2AiWorkerCount(const CPlayer &player)
+{
+	int workers = 0;
+	for (const CUnit *unit : player.GetUnits()) {
+		if (unit && unit->IsAlive() && unit->Type && unit->Type->BoolFlag[HARVESTER_INDEX].value
+			&& unit->Type->ResInfo[GoldCost]) {
+			++workers;
+		}
+	}
+	return workers;
+}
+
+int Wc2AiLumberWanted(const CPlayer &player)
+{
+	// the stock at hand only: the original has one stock per resource
+	return wc2ai::LumberWorkers(player.Resources[GoldCost], player.Resources[WoodCost], Wc2AiWorkerCount(player));
+}
+
+CUnit *Wc2AiRepairTarget(const CPlayer &player, const std::vector<const CUnit *> &unreachable)
+{
+	std::vector<wc2ai::RepairView> views;
+	std::vector<CUnit *> buildings;
+	int workers = 0;
+	int repairers = 0;
+	for (CUnit *unit : player.GetUnits()) {
+		if (!unit || !unit->IsAlive() || !unit->Type) {
+			continue;
+		}
+		const CUnitType &type = *unit->Type;
+		if (type.BoolFlag[HARVESTER_INDEX].value && type.ResInfo[GoldCost]) {
+			++workers;
+			if (unit->CurrentAction() == UnitAction::Repair) {
+				++repairers;
+			}
+			continue;
+		}
+		const int hp = unit->Variable[HP_INDEX].Value;
+		const int maxHp = unit->Variable[HP_INDEX].Max;
+		if (!type.Building || !type.RepairHP || !unit->IsAliveOnMap() || unit->CurrentAction() == UnitAction::Built
+			|| hp >= (3 * maxHp) >> 2) {
+			continue; // whole enough or not a ready building: the rule passes it over, nothing more is asked
+		}
+		wc2ai::RepairView view;
+		view.finishedBuilding = true;
+		view.oilPlatform = type.Ident == "unit-human-oil-platform" || type.Ident == "unit-orc-oil-platform";
+		view.hallClass = IsHallClass(type);
+		view.sameGround = ranges::find(unreachable, unit) == unreachable.end();
+		view.hp = hp;
+		view.maxHp = maxHp;
+		const Vec2i corner(unit->tilePos.x - 3, unit->tilePos.y - 3);
+		const std::vector<CUnit *> near = Select(corner, Vec2i(corner.x + 8, corner.y + 8), [&](const CUnit *other) {
+			return other->IsAliveOnMap() && other->Type->CanAttack && player.IsEnemy(*other);
+		});
+		view.enemyFighterNear = !near.empty();
+		view.priority = type.DefaultStat.Variables[PRIORITY_INDEX].Value;
+		views.push_back(view);
+		buildings.push_back(unit);
+	}
+	const int pick = wc2ai::RepairPick(player.Resources[GoldCost], player.Resources[WoodCost], workers, repairers, views);
+	return pick < 0 ? nullptr : buildings[pick];
 }
 
 bool Wc2AiSecond(int player)
@@ -413,46 +897,127 @@ bool Wc2AiSecond(int player)
 				workersAsked = true;
 			}
 		} else if (entry >= 0x80 && entry < 0x80 + std::size(ResearchIdents)) {
-			WantResearch(ai, ResearchIdents[entry - 0x80][orc]);
+			WantResearch(ai, owner, ResearchIdents[entry - 0x80][orc]);
 		} else if (entry == 0x98) {
 			WantUpgradeTo(ai, owner, orc ? "unit-stronghold" : "unit-keep", workersThere);
 		} else if (entry == 0x99) {
 			WantUpgradeTo(ai, owner, orc ? "unit-fortress" : "unit-castle", workersThere);
 		}
 	}
-	// Workers and the first fighter class, by the script's wanted numbers. The other classes
-	// (archers 1 in 4, ballistas 1 in 8, knights, ships, casters, flyers) follow with their rules.
+	// Workers, by the script's wanted number (the hall trains without dice).
 	Want(ai, workers, state.params[0x13]);
-	Want(ai, orc ? "unit-grunt" : "unit-footman", state.params[0x14]);
-	// The other land classes, in the order the original's barracks considers them: knights, then
-	// archers, then ballistas. KNOWN DIFFERENCE: the original trains archers with a chance of 1 in
-	// 4 and ballistas 1 in 8 per decision; the engine's request table has no dice, so here they are
-	// simply trained towards the wanted number. A class counts its upgraded form too (rangers with
-	// archers, paladins with knights), as the original's class counters do.
-	const auto remaining = [&](unsigned wantedCount, const char *upgraded) {
-		const unsigned have = static_cast<unsigned>(CountOf(owner, {upgraded}));
-		return wantedCount > have ? wantedCount - have : 0u;
+	// The land classes, by the decisions of the barracks: a barracks that does nothing decides for
+	// one unit by the original's rules and dice (wc2ai::BarracksDecision), and the request table
+	// is raised by that unit only. A class counts its upgraded form too (rangers with archers,
+	// paladins with knights), as the original's class counters do. How often the original's
+	// building decides is not established (the script's cadence table is not applied here): ours
+	// decides once a second while it does nothing. A class the map forbids is not wanted.
+	const std::array<int, UnitTypeMax> queued = AiGetBuildRequestsCount(ai);
+	const auto there = [&](const char *human, const char *orcish) { return CountOf(owner, {orc ? orcish : human}) > 0; };
+	const auto may = [&](const char *ident) {
+		const CUnitType *type = UnitTypeByIdentOrNull(ident);
+		return type && CheckDependByType(owner, *type);
 	};
-	Want(ai, orc ? "unit-ogre" : "unit-knight", remaining(state.params[0x17], orc ? "unit-ogre-mage" : "unit-paladin"));
-	Want(ai, orc ? "unit-axethrower" : "unit-archer",
-	     remaining(state.params[0x15], orc ? "unit-berserker" : "unit-ranger"));
-	Want(ai, orc ? "unit-catapult" : "unit-ballista", state.params[0x16]);
-	// Sea, casters and air, by the same wanted numbers (the shipyard's and the other buildings'
-	// dice of the original are not reproduced either; see above).
-	Want(ai, orc ? "unit-orc-oil-tanker" : "unit-human-oil-tanker", state.params[0x18]);
+	const char *footman = orc ? "unit-grunt" : "unit-footman";
+	const char *archer = orc ? "unit-axethrower" : "unit-archer";
+	const char *ballista = orc ? "unit-catapult" : "unit-ballista";
+	const char *knight = orc ? "unit-ogre" : "unit-knight";
+	const bool mill = there("unit-elven-lumber-mill", "unit-troll-lumber-mill");
+	const bool smith = there("unit-human-blacksmith", "unit-orc-blacksmith");
+	const bool stables = there("unit-stables", "unit-ogre-mound");
+	wc2ai::BarracksView land;
+	land.haveFootmen = Standing(owner, queued, footman);
+	land.haveArchers = Standing(owner, queued, archer);
+	land.haveBallistas = Standing(owner, queued, ballista);
+	land.haveKnights = Standing(owner, queued, knight);
+	land.wantFootmen = may(footman) ? state.params[0x14] : 0;
+	land.wantArchers = state.params[0x15];
+	land.wantBallistas = state.params[0x16];
+	land.wantKnights = state.params[0x17];
+	land.archersCan = mill && (may(archer) || may(orc ? "unit-berserker" : "unit-ranger"));
+	land.ballistasCan = smith && mill && may(ballista);
+	land.knightsCan = smith && stables && (may(knight) || may(orc ? "unit-ogre-mage" : "unit-paladin"));
+	const int barracksFree = OpenDecisions(ai, owner, orc ? "unit-orc-barracks" : "unit-human-barracks",
+	                                       {{footman, true}, {archer, land.archersCan},
+	                                        {ballista, land.ballistasCan}, {knight, land.knightsCan}});
+	for (int n = 0; n < barracksFree; ++n) {
+		switch (wc2ai::BarracksDecision(land, SyncDice, nullptr)) {
+			case wc2ai::Train::Footman: ++land.haveFootmen; break;
+			case wc2ai::Train::Archer: ++land.haveArchers; break;
+			case wc2ai::Train::Ballista: ++land.haveBallistas; break;
+			case wc2ai::Train::Knight: ++land.haveKnights; break;
+			default: break;
+		}
+	}
+	Want(ai, footman, static_cast<unsigned>(land.haveFootmen));
+	Want(ai, knight, static_cast<unsigned>(land.haveKnights));
+	Want(ai, archer, static_cast<unsigned>(land.haveArchers));
+	Want(ai, ballista, static_cast<unsigned>(land.haveBallistas));
+
+	// The ships, by the decisions of the shipyard in the same way (wc2ai::ShipyardDecision).
+	const char *tanker = orc ? "unit-orc-oil-tanker" : "unit-human-oil-tanker";
+	const char *destroyer = orc ? "unit-orc-destroyer" : "unit-human-destroyer";
+	const char *transport = orc ? "unit-orc-transport" : "unit-human-transport";
+	const char *battleship = orc ? "unit-ogre-juggernaught" : "unit-battleship";
+	const char *submarine = orc ? "unit-orc-submarine" : "unit-human-submarine";
+	wc2ai::ShipyardView sea;
+	sea.haveTankers = Standing(owner, queued, tanker);
+	sea.haveDestroyers = Standing(owner, queued, destroyer);
+	sea.haveTransports = Standing(owner, queued, transport);
+	sea.haveBattleships = Standing(owner, queued, battleship);
+	sea.haveSubmarines = Standing(owner, queued, submarine);
+	sea.wantTankers = may(tanker) ? state.params[0x18] : 0;
+	sea.wantDestroyers = may(destroyer) ? state.params[0x19] : 0;
+	sea.wantTransports = may(transport) ? state.params[0x1A] : 0;
+	sea.wantBattleships = state.params[0x1B];
+	sea.wantSubmarines = state.params[0x1C];
+	sea.battleshipsCan = there("unit-human-foundry", "unit-orc-foundry") && may(battleship);
+	sea.submarinesCan = there("unit-inventor", "unit-alchemist") && may(submarine);
+	const int shipyardFree = OpenDecisions(ai, owner, orc ? "unit-orc-shipyard" : "unit-human-shipyard",
+	                                       {{tanker, true}, {destroyer, true}, {transport, true},
+	                                        {battleship, sea.battleshipsCan}, {submarine, sea.submarinesCan}});
+	for (int n = 0; n < shipyardFree; ++n) {
+		switch (wc2ai::ShipyardDecision(sea, SyncDice, nullptr)) {
+			case wc2ai::Train::Tanker: ++sea.haveTankers; break;
+			case wc2ai::Train::Destroyer: ++sea.haveDestroyers; break;
+			case wc2ai::Train::Transport: ++sea.haveTransports; break;
+			case wc2ai::Train::Battleship: ++sea.haveBattleships; break;
+			case wc2ai::Train::Submarine: ++sea.haveSubmarines; break;
+			default: break;
+		}
+	}
+	Want(ai, tanker, static_cast<unsigned>(sea.haveTankers));
 	// The oil platform is in no build list either: the original's tanker, when its player has no
 	// platform to use, builds one on the oil patch nearest to its depot (local evidence record
 	// AI-OIL-001). Here: one platform is wanted as soon as the player has a tanker.
-	Want(ai, orc ? "unit-orc-oil-platform" : "unit-human-oil-platform",
-	     CountOf(owner, {orc ? "unit-orc-oil-tanker" : "unit-human-oil-tanker"}) > 0 ? 1 : 0);
-	Want(ai, orc ? "unit-orc-destroyer" : "unit-human-destroyer", state.params[0x19]);
-	Want(ai, orc ? "unit-orc-transport" : "unit-human-transport", state.params[0x1A]);
-	Want(ai, orc ? "unit-ogre-juggernaught" : "unit-battleship", state.params[0x1B]);
-	Want(ai, orc ? "unit-orc-submarine" : "unit-human-submarine", state.params[0x1C]);
+	Want(ai, orc ? "unit-orc-oil-platform" : "unit-human-oil-platform", CountOf(owner, {tanker}) > 0 ? 1 : 0);
+	Want(ai, destroyer, static_cast<unsigned>(sea.haveDestroyers));
+	Want(ai, transport, static_cast<unsigned>(sea.haveTransports));
+	Want(ai, battleship, static_cast<unsigned>(sea.haveBattleships));
+	Want(ai, submarine, static_cast<unsigned>(sea.haveSubmarines));
+	// Casters and air, towards the script's wanted numbers (rules with dice are established for the
+	// barracks and the shipyard only).
 	Want(ai, orc ? "unit-death-knight" : "unit-mage", state.params[0x1D]);
 	Want(ai, orc ? "unit-zeppelin" : "unit-balloon", state.params[0x1E]);
 	Want(ai, orc ? "unit-goblin-sappers" : "unit-dwarves", state.params[0x1F]);
 	Want(ai, orc ? "unit-dragon" : "unit-gryphon-rider", state.params[0x20]);
+
+	// Towers: the original's scout / watch tower, when it decides, upgrades to the guard tower and
+	// to nothing else; a tower type the script's cadence table marks "never" stays as it is. One
+	// tower a second here, through the engine's upgrade path (it asks the price); the guard
+	// tower's own dependency rule is asked as for the hall.
+	if (AiPlayer == &ai && wc2ai::BuildingDecides(*script, 0x40 + orc)) {
+		const CUnitType *watch = UnitTypeByIdentOrNull(orc ? "unit-orc-watch-tower" : "unit-human-watch-tower");
+		CUnitType *guard = UnitTypeByIdentOrNull(orc ? "unit-orc-guard-tower" : "unit-human-guard-tower");
+		if (watch && guard && CheckDependByType(owner, *guard)) {
+			for (const CUnit *tower : FindPlayerUnitsByType(owner, *watch, true)) {
+				if (tower->IsIdle()) {
+					AiAddUpgradeToRequest(*guard);
+					break;
+				}
+			}
+		}
+	}
 	return true;
 }
 
@@ -471,14 +1036,6 @@ std::string Wc2AiSaveText()
 			text += std::to_string(state.params[p]) + (p < wc2ai::ParamLast ? ", " : "");
 		}
 		text += "}) end\n";
-		// The units already sent on an attack, so that a loaded game does not send them again.
-		if (!Wc2AiCommitted[i].empty()) {
-			text += "if SetWc2AiSent then SetWc2AiSent(" + std::to_string(i) + ", {";
-			for (const int number : Wc2AiCommitted[i]) {
-				text += std::to_string(number) + ", ";
-			}
-			text += "}) end\n";
-		}
 	}
 	return text;
 }
@@ -506,7 +1063,8 @@ static int CclSetWc2AiState(lua_State *l)
 	return 0;
 }
 
-/// Lua: SetWc2AiSent(player, {unit numbers}) -- from a saved game.
+/// Lua: SetWc2AiSent(player, {unit numbers}) -- called by a game saved while the sent units were
+/// kept as a list; the list is not used (the home role is saved with each unit).
 static int CclSetWc2AiSent(lua_State *l)
 {
 	LuaCheckArgs(l, 2);
@@ -514,24 +1072,21 @@ static int CclSetWc2AiSent(lua_State *l)
 	if (player < 0 || player >= PlayerMax || !lua_istable(l, 2)) {
 		return 0;
 	}
-	Wc2AiCommitted[player].clear();
-	const int count = static_cast<int>(lua_rawlen(l, 2));
-	for (int i = 1; i <= count; ++i) {
-		lua_rawgeti(l, 2, i);
-		if (lua_isnumber(l, -1)) {
-			Wc2AiCommitted[player].insert(static_cast<int>(lua_tonumber(l, -1)));
-		}
-		lua_pop(l, 1);
-	}
 	return 0;
 }
 
-/// Lua: GetWc2AiSentCount(player) -> how many units are marked as sent.
+/// Lua: GetWc2AiSentCount(player) -> how many living units are held to a wave place (role 2).
 static int CclGetWc2AiSentCount(lua_State *l)
 {
 	LuaCheckArgs(l, 1);
 	const int player = LuaToNumber(l, 1);
-	lua_pushnumber(l, (player >= 0 && player < PlayerMax) ? static_cast<int>(Wc2AiCommitted[player].size()) : 0);
+	int sent = 0;
+	if (player >= 0 && player < PlayerMax) {
+		for (const CUnit *unit : Players[player].GetUnits()) {
+			sent += (unit && unit->IsAlive() && unit->HomeRole == HomeRolePoint) ? 1 : 0;
+		}
+	}
+	lua_pushnumber(l, sent);
 	return 1;
 }
 
@@ -588,6 +1143,7 @@ static int CclGetWc2AiQueue(lua_State *l)
 ///   "gold-from <hall number>: mine <number> <x>,<y> stock <n>" or "gold-from <hall number>: none"
 ///       -- what the worker assignment finds when it looks for gold from that hall
 ///   "worker <number> <x>,<y> action <n> orders <k> res <id> held <n> state <-|new|started|waiting|returning> in <type|->"
+///   "split gold G wood W workers N lumber-wanted T"   -- the original's split rule, stock at hand
 ///   "workers N idle I gold A wood B other C carrying K"
 /// `action` is the engine's order number (1 still, 5 move, 10 train, 11 upgrade-to, 13 being built,
 /// 17 build, 19 repair, 20 gather).
@@ -675,11 +1231,75 @@ static int CclGetWc2AiWorkers(lua_State *l)
 		               + state + " in " + (unit->Container ? unit->Container->Type->Ident : std::string("-")) + "\n";
 	}
 	text += workerLines;
+	// what the split rule (wc2ai::LumberWorkers) asks for, from the stock at hand
+	text += "split gold " + std::to_string(player.Resources[GoldCost]) + " wood "
+	        + std::to_string(player.Resources[WoodCost]) + " workers " + std::to_string(Wc2AiWorkerCount(player))
+	        + " lumber-wanted " + std::to_string(Wc2AiLumberWanted(player)) + "\n";
 	text += "workers " + std::to_string(workers) + " idle " + std::to_string(idle) + " gold "
 	        + std::to_string(onGold) + " wood " + std::to_string(onWood) + " other " + std::to_string(other)
 	        + " carrying " + std::to_string(carrying) + "\n";
 	lua_pushstring(l, text.c_str());
 	return 1;
+}
+
+/// Lua: GetWc2AiPlace(player, kind) -> found, x, y: where a land (kind 0), a sea (kind 1) or an
+/// air (kind 2) wave against `player` would go now. For checks through the debug bridge.
+/// Read-only: the land place is taken from a strength map of its own, not the game's.
+static int CclGetWc2AiPlace(lua_State *l)
+{
+	LuaCheckArgs(l, 2);
+	const int player = LuaToNumber(l, 1);
+	const int kind = LuaToNumber(l, 2);
+	wc2ai::Place place;
+	if (player >= 0 && player < PlayerMax && (kind == 1 || kind == 2)) {
+		const std::vector<wc2ai::PlaceUnit> units = TargetUnits(Players[player]);
+		place = kind == 1 ? wc2ai::SeaPlace(units) : wc2ai::AirPlace(units);
+	} else if (player >= 0 && player < PlayerMax && kind == 0) {
+		place = LandPlaceOf(Players[player], BuildCells());
+	}
+	lua_pushboolean(l, place.found);
+	lua_pushnumber(l, place.x);
+	lua_pushnumber(l, place.y);
+	return 3;
+}
+
+/// Lua: GetWc2AiRate(type) -> the attack rate of an original unit type 0x00..0x39 (0 when the
+/// game folder has no Data/Rez/script.bin). For checks through the debug bridge. Read-only.
+static int CclGetWc2AiRate(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const int type = LuaToNumber(l, 1);
+	lua_pushnumber(l, (type >= 0 && type < wc2ai::RateTypes) ? wc2ai::GameAttackRates()[type] : 0);
+	return 1;
+}
+
+/// Lua: GetWc2AiWeight(ident) -> the strength weight of a unit type, the original's number of the
+/// type (-1: none). For checks through the debug bridge. Read-only.
+static int CclGetWc2AiWeight(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const CUnitType *type = UnitTypeByIdentOrNull(LuaToString(l, 1));
+	lua_pushnumber(l, type ? WeightOf(*type) : 0);
+	lua_pushnumber(l, type ? TypeNumberOf(*type) : -1);
+	return 2;
+}
+
+/// Lua: GetWc2AiCell(x, y, slot) -> holder, kind, land, sea: of the strength map's cell the tile
+/// is in, the slot that holds it (-1: none), its kind (0 land, 1 water, 2 neither) and what `slot`
+/// has standing there against land and against sea, as the units stand now. For checks through
+/// the debug bridge. Read-only.
+static int CclGetWc2AiCell(lua_State *l)
+{
+	LuaCheckArgs(l, 3);
+	const int slot = LuaToNumber(l, 3);
+	const wc2ai::CellMap cells = BuildCells();
+	const wc2ai::CellRecord *cell = wc2ai::CellAt(cells, LuaToNumber(l, 1), LuaToNumber(l, 2));
+	const bool counted = cell && slot >= 0 && slot < wc2ai::CellSlots;
+	lua_pushnumber(l, cell ? cell->owner : -1);
+	lua_pushnumber(l, cell ? cell->kind : 2);
+	lua_pushnumber(l, counted ? cell->land[slot] : 0);
+	lua_pushnumber(l, counted ? cell->sea[slot] : 0);
+	return 4;
 }
 
 /// Lua: SetWc2AiId(player, id) -- the map's AI byte of a player slot.
@@ -729,4 +1349,8 @@ void Wc2AiCclRegister()
 	lua_register(Lua, "GetWc2AiSentCount", CclGetWc2AiSentCount);
 	lua_register(Lua, "GetWc2AiQueue", CclGetWc2AiQueue);
 	lua_register(Lua, "GetWc2AiWorkers", CclGetWc2AiWorkers);
+	lua_register(Lua, "GetWc2AiPlace", CclGetWc2AiPlace);
+	lua_register(Lua, "GetWc2AiRate", CclGetWc2AiRate);
+	lua_register(Lua, "GetWc2AiWeight", CclGetWc2AiWeight);
+	lua_register(Lua, "GetWc2AiCell", CclGetWc2AiCell);
 }

@@ -40,8 +40,6 @@
 **
 **  Keys are the original's: "todOrc", "todHuman", "bdpOrc", "bdpHuman".
 */
-extern int GetGlobalCampaignProgress(const std::string &campaignKey);
-
 /// Monotonic: a lower value never overwrites a higher one, so a restarted or replayed
 /// mission cannot take progress away.
 extern void SetGlobalCampaignProgress(const std::string &campaignKey, int missionsCompleted);

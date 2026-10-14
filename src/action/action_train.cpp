@@ -189,10 +189,14 @@ void COrder_Train::Execute(CUnit &unit) /* override */
 	CPlayer &player = *unit.Player;
 	const CUnitType &nType = *this->Type;
 	const int cost = nType.Stats[player.Index].Costs[TimeCost];
+	const bool firstUnit = this->Ticks == 0;
 	this->Ticks += std::max(1, player.SpeedTrain / SPEEDUP_FACTOR);
 
 	if (this->Ticks < cost) {
 		unit.Wait = WC2_FRAMES_PER_TIME_UNIT - 1; // one tick per WC2_FRAMES_PER_TIME_UNIT cycles
+		if (firstUnit) {
+			unit.Wait += WC2_PRODUCTION_EXTRA_FRAMES;
+		}
 		return ;
 	}
 	this->Ticks = std::min(this->Ticks, cost);

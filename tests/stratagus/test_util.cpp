@@ -31,6 +31,7 @@
 
 #include "stratagus.h"
 #include "util.h"
+#include "debug_bridge.h"
 
 TEST_CASE("square")
 {
@@ -117,3 +118,12 @@ TEST_CASE("fletcher32")
 // TODO: std::optional<std::string> GetClipboard();
 // TODO: int UTF8GetNext(std::string_view text, int curpos);
 // TODO: int UTF8GetPrev(std::string_view text, int curpos);
+
+TEST_CASE("watchdog_writes_crash_file")
+{
+	CHECK_FALSE(WatchdogWritesCrashFile("loading"));
+	CHECK_FALSE(WatchdogWritesCrashFile("loading:graphics"));
+	CHECK_FALSE(WatchdogWritesCrashFile("movie:webm"));
+	CHECK(WatchdogWritesCrashFile("GameCycle"));
+	CHECK(WatchdogWritesCrashFile("UpdateDisplay:done"));
+}

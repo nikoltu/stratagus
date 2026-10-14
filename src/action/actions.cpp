@@ -56,6 +56,7 @@
 #include "animation/animation_die.h"
 #include "commands.h"
 #include "game.h"
+#include "home_leash.h"
 #include "interface.h"
 #include "luacallback.h"
 #include "map.h"
@@ -789,6 +790,10 @@ void UnitActions()
 	// Check for things that only happen every second
 	if (isASecondCycle) {
 		UnitActionsEachSecond(units);
+	}
+	// The original's pass over the computer players' units, once in 50 cycles
+	if (GameCycle % HomeLeashPassCycles == 0) {
+		UnitsHomeLeashPass(units);
 	}
 	// Do all actions
 	UnitActionsEachCycle(units);

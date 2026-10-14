@@ -25,6 +25,8 @@
 #include <doctest.h>
 
 #include "uianchor.h"
+#include "ui.h"
+#include "ui/popup.h"
 
 static bool rectEq(const SDL_Rect &a, const SDL_Rect &b)
 {
@@ -104,4 +106,20 @@ TEST_CASE("anchor scale rounds sizes and survives degenerate input")
 	// bad scale / zero reference must not divide by zero.
 	AnchorScaleRect(SDL_Rect{ 0, 0, 0, 0 }, 0, 0, SDL_Rect{ 0, 0, 0, 0 }, AnchorX::Center, AnchorY::Center, -5, 0);
 	AnchorScaleRect(SDL_Rect{ 0, 0, 0, 0 }, -3, -3, SDL_Rect{ 0, 0, 0, 0 }, AnchorX::Right, AnchorY::Bottom, 1, -2);
+}
+
+TEST_CASE("popup_unknown_ident_is_skipped")
+{
+	// "Show button popups" off: the scripts define no popups, the buttons keep their ident.
+	auto saved = std::move(UI.ButtonPopups);
+	UI.ButtonPopups.clear();
+	CHECK(FindPopupByIdent("popup-x") == nullptr);
+
+	auto popup = std::make_unique<CPopup>();
+	popup->Ident = "popup-a";
+	CPopup *expected = popup.get();
+	UI.ButtonPopups.push_back(std::move(popup));
+	CHECK(FindPopupByIdent("popup-a") == expected);
+
+	UI.ButtonPopups = std::move(saved);
 }

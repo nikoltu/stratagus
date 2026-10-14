@@ -37,7 +37,9 @@
 
 #include "missile.h"
 
+#include "actions.h"
 #include "map.h"
+#include "unit.h"
 
 /**
 **  Missile flies from x,y to x1,y1 than bounces NumBounces times
@@ -59,6 +61,14 @@ void MissilePointToPointBounce::Action() /* override */
 			// FIXME: reduce damage effects on later impacts
 		} else {
 			this->MissileHit();
+			// A flyer's missile ends with its number once more on the unit it was fired at
+			// (measured: a Gryphon Rider on a lone unit - 5, 2, 9 / 8, 8 a shot, the large one
+			// last). A Fireball does not: the unit it is cast at loses the zone hits only
+			// (measured, 5 casts: 31 .. 40, never 60 .. 80).
+			if (this->Type->ZoneEndHit && this->Damage > 0 && this->SourceUnit && this->TargetUnit
+				&& this->TargetUnit->IsAliveOnMap() && this->TargetUnit->CurrentAction() != UnitAction::Die) {
+				HitUnit(this->SourceUnit, *this->TargetUnit, this->Damage, this);
+			}
 			this->TTL = 0;
 		}
 	} else {

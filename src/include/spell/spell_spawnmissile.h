@@ -75,6 +75,7 @@ private:
 	int Damage = 0;                 /// Missile damage.
 	int TTL = -1;                   /// Missile TTL.
 	int Delay = 0;                  /// Missile original delay.
+	int State = 0;                  /// Missile state at the start.
 	bool UseUnitVar = false;        /// Use the caster's damage parameters
 	SpellActionMissileLocation StartPoint{ELocBaseType::Caster}; /// Start point description.
 	SpellActionMissileLocation EndPoint{ELocBaseType::Target}; /// Start point description.

@@ -893,6 +893,8 @@ extern void InitUnitTypes(int reset_player_stats);   /// Init unit-type table
 extern void LoadUnitTypeSprite(CUnitType &unittype); /// Load the sprite for a unittype
 extern void LoadUnitTypes();                     /// Load the unit-type data
 extern void PreloadHDArtForMap();                /// STUTTER-FIRST-DRAW-LOAD: the map's HD atlases, at load time
+extern void SetHDPreloadWorkers(int count);      /// Threads that decode the preload's pages; 0 = none (serial)
+extern void SetHDPreloadWindow(int count);       /// Decoded pages the preload may hold at one time (default 2)
 extern void CleanUnitTypes();                    /// Cleanup unit-type module
 
 // in script_unittype.c

@@ -96,6 +96,10 @@ inline void DebugBridge_Checkpoint(const char *label)
 /// Launch the watchdog thread (idempotent). Called from DebugBridge_Init.
 void DebugBridge_StartWatchdog();
 
+/// Whether a stall at checkpoint `label` rewrites crash.txt. A load ("loading...") or a movie
+/// ("movie:...") holds the main loop for a long time by design: those stalls are logged only.
+bool WatchdogWritesCrashFile(const char *label);
+
 //@}
 
 #endif // DEBUG_BRIDGE_H

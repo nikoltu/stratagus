@@ -175,6 +175,28 @@ extern int DistanceSilent;
 */
 unsigned char VolumeForDistance(unsigned short d, unsigned char range);
 
+/// Stereo position (-128 .. 127) of a sound at a map pixel column inside a viewport
+extern int StereoForMapPixel(int x, int viewX, int viewWidth);
+
+/// What the host platform lets the game play: all of it, quietly, or nothing
+enum class AudioFocus { Full = 0, Ducked = 1, Silent = 2 };
+
+/// Share of a volume that is left while ducked
+constexpr int AudioFocusDuckPercent = 30;
+
+/// A volume as it is played under an audio-focus state
+constexpr int FocusScaledVolume(int volume, AudioFocus f)
+{
+	return f == AudioFocus::Full ? volume
+		: f == AudioFocus::Ducked ? volume * AudioFocusDuckPercent / 100
+		: 0;
+}
+
+/// Ask for an audio-focus state (any thread)
+extern void SetAudioFocus(AudioFocus f);
+/// Bring the mixer to the asked audio-focus state (engine thread, once a frame)
+extern void ApplyAudioFocus();
+
 /// Play a unit sound
 extern void PlayUnitSound(const CUnit &, EUnitVoice, bool sampleUnique = false);
 /// Play a unit sound

@@ -22,6 +22,9 @@
 
 #include "wc2ai.h"
 
+#include "home_leash.h"
+
+#include <algorithm>
 #include <set>
 
 namespace wc2ai
@@ -187,6 +190,74 @@ bool Program::Parse(const uint8_t *data, size_t size, std::string *error)
 	return true;
 }
 
+bool BuildingDecides(const Script &script, unsigned buildingType)
+{
+	if (buildingType < 0x3A || buildingType - 0x3A >= script.cadence.size()) {
+		return true;
+	}
+	return script.cadence[buildingType - 0x3A] != 0xFFFF;
+}
+
+Train BarracksDecision(const BarracksView &view, Dice dice, void *context)
+{
+	// A class that is wanted and of which there is none comes first, in this order.
+	if (view.wantFootmen > 0 && view.haveFootmen == 0) {
+		return Train::Footman;
+	}
+	if (view.wantKnights > 0 && view.haveKnights == 0 && view.knightsCan) {
+		return Train::Knight;
+	}
+	if (view.wantArchers > 0 && view.haveArchers == 0 && view.archersCan) {
+		return Train::Archer;
+	}
+	// Then towards the wanted numbers: archers and ballistas by the dice, knights and footmen without.
+	if (view.haveArchers < view.wantArchers && view.archersCan && dice && dice(4, context)) {
+		return Train::Archer;
+	}
+	if (view.haveBallistas < view.wantBallistas && view.ballistasCan && dice && dice(8, context)) {
+		return Train::Ballista;
+	}
+	if (view.haveKnights < view.wantKnights && view.knightsCan) {
+		return Train::Knight;
+	}
+	if (view.haveFootmen < view.wantFootmen) {
+		return Train::Footman;
+	}
+	return Train::None;
+}
+
+Train ShipyardDecision(const ShipyardView &view, Dice dice, void *context)
+{
+	if (view.wantTankers > 0 && view.haveTankers == 0) {
+		return Train::Tanker;
+	}
+	if (view.wantDestroyers > 0 && view.haveDestroyers == 0) {
+		return Train::Destroyer;
+	}
+	if (view.wantTransports > 0 && view.haveTransports == 0) {
+		return Train::Transport;
+	}
+	if (view.haveDestroyers < view.wantDestroyers && dice && dice(4, context)) {
+		return Train::Destroyer;
+	}
+	if (view.haveBattleships < view.wantBattleships && view.battleshipsCan && dice && dice(8, context)) {
+		return Train::Battleship;
+	}
+	if (view.haveSubmarines < view.wantSubmarines && view.submarinesCan && dice && dice(8, context)) {
+		return Train::Submarine;
+	}
+	if (view.haveTransports < view.wantTransports && dice && dice(8, context)) {
+		return Train::Transport;
+	}
+	if (view.haveTankers < view.wantTankers) {
+		return Train::Tanker;
+	}
+	if (view.haveDestroyers < view.wantDestroyers) {
+		return Train::Destroyer;
+	}
+	return Train::None;
+}
+
 bool Start(const Program &program, int id, State &state)
 {
 	const Script *script = program.Get(id);
@@ -238,6 +309,381 @@ void Step(const Program &program, State &state, bool (*holds)(int condition, voi
 		}
 		state.ip = in.next;
 		++state.executed;
+	}
+}
+
+int AnimationLength(const uint8_t *data, size_t size, uint16_t offset)
+{
+	size_t at = offset;
+	int length = 0;
+	bool ended = false;
+	for (size_t steps = 0; steps < size; ++steps) {
+		if (at >= size) {
+			return -1;
+		}
+		const uint8_t op = data[at];
+		size_t operands = 0;
+		switch (op) {
+			case 0x01: case 0x04: case 0x05: case 0x07: case 0x08: case 0x09: case 0x0C: case 0x0D:
+				operands = 1;
+				break;
+			case 0x03: case 0x06: case 0x0E:
+				operands = 2;
+				break;
+			default:
+				break;
+		}
+		if (at + operands >= size) {
+			return -1;
+		}
+		switch (op) {
+			case 0x00:
+				length = (length + 1) & 0xFF;
+				if (ended) {
+					return length;
+				}
+				ended = true;
+				break;
+			case 0x01: case 0x07: case 0x08: case 0x09: case 0x0C:
+				length = (length + data[at + 1]) & 0xFF;
+				break;
+			case 0x03:
+				at = static_cast<size_t>(data[at + 1] | (data[at + 2] << 8));
+				continue;
+			default:
+				break;
+		}
+		at += 1 + operands;
+	}
+	return -1;
+}
+
+bool AttackRates(const uint8_t *data, size_t size, uint8_t rates[RateTypes])
+{
+	for (int type = 0; type < RateTypes; ++type) {
+		rates[type] = 0;
+	}
+	if (!data || size < static_cast<size_t>(RateTypes) * 2) {
+		return false;
+	}
+	int lengths[RateTypes] = {};
+	for (int type = 0; type < RateTypes; ++type) {
+		const size_t table = static_cast<size_t>(data[type * 2] | (data[type * 2 + 1] << 8)) / 2;
+		const size_t entry = (table + RateAttackEntry) * 2;
+		if (entry + 1 >= size) {
+			return false;
+		}
+		lengths[type] = AnimationLength(data, size, static_cast<uint16_t>(data[entry] | (data[entry + 1] << 8)));
+		if (lengths[type] < 0) {
+			return false;
+		}
+	}
+	for (int type = 0; type < RateTypes; ++type) {
+		rates[type] = lengths[type] == 0 ? 0 : static_cast<uint8_t>(10 * lengths[0] / lengths[type]);
+	}
+	return true;
+}
+
+namespace
+{
+
+int TileDistance(int x, int y, int toX, int toY)
+{
+	const int dx = x > toX ? x - toX : toX - x;
+	const int dy = y > toY ? y - toY : toY - y;
+	return dx > dy ? dx : dy;
+}
+
+/// Tile distance of a point to the nearest edge of a unit.
+int EdgeDistance(int x, int y, const PlaceUnit &unit)
+{
+	const int dx = x < unit.x ? unit.x - x : (x > unit.x + unit.w - 1 ? x - (unit.x + unit.w - 1) : 0);
+	const int dy = y < unit.y ? unit.y - y : (y > unit.y + unit.h - 1 ? y - (unit.y + unit.h - 1) : 0);
+	return dx > dy ? dx : dy;
+}
+
+/// The target's hall nearest to its first unit (the first one of equals); null without a hall.
+const PlaceUnit *NearestHall(const std::vector<PlaceUnit> &target)
+{
+	const PlaceUnit *hall = nullptr;
+	int best = 0;
+	for (const PlaceUnit &unit : target) {
+		if (!unit.hall) {
+			continue;
+		}
+		const int distance = TileDistance(unit.x, unit.y, target.front().x, target.front().y);
+		if (!hall || distance < best) {
+			hall = &unit;
+			best = distance;
+		}
+	}
+	return hall;
+}
+
+} // namespace
+
+Place SeaPlace(const std::vector<PlaceUnit> &target)
+{
+	if (target.empty()) {
+		return {};
+	}
+	const PlaceUnit *shipyard = nullptr;
+	for (const PlaceUnit &unit : target) {
+		if (unit.platform) {
+			return {true, unit.x, unit.y};
+		}
+		if (unit.shipyard) {
+			shipyard = &unit;
+		}
+	}
+	if (shipyard) {
+		return {true, shipyard->x, shipyard->y};
+	}
+	const PlaceUnit *hall = NearestHall(target);
+	const PlaceUnit &reference = hall ? *hall : target.front();
+	const PlaceUnit *ship = nullptr;
+	int best = -1;
+	for (const PlaceUnit &unit : target) {
+		const int distance = TileDistance(unit.x, unit.y, reference.x, reference.y);
+		if (unit.ship && distance > best) {
+			ship = &unit;
+			best = distance;
+		}
+	}
+	return ship ? Place{true, ship->x, ship->y} : Place{};
+}
+
+Place AirPlace(const std::vector<PlaceUnit> &target)
+{
+	if (target.empty()) {
+		return {};
+	}
+	const PlaceUnit *hall = nullptr;
+	for (const PlaceUnit &unit : target) {
+		if (unit.hall) {
+			hall = &unit;
+		}
+	}
+	if (hall) {
+		return {true, hall->x, hall->y};
+	}
+	const PlaceUnit &reference = target.front();
+	const PlaceUnit *farthest = &reference;
+	int best = 0;
+	for (const PlaceUnit &unit : target) {
+		const int distance = TileDistance(unit.x, unit.y, reference.x, reference.y);
+		if (distance > best) {
+			farthest = &unit;
+			best = distance;
+		}
+	}
+	return {true, farthest->x, farthest->y};
+}
+
+int CellValue(const CellUnit &unit, bool canHit)
+{
+	if (unit.slot < 0 || unit.slot >= CellSlots || !unit.alive) {
+		return 0;
+	}
+	if (unit.worker) {
+		return -2;
+	}
+	if (unit.hall) {
+		return -1;
+	}
+	if (unit.transport) {
+		return -5;
+	}
+	if (unit.tanker) {
+		return -2;
+	}
+	if (!unit.mobile) {
+		return -1;
+	}
+	if (!canHit || unit.weight == 0 || unit.maxHitPoints <= 0) {
+		return 0;
+	}
+	return unit.hitPoints * unit.weight / unit.maxHitPoints;
+}
+
+CellMap BuildCellMap(int mapWidth, int mapHeight, const std::vector<uint8_t> &kinds,
+                     const std::vector<CellUnit> &units)
+{
+	CellMap map;
+	map.cellsX = mapWidth / CellTiles;
+	map.cellsY = mapHeight / CellTiles;
+	if (map.cellsX <= 0 || map.cellsY <= 0) {
+		map.cellsX = map.cellsY = 0;
+		return map;
+	}
+	map.cells.resize(static_cast<size_t>(map.cellsX) * map.cellsY);
+	for (size_t i = 0; i < map.cells.size(); ++i) {
+		map.cells[i].kind = i < kinds.size() ? kinds[i] : 2;
+	}
+	for (const CellUnit &unit : units) {
+		const int cellX = unit.x / CellTiles;
+		const int cellY = unit.y / CellTiles;
+		if (unit.x < 0 || unit.y < 0 || cellX >= map.cellsX || cellY >= map.cellsY || unit.slot < 0
+			|| unit.slot >= CellSlots) {
+			continue;
+		}
+		CellRecord &cell = map.cells[static_cast<size_t>(cellY) * map.cellsX + cellX];
+		cell.land[unit.slot] = static_cast<int16_t>(cell.land[unit.slot] + CellValue(unit, unit.hitsLand));
+		cell.sea[unit.slot] = static_cast<int16_t>(cell.sea[unit.slot] + CellValue(unit, unit.hitsSea));
+	}
+	for (CellRecord &cell : map.cells) {
+		if (cell.kind > 1) {
+			continue;
+		}
+		const int16_t *column = cell.kind == 0 ? cell.land : cell.sea;
+		int best = -100;
+		for (int slot = 0; slot < CellSlots; ++slot) {
+			if (column[slot] != 0 && column[slot] > best) {
+				best = column[slot];
+				cell.owner = static_cast<int8_t>(slot);
+			}
+		}
+	}
+	return map;
+}
+
+const CellRecord *CellAt(const CellMap &cells, int x, int y)
+{
+	const int cellX = x / CellTiles;
+	const int cellY = y / CellTiles;
+	if (x < 0 || y < 0 || cellX >= cells.cellsX || cellY >= cells.cellsY) {
+		return nullptr;
+	}
+	return &cells.cells[static_cast<size_t>(cellY) * cells.cellsX + cellX];
+}
+
+bool GuardRetreats(const CellMap &cells, int x, int y, int slot, bool ship)
+{
+	const CellRecord *cell = CellAt(cells, x, y);
+	if (!cell || slot < 0 || slot >= CellSlots || cell->owner < 0 || cell->owner >= CellSlots) {
+		return false;
+	}
+	const int16_t *column = ship ? cell->sea : cell->land;
+	return StrengthRetreats(cell->owner, slot, column[slot], column[cell->owner]);
+}
+
+int TypeNumberOfIdent(const char *const *names, int count, const std::string &ident)
+{
+	for (int i = 0; names && i < count; ++i) {
+		if (names[i] && ident == names[i]) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+Place LandPlace(int targetSlot, const std::vector<PlaceUnit> &target, const CellMap &cells)
+{
+	if (target.empty()) {
+		return {};
+	}
+	const PlaceUnit *reference = NearestHall(target);
+	for (size_t i = 0; !reference && i < target.size(); ++i) {
+		if (target[i].building) {
+			reference = &target[i];
+		}
+	}
+	if (!reference) {
+		reference = &target.front();
+	}
+	int cellX = reference->x / CellTiles;
+	int cellY = reference->y / CellTiles;
+	int best = 0;
+	for (int y = 0; y < cells.cellsY; ++y) {
+		for (int x = 0; x < cells.cellsX; ++x) {
+			const CellRecord &cell = cells.cells[static_cast<size_t>(y) * cells.cellsX + x];
+			if (cell.kind != 0 || cell.owner != targetSlot) {
+				continue;
+			}
+			const int pointX = (LandPlaceSwapsAxes ? y : x) * CellTiles + CellTiles / 2;
+			const int pointY = (LandPlaceSwapsAxes ? x : y) * CellTiles + CellTiles / 2;
+			const int distance = EdgeDistance(pointX, pointY, *reference);
+			if (distance > best) {
+				best = distance;
+				cellX = x;
+				cellY = y;
+			}
+		}
+	}
+	const int centreX = cellX * CellTiles + CellTiles / 2;
+	const int centreY = cellY * CellTiles + CellTiles / 2;
+	const PlaceUnit *nearest = nullptr;
+	int nearestDistance = 0;
+	for (const PlaceUnit &unit : target) {
+		if (unit.ship || (unit.flyer && unit.fighter) || unit.platform) {
+			continue;
+		}
+		const int distance = TileDistance(unit.x, unit.y, centreX, centreY);
+		if (!nearest || distance < nearestDistance) {
+			nearest = &unit;
+			nearestDistance = distance;
+		}
+	}
+	return nearest ? Place{true, nearest->x, nearest->y} : Place{true, centreX, centreY};
+}
+
+int RepairPick(int gold, int lumber, int workers, int repairers, const std::vector<RepairView> &units)
+{
+	if (repairers >= RepairersAllowed(workers)) {
+		return -1;
+	}
+	const bool poor = gold < 200 && lumber < 100;
+	int best = -1;
+	int bestPriority = 0;
+	for (size_t i = 0; i < units.size(); ++i) {
+		const RepairView &unit = units[i];
+		if (!unit.finishedBuilding || unit.oilPlatform || (poor && !unit.hallClass) || !unit.sameGround
+			|| unit.hp >= (3 * unit.maxHp) >> 2 || unit.enemyFighterNear) {
+			continue;
+		}
+		if (unit.priority > bestPriority) {
+			bestPriority = unit.priority;
+			best = static_cast<int>(i);
+		}
+	}
+	return best;
+}
+
+Place PlaceWalk(int refX, int refY, int step, int mapSide, bool (*sameGround)(int x, int y, void *context),
+                bool (*fits)(int x, int y, void *context), void *context)
+{
+	if (step <= 0 || mapSide <= 0 || !sameGround || !fits) {
+		return Place();
+	}
+	static const int stepX[4] = {1, 0, -1, 0};
+	static const int stepY[4] = {0, 1, 0, -1};
+	const int limit = static_cast<uint8_t>(std::max(std::max(refX, mapSide - refX), std::max(refY, mapSide - refY)) - 1);
+	for (int k = 1;; ++k) {
+		const int side = static_cast<uint8_t>((2 * k + 1) * step);
+		if (side >= limit) {
+			return Place();
+		}
+		int x = refX - k * step;
+		int y = refY - k * step;
+		bool onGround = false;
+		for (int direction = 0; direction < 4; ++direction) {
+			for (int i = 0; i < 2 * k + 1; ++i) {
+				if (x >= 0 && y >= 0 && x < mapSide && y < mapSide && sameGround(x, y, context)) {
+					onGround = true;
+					if (fits(x, y, context)) {
+						return Place{true, x, y};
+					}
+				}
+				x += stepX[direction] * step;
+				y += stepY[direction] * step;
+			}
+			// one step back: the next side starts on this side's last candidate
+			x -= stepX[direction] * step;
+			y -= stepY[direction] * step;
+		}
+		if (!onGround) {
+			return Place();
+		}
 	}
 }
 

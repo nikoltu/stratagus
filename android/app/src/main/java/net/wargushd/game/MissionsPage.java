@@ -5,7 +5,7 @@ import android.graphics.Canvas;
 
 /**
  * The Missions page of one campaign: the mission list at the left, the act's map and the
- * selected mission's objectives at the right, the difficulty, and the two actions.
+ * selected mission's objectives at the right, and the two actions.
  *
  * Missions 1 … completed + 1 can be played; the others carry the game's lock and can be
  * selected to read them, but not started.
@@ -22,7 +22,6 @@ final class MissionsPage {
     private static final float ROW_X = 840f, ROW_W = 1392f, ROW_H = 132f, ROW_PITCH = 138f;
     private static final float MAP_H = 880f, MAP_W = MAP_H * 1500f / 1100f;
     private static final float LINE_PITCH = 82.5f;
-    private static final float SEG_W = 900f, SEG_H = 108f;
     private static final float ACTION_W = 720f, ACTION_H = 120f, ACTION_UP = 204f;
     private static final float CAP_TITLE = 60f, CAP_BODY = 44f, CAP_MID = 36f, CAP_SMALL = 30f;
 
@@ -35,8 +34,6 @@ final class MissionsPage {
     private CampaignPage.Campaign campaign;
     /** 0-based index of the selected mission. */
     private int selected;
-    /** 0 easy, 1 normal, 2 hard. */
-    int difficulty = 1;
     private float scroll;
 
     private volatile Bitmap lock, map, buttonPlain, buttonPrimary;
@@ -99,8 +96,6 @@ final class MissionsPage {
     private float listBottom(SkinKit kit) { return bottom(kit) - 24f; }
     private float actionY(SkinKit kit) { return kit.height - ACTION_UP; }
     private float startX() { return Screen.CANVAS_W - 96f - ACTION_W; }
-    private float segX() { return RIGHT_X + PANEL_W - 60f - SEG_W; }
-    private float segY(SkinKit kit) { return bottom(kit) - 156f; }
 
     private float maxScroll(SkinKit kit) {
         return Math.max(0f, campaign.missions * ROW_PITCH - 6f - (listBottom(kit) - listTop()));
@@ -200,7 +195,7 @@ final class MissionsPage {
                     GOLD, true);
         final String[] lines =
             kit.string(campaign.code + "_" + mission() + "_objectives", "").trim().split("\n");
-        final float lastLineY = segY(kit) - 24f - CAP_MID;
+        final float lastLineY = bottom(kit) - 60f - CAP_MID;
         for (int j = 0; j < lines.length; ++j) {
             final float y = oy + 54f + LINE_PITCH * (j + 1.2f);
             if (y > lastLineY) {
@@ -208,19 +203,6 @@ final class MissionsPage {
             }
             kit.textTop(c, kit.fit(lines[j].trim(), CAP_MID, PANEL_W - 120f), RIGHT_X + 60f, y,
                         CAP_MID, INK, true);
-        }
-
-        kit.textMiddle(c, kit.own("Difficulty"), RIGHT_X + 60f, segY(kit), SEG_H, CAP_BODY, INK_MUTED, true);
-        kit.fill(c, segX(), segY(kit), SEG_W, SEG_H, WELL, 14f);
-        kit.outline(c, segX(), segY(kit), SEG_W, SEG_H, LINE, 14f);
-        final String[] levels = { kit.own("Easy"), kit.own("Normal"), kit.own("Hard") };
-        final float sw = SEG_W / levels.length;
-        for (int i = 0; i < levels.length; ++i) {
-            final float x = segX() + sw * i + 6f;
-            final boolean on = (i == difficulty);
-            kit.fill(c, x, segY(kit) + 6f, sw - 12f, SEG_H - 12f, on ? GOLD : SEG_FAINT, 10f);
-            kit.textCentre(c, levels[i], x, segY(kit) + 6f, sw - 12f, SEG_H - 12f, CAP_MID,
-                           on ? INK_ON_GOLD : INK, !on);
         }
 
         // Actions: back at the left, start at the right.
@@ -278,8 +260,6 @@ final class MissionsPage {
             if (row >= 0 && row < campaign.missions) {
                 selected = row;
             }
-        } else if (in(x, y, segX(), segY(kit), SEG_W, SEG_H)) {
-            difficulty = Math.min(2, (int) ((x - segX()) / (SEG_W / 3f)));
         } else if (in(x, y, X0, actionY(kit), ACTION_W, ACTION_H)) {
             return ACTION_PREVIOUS;
         } else if (in(x, y, startX(), actionY(kit), ACTION_W, ACTION_H) && playable(selected)) {

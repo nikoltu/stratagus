@@ -153,6 +153,27 @@
 **
 **    Determines The Splash damage divisor, see Range
 **
+**  MissileType::ZoneSplash
+**
+**    The missile settles its damage at the impact for every unit by the
+**    distance of the unit's centre from the impact point (the larger axis
+**    offset): whole up to 22/32 of a tile, a quarter up to 42/32 of a tile,
+**    none farther. Range and SplashFactor are not used for its damage.
+**
+**  MissileType::AimedHit
+**
+**    The missile hits the unit it was fired at, wherever that unit stands when
+**    the missile ends, and nothing else. Without such a unit (or when it is
+**    no longer alive on the map) the missile hits by its Range as usual.
+**
+**  MissileType::ZoneNoArmor
+**
+**    A zone-splash missile that carries a finished number (the hit of the
+**    unit that fired it, drawn at the shot, or the damage of the spell): the
+**    armor of the units in the zones is not taken, flying units are hit like
+**    the others. A bouncing missile of this kind gives the unit it was fired
+**    at the number itself once more when it ends.
+**
 **  MissileType::Impact
 **
 **    The config of the next (other) missile to generate, when this
@@ -340,7 +361,8 @@ enum class MissileClass
 	Tracer,                   /// Missile seeks towards to target unit
 	ClipToTarget,             /// Missile remains clipped to target's current goal and plays its animation once
 	Continuous,               /// Missile stays and plays its animation several times
-	StraightFly               /// Missile flies from x,y to x1,y1 then continues to fly, until incompatible terrain is detected
+	StraightFly,              /// Missile flies from x,y to x1,y1 then continues to fly, until incompatible terrain is detected
+	DeathAndDecay             /// Missile stays, plays the Death and Decay picture script and hits once
 };
 
 /// Base structure of missile-types
@@ -399,6 +421,10 @@ public:
 
 	int Range = 0;                         /// missile damage range
 	int SplashFactor = 0;                  /// missile splash divisor
+	bool ZoneSplash = false;               /// damage by the distance zones around the impact point
+	bool ZoneNoArmor = false;              /// zone splash of a finished number: no armor, flying units too
+	bool ZoneEndHit = false;               /// the finished number once more on the unit fired at (flyers' attack)
+	bool AimedHit = false;                 /// hits the unit fired at while it is alive on the map, not the impact tile
 	std::vector<MissileConfig> Impact; /// missile produces an impact
 	MissileConfig Smoke;                   /// trailing missile
 	mutable LuaCallback<void(int pixelPosx, int pixelPosy)> ImpactParticle; /// impact particle
@@ -532,6 +558,11 @@ class MissileLandMine : public Missile
 public:
 	void Action() override;
 };
+class MissileDeathAndDecay : public Missile
+{
+public:
+	void Action() override;
+};
 class MissileWhirlwind : public Missile
 {
 public:
@@ -610,6 +641,33 @@ extern Missile *MakeMissile(const MissileType &mtype, const PixelPos &startPos, 
 /// create a local missile
 extern Missile *MakeLocalMissile(const MissileType &mtype, const PixelPos &startPos, const PixelPos &destPos);
 
+/// Damage of one hit from the attacker's and the goal's numbers and one random draw
+extern int HitDamage(int basic_damage, int piercing_damage, int armor, bool bloodlust, unsigned int draw);
+/// Zone of a zone-splash missile the centre of a unit lies in
+/**
+**  Does a missile settle its hit on the unit it was fired at alone?
+**
+**  @param aimedHit     MissileType::AimedHit
+**  @param aliveOnMap   the unit fired at is alive and on the map now
+**  @param spared       the missile type spares the units of its owner and the unit is one
+*/
+inline bool AimedHitTakes(bool aimedHit, bool aliveOnMap, bool spared)
+{
+	return aimedHit && aliveOnMap && !spared;
+}
+extern int SplashZone(const PixelPos &impact, const PixelPos &centre, const PixelSize &tileSize);
+/// Damage a zone-splash missile carries
+extern int SplashRawDamage(int basic_damage, int piercing_damage, bool bloodlust);
+/// What is left of that damage for one unit of a zone
+extern int SplashLeft(int raw, int zone, int armor);
+/// Damage of a zone-splash missile on one unit from one random draw
+extern int SplashDamage(int raw, int zone, int armor, unsigned int draw);
+/// If a zone-splash missile takes the unit at all
+extern bool SplashTakesUnit(bool shooter, bool flying, bool aimedAtFlying);
+/// Steps (of 20) a wall loses by a hit
+extern int WallSteps(int damage);
+/// What a death coil takes from each unit in its area
+extern std::vector<int> DeathCoilShares(const std::vector<int> &hitPoints, int budget);
 /// Calculates damage done to goal by attacker using formula
 extern int CalculateDamage(const CUnit &attacker, const CUnit &goal, const INumberDesc *formula);
 /// the map pixel a missile fired by the unit at the goal (or at the tile, without one) flies to
@@ -651,6 +709,8 @@ extern void FreeBurningBuildingFrames();
 extern std::string CurrentEffectTileset();
 /// EFFECT-ATLAS-LOADED-TWICE: the one cache of native HD atlases (unittype.cpp), also for effects.
 extern std::shared_ptr<CAtlasGraphic> GetSharedHDAtlas(const std::string &stem);
+/// HD-ATLAS-CACHE-GROWS: the effects resolved for another biome let their atlas go.
+extern void ReleaseHDMissileArtOfOtherBiomes();
 
 //@}
 

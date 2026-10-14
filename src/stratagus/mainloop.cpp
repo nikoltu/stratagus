@@ -311,12 +311,12 @@ void UpdateDisplay()
 		// NG14/NG36: objectives are persistent and messages are transient, so the persistent block
 		// goes down first and the message list wins any overlap.
 		// Classic view: the box holds the classic frame, the map view and the minimap. The
-		// Remastered widgets have no place in it and are not drawn there.
+		// Remastered widgets have no place in it and are not drawn there. The objectives and the
+		// message line have their classic places (DrawObjectives, DrawMessages), under the frame
+		// and the tooltip.
 		const bool classicHud = ClassicHudActive();
-		if (!classicHud) {
-			DrawObjectives();
-			DrawMessages();
-		}
+		DrawObjectives();
+		DrawMessages();
 
 		if (CursorState == CursorStates::Rectangle) {
 			FrameProfBegin(FP_HUD_CURSOR);
@@ -445,6 +445,43 @@ double GetGameCycleFraction()
 // Advance the simulation by exactly one cycle. The caller (SingleGameLoop) decides WHEN and
 // HOW MANY TIMES to run it via the fixed-timestep accumulator, so this no longer gates on
 // GamePaused / NetworkInSync / SkipGameCycle itself.
+/// Wall time of the next timed automatic save (SDL ticks); set at every game start.
+static unsigned long AutosaveNextMs;
+
+/**
+**  Is an automatic save written now? The rule measured on the original: one at every game
+**  start (a new game, a restarted one, a loaded one) and then one every 60 s of wall time
+**  counted from that start, whatever the game does in that time (a menu may be open).
+**
+**  @param nowMs      wall time, in ms
+**  @param nextMs     wall time of the next timed save; moved on when this one is due
+**  @param minutes    the preference: 0 = no automatic save at all
+**  @param network    a network game: never
+**  @param replay     a replay: never
+**  @param gameStart  a game is starting (new or loaded): write, and the 60 s start here
+*/
+bool AutosaveDue(unsigned long nowMs, unsigned long &nextMs, int minutes, bool network, bool replay,
+                 bool gameStart)
+{
+	if (minutes == 0 || network || replay) {
+		return false;
+	}
+	if (gameStart) {
+		nextMs = nowMs + AutosavePeriodMs;
+		return true;
+	}
+	if (nowMs < nextMs) {
+		return false;
+	}
+	// The next one stays on the grid of the start; after a stall longer than a period it is
+	// one period from now (one save, not one for each period missed).
+	nextMs += AutosavePeriodMs;
+	if (nextMs <= nowMs) {
+		nextMs = nowMs + AutosavePeriodMs;
+	}
+	return true;
+}
+
 static void RunOneGameCycle()
 {
 	FrameProfScope _prof(FP_LOGIC);
@@ -504,12 +541,6 @@ static void RunOneGameCycle()
 				PlayersEachSecond(player);
 			}
 		}
-	}
-
-	if (Preference.AutosaveMinutes != 0 && !IsNetworkGame() && !IsReplayGame() && GameCycle > 0 && (GameCycle % (CYCLES_PER_SECOND * 60 * Preference.AutosaveMinutes)) == 0) { // autosave every X minutes (default is 5), if the option is enabled
-	//Wyrmgus end
-		// No text for an automatic save: the original has no status strip.
-		SaveGame("autosave.sav");
 	}
 }
 
@@ -631,6 +662,8 @@ static void SingleGameLoop()
 		if (delta > 250.0) delta = 250.0;   // clamp after a stall to avoid a spiral of death
 
 		if (!GamePaused && NetworkInSync) {
+			// A stall inside the simulation reports this label, not the last display step.
+			DBG_CHECKPOINT("GameCycle");
 			LogicAccumulatorMs += delta;
 			int guard = 0;
 			// Run as many fixed-size logic cycles as real time has accrued (catch-up),
@@ -651,6 +684,13 @@ static void SingleGameLoop()
 			}
 		} else {
 			LogicAccumulatorMs = 0.0;   // paused / out of sync: no interpolation drift
+		}
+
+		// The timed automatic save goes by wall time, between two cycles; a paused game and one
+		// with a menu up write it as well. No text: the original has no status strip.
+		if (AutosaveDue(SDL_GetTicks(), AutosaveNextMs, Preference.AutosaveMinutes, IsNetworkGame(),
+		                IsReplayGame(), false)) {
+			SaveGame("autosave.sav");
 		}
 
 		DisplayLoop();            // renders with GetGameCycleFraction() = accumulator/period
@@ -688,6 +728,12 @@ void GameMainLoop(bool clean)
 	CParticleManager::init();
 
 	CclCommand("if (GameStarting ~= nil) then GameStarting() end");
+
+	// Every game writes its automatic save when it comes up, a loaded one too.
+	if (AutosaveDue(SDL_GetTicks(), AutosaveNextMs, Preference.AutosaveMinutes, IsNetworkGame(),
+	                IsReplayGame(), true)) {
+		SaveGame("autosave.sav");
+	}
 
 	long ticks = SDL_GetTicks();
 

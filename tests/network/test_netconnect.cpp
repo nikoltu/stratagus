@@ -604,3 +604,18 @@ TEST_CASE("Quit reason: none for a player who has not quit, none outside the pla
 	CHECK(NetworkGetQuitReason(-1) == -1);
 	CHECK(NetworkGetQuitReason(PlayerMax) == -1);
 }
+
+TEST_CASE("map_transfer_name_rules")
+{
+	CHECK(IsSafeMapTransferName("maps/a.pud"));
+	CHECK_FALSE(IsSafeMapTransferName("../a.pud"));
+	CHECK_FALSE(IsSafeMapTransferName("maps/../../x.pud"));
+	CHECK_FALSE(IsSafeMapTransferName("/sdcard/a.pud"));
+	CHECK_FALSE(IsSafeMapTransferName("C:x.pud"));
+	CHECK_FALSE(IsSafeMapTransferName("a.exe"));
+	// what the host really sends: the map's .smp / .sms pair, compressed or not
+	CHECK(IsSafeMapTransferName("maps/skirmish/x.smp.gz"));
+	CHECK(IsSafeMapTransferName("maps/x.sms"));
+	CHECK_FALSE(IsSafeMapTransferName("maps\\..\\x.pud"));
+	CHECK_FALSE(IsSafeMapTransferName(""));
+}

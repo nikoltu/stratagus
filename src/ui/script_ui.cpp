@@ -43,6 +43,7 @@
 #include "map.h"
 #include "menus.h"
 #include "script.h"
+#include "selection_cells.h"
 #include "spells.h"
 #include "title.h"
 #include "util.h"
@@ -685,6 +686,21 @@ static int CclDefinePopup(lua_State *l)
 }
 
 /**
+**  Put a stored map position back (saved game).
+**
+**  @param l  Lua state: slot, x, y.
+*/
+static int CclSetSavedMapPosition(lua_State *l)
+{
+	LuaCheckArgs(l, 3);
+	const int position = LuaToNumber(l, 1);
+	if (position >= 0) {
+		SetSavedMapPosition(position, Vec2i(LuaToNumber(l, 2), LuaToNumber(l, 3)));
+	}
+	return 0;
+}
+
+/**
 **  Define the viewports.
 **
 **  @param l  Lua state.
@@ -1241,6 +1257,8 @@ static int CclCopyButtonsForUnitType(lua_State *l)
 */
 void SelectionChanged()
 {
+	// PANEL-A: the cells of the group panel follow every selection, the ones of one unit too
+	SelectionCellsUpdate();
 	// We Changed out selection, anything pending buttonwise must be cleared
 	UI.StatusLine.Clear();
 	UI.StatusLine.ClearCosts();
@@ -1452,6 +1470,7 @@ void UserInterfaceCclRegister()
 	lua_register(Lua, "DefinePanelContents", CclDefinePanelContents);
 	lua_register(Lua, "DefinePopup", CclDefinePopup);
 	lua_register(Lua, "DefineViewports", CclDefineViewports);
+	lua_register(Lua, "SetSavedMapPosition", CclSetSavedMapPosition);
 
 	lua_register(Lua, "RightButtonAttacks", CclRightButtonAttacks);
 	lua_register(Lua, "RightButtonMoves", CclRightButtonMoves);

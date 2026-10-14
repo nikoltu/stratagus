@@ -67,11 +67,8 @@ void MissileDeathCoil::Action() /* override */
 	// Target unit still exists and casted on a special target
 	//
 	if (this->TargetUnit && this->TargetUnit->IsAlive()) {
+		// The caster was given the sum at the cast (Spell_SpawnMissile::Cast).
 		HitUnit(&source, *this->TargetUnit, this->Damage);
-		if (source.CurrentAction() != UnitAction::Die) {
-			source.Variable[HP_INDEX].Value += this->Damage;
-			source.Variable[HP_INDEX].Value = std::min(source.Variable[HP_INDEX].Max, source.Variable[HP_INDEX].Value);
-		}
 	}
 	this->TTL = 0;
 }

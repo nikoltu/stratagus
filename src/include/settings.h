@@ -81,12 +81,39 @@ constexpr int WC2_BUILD_FRAMES_PER_TIME_UNIT = 12;  /// construction
 //   research and upgrading to another type show their bar for time x 10 + about 15 frames
 //     (Arrow 1, 200 -> 2014.5; Arrow 2, 250 -> 2514.5; Town Hall -> Keep, 200 -> 2015.0). The engine
 //     counts its first unit at once, so the whole work was 199 x 10 + 1 = 1991 cycles for 200;
-//     the 24 cycles that miss are waited after the first unit. Training is NOT changed
-//     (measured time x 10 + 1: Peasant 45 -> 451).
+//     the cycles that miss are waited after the first unit. (The whole training bar was
+//     measured as time x 10 + 1 frames, Peasant 45 -> 451, between its fitted ends; the unit
+//     came out 469 .. 475 frames after the key.)
 //   construction takes (time + 1) x 12 frames (Farm 100 -> 1212, Lumber Mill 150 -> 1812,
 //     Shipyard 200 -> 2412).
-constexpr int WC2_RESEARCH_EXTRA_FRAMES = 24;       /// research, upgrade-to: once, after the first unit
+// The original's routine for all three kinds of work (training, research, upgrading to another
+// type) is one: the building counts 2 x time steps, one step every 5 frames, the first one 11
+// frames after the work began, and ends the work on the step after the last: time x 10 + 11
+// frames. The engine counts its first unit at once and one unit every 10 cycles after it, so 20
+// cycles are waited once, after the first unit - in training too.
+constexpr int WC2_PRODUCTION_EXTRA_FRAMES = 20;     /// training, research, upgrade-to: once, after the first unit
+/// Game cycles a training, a research or an upgrade to another type of the data time cost @p time takes
+constexpr int ProductionCycles(int time)
+{
+	return time > 1 ? (time - 1) * WC2_FRAMES_PER_TIME_UNIT + 1 + WC2_PRODUCTION_EXTRA_FRAMES : 1;
+}
 constexpr int WC2_BUILD_EXTRA_TIME_UNITS = 1;       /// construction: time units added to the data cost
+// GAME-SPEED-STEPS: the original's Game Speed has nine steps; a game frame takes 80, 60, 53, 46,
+// 40, 33, 26, 20, 13 ms on them (its factory setting is step 6: 26 ms, 38.5 frames per second;
+// measured on the running client at steps 0, 2, 4, 6, 8: 12.5, 19.0, 25.0, 38.5, 76.8).
+constexpr int WC2_GAME_SPEED_STEPS = 9;
+constexpr int WC2_GAME_SPEED_FRAME_MS[WC2_GAME_SPEED_STEPS] = {80, 60, 53, 46, 40, 33, 26, 20, 13};
+/// Game cycles per second at a knob position of the Game Speed slider, 0 .. 100: the original's
+/// step where the knob stands on one, a straight line between two steps
+constexpr double GameSpeedCycleRate(int percent)
+{
+	const int knob = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	const int scaled = knob * (WC2_GAME_SPEED_STEPS - 1); // 0 .. 800, 100 a step
+	const int lower = scaled / 100 < WC2_GAME_SPEED_STEPS - 1 ? scaled / 100 : WC2_GAME_SPEED_STEPS - 2;
+	const double from = 1000.0 / WC2_GAME_SPEED_FRAME_MS[lower];
+	const double to = 1000.0 / WC2_GAME_SPEED_FRAME_MS[lower + 1];
+	return from + (to - from) * (scaled - lower * 100) / 100.0;
+}
 // MESSAGE-LINE-LIFE: the original shows a game message for about 6.7 s (one timing).
 constexpr unsigned long WC2_MESSAGE_LIFE_MS = 6700;
 

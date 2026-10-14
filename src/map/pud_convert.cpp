@@ -324,6 +324,9 @@ void PudData::BuildSetup(std::string &out) const
 		if (pdata.Units[i].Type == UnitHumanOilPlatform || pdata.Units[i].Type == UnitOrcOilPlatform ||
 				pdata.Units[i].Type == UnitGoldMine || pdata.Units[i].Type == UnitOilPatch) {
 			AppendLine(out, "SetResourcesHeld(unit, %d)\n", pdata.Units[i].Data * 2500);
+		} else if (pdata.Units[i].Data != 0) {
+			// Any other record with a non-zero data word: the original's unit fixed by the map.
+			AppendLine(out, "SetUnitMapFixed(unit)\n");
 		}
 	}
 }

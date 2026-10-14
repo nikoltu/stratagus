@@ -37,6 +37,8 @@
 
 #include "missile.h"
 
+#include "missile_cadence.h"
+
 /**
 **  Missile don't move, than disappears
 */
@@ -45,6 +47,28 @@ void MissileStay::Action() /* override */
 	this->Wait = this->Type->Sleep;
 	if (this->NextMissileFrame(1, 0)) {
 		this->MissileHit();
+		this->TTL = 0;
+	}
+}
+
+/**
+**  One round of the Death and Decay: the missile stays, shows the pictures of the original's
+**  script, hits on the script's handler tick and goes when the next round begins.
+*/
+void MissileDeathAndDecay::Action() /* override */
+{
+	const int tick = this->State++;
+
+	this->Wait = 1;
+	// AnimWait: set by the spell for a round that follows another one
+	this->SpriteFrame = DeathAndDecayPictureOn(tick, this->AnimWait != 0);
+	if (this->SpriteFrame >= this->Type->SpriteFrames) {
+		this->SpriteFrame = this->Type->SpriteFrames - 1;
+	}
+	if (tick == DeathAndDecayFirstHit) {
+		this->MissileHit();
+	}
+	if (tick + 1 >= DeathAndDecayPeriod) {
 		this->TTL = 0;
 	}
 }

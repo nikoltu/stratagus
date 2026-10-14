@@ -16,3 +16,7 @@
 16.txt | libvorbis | third-party/SDL_mixer/external/vorbis/COPYING
 17.txt | libtheora (COPYING) | third-party/theora/COPYING
 18.txt | libtheora (LICENSE) | third-party/theora/LICENSE
+19.txt | mdns | third-party/mdns/LICENSE
+20.txt | spiritless_po | third-party/spiritless_po/LICENSE
+21.txt | TiMidity (in SDL2_mixer) | third-party/SDL_mixer/src/codecs/timidity/COPYING
+22.txt | dr_mp3 (in SDL2_mixer) | third-party/SDL_mixer/src/codecs/dr_libs/LICENSE

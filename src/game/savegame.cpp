@@ -53,6 +53,7 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "version.h"
+#include "wc2mission.h"
 
 #include <ctime>
 
@@ -94,6 +95,38 @@ static fs::path GetSaveDir()
 	return dir;
 }
 
+fs::path SaveGameTemporary(const fs::path &target)
+{
+	fs::path temporary = target;
+	temporary += ".tmp";
+	return temporary;
+}
+
+bool CommitSaveGame(const fs::path &target, bool complete)
+{
+	// The file layer wrote "<name>.tmp.gz", or "<name>.tmp" where it could not compress.
+	bool moved = false;
+	for (const char *ext : {".gz", ""}) {
+		fs::path from = SaveGameTemporary(target);
+		fs::path to = target;
+		from += ext;
+		to += ext;
+		std::error_code ec;
+		if (!fs::is_regular_file(from, ec) || ec) {
+			continue;
+		}
+		if (complete && !moved) {
+			fs::rename(from, to, ec);
+			if (!ec) {
+				moved = true;
+				continue;
+			}
+		}
+		fs::remove(from, ec);
+	}
+	return moved;
+}
+
 /**
 **  Save a game to file.
 **
@@ -108,7 +141,10 @@ int SaveGame(const std::string &filename)
 	fs::path fullpath(GetSaveDir());
 
 	fullpath /= filename;
-	if (file.open(fullpath.string().c_str(), CL_WRITE_GZ | CL_OPEN_WRITE) == -1) {
+	// Written beside the target and moved over it when complete: a write that fails or is cut
+	// short leaves the save that was there.
+	CommitSaveGame(fullpath, false); // what an earlier, interrupted save left
+	if (file.open(SaveGameTemporary(fullpath).string().c_str(), CL_WRITE_GZ | CL_OPEN_WRITE) == -1) {
 		ErrorPrint("Can't save to '%s'\n", filename.c_str());
 		return -1;
 	}
@@ -145,6 +181,7 @@ int SaveGame(const std::string &filename)
 				StratagusMajorVersion, StratagusMinorVersion, StratagusPatchLevel);
 	file.printf("  SyncHash = %d, \n", SyncHash);
 	file.printf("  SyncRandSeed = %d, \n", SyncRandSeed);
+	file.printf("  Format = %d, \n", SavedGameFormat);
 	file.printf("  SaveFile = \"%s\"\n", CurrentMapPath);
 	file.printf("\n---  \"preview\", \"%s.pam\",\n", filename.c_str());
 	file.printf("} )\n\n");
@@ -159,6 +196,7 @@ int SaveGame(const std::string &filename)
 	SavePlayers(file);
 	Map.Save(file);
 	UnitManager->Save(file);
+	SaveMissionRuleState(file);
 	SaveUserInterface(file);
 	SaveAi(file);
 	SaveSelections(file);
@@ -172,7 +210,11 @@ int SaveGame(const std::string &filename)
 		file.printf("-- Lua state\n\n%s\n", s.c_str());
 	}
 	SaveTriggers(file); //Triggers are saved in SaveGlobal, so load it after Global
-	file.close();
+	const bool written = file.close() == 0;
+	if (!CommitSaveGame(fullpath, written)) {
+		ErrorPrint("Can't save to '%s'\n", filename.c_str());
+		return -1;
+	}
 	return 0;
 }
 

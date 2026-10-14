@@ -29,6 +29,7 @@
 
 #include "stratagus.h"
 #include "launcher_bridge.h"
+#include "sound.h"
 
 #include <atomic>
 #include <deque>
@@ -185,6 +186,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_net_wargushd_game_WargusHDActivity_nativeLauncherHost(JNIEnv *, jclass, jboolean hosted)
 {
 	Hosted.store(hosted != JNI_FALSE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_net_wargushd_game_WargusHDActivity_nativeAudioFocus(JNIEnv *, jclass, jint state)
+{
+	if (state >= 0 && state <= 2) {
+		SetAudioFocus(static_cast<AudioFocus>(state));
+	}
 }
 #endif
 

@@ -58,6 +58,7 @@ static const std::map<std::string_view, MissileClass> MissileClassNames = {
 	{"missile-class-clip-to-target", MissileClass::ClipToTarget},
 	{"missile-class-continious", MissileClass::Continuous},
 	{"missile-class-cycle-once", MissileClass::CycleOnce},
+	{"missile-class-death-and-decay", MissileClass::DeathAndDecay},
 	{"missile-class-death-coil", MissileClass::DeathCoil},
 	{"missile-class-fire", MissileClass::Fire},
 	{"missile-class-flame-shield", MissileClass::FlameShield},
@@ -194,6 +195,14 @@ void MissileType::Load(lua_State *l)
 			this->FriendlyFire = LuaToBoolean(l, -1);
 		} else if (value == "SplashFactor") {
 			this->SplashFactor = LuaToNumber(l, -1);
+		} else if (value == "ZoneSplash") {
+			this->ZoneSplash = LuaToBoolean(l, -1);
+		} else if (value == "AimedHit") {
+			this->AimedHit = LuaToBoolean(l, -1);
+		} else if (value == "ZoneNoArmor") {
+			this->ZoneNoArmor = LuaToBoolean(l, -1);
+		} else if (value == "ZoneEndHit") {
+			this->ZoneEndHit = LuaToBoolean(l, -1);
 		} else if (value == "CorrectSphashDamage") {
 			this->CorrectSphashDamage = LuaToBoolean(l, -1);
 		} else {
@@ -304,6 +313,21 @@ static int CclMissile(lua_State *l)
 		} else if (value == "hidden") {
 			Assert(missile);
 			missile->Hidden = 1;
+			--j;
+		} else if (value == "pierced") {
+			Assert(missile);
+			if (!lua_istable(l, j + 1)) {
+				LuaError(l, "incorrect argument");
+			}
+			const int count = lua_rawlen(l, j + 1);
+			for (int k = 0; k < count; ++k) {
+				lua_rawgeti(l, j + 1, k + 1);
+				missile->PiercedUnits.push_back(CclGetUnitFromRef(l));
+				lua_pop(l, 1);
+			}
+		} else if (value == "destroy") {
+			Assert(missile);
+			missile->DestroyMissile = 1;
 			--j;
 		} else if (value == "step") {
 			Assert(missile);

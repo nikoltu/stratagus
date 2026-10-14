@@ -42,6 +42,7 @@
 #include "commands.h"
 #include "cursor.h"
 #include "font.h"
+#include "group_move.h"
 #include "interface.h"
 #include "map.h"
 #include "menus.h"
@@ -122,6 +123,65 @@ static bool CanBuildOnArea(const CUnit &unit, const Vec2i &pos)
 		}
 	}
 	return true;
+}
+
+/**
+**  The goals of a group order of the player to one tile.
+**
+**  Land units of one tile that move tile by tile are sent as a group (GroupMoveGoals over
+**  these units alone); so are the ships that rest on every second tile (GroupMoveGridGoals
+**  over the ships alone, transports left out); every other unit gets the target itself.
+**
+**  @param units   the ordered units.
+**  @param target  the ordered tile.
+**
+**  @return        one goal per unit, in the order of @p units.
+*/
+std::vector<Vec2i> GroupMoveGoalsForUnits(const std::vector<CUnit *> &units, const Vec2i &target)
+{
+	std::vector<Vec2i> goals(units.size(), target);
+
+	if (!Preference.FormationMovement) {
+		return goals;
+	}
+	std::vector<size_t> members;
+	std::vector<Vec2i> starts;
+	std::vector<size_t> ships;
+	std::vector<Vec2i> shipStarts;
+
+	for (size_t i = 0; i != units.size(); ++i) {
+		const CUnit *unit = units[i];
+		if (unit == nullptr || unit->Removed || !unit->CanMove()) {
+			continue;
+		}
+		const CUnitType &type = *unit->Type;
+		if (type.TileWidth != 1 || type.TileHeight != 1) {
+			continue;
+		}
+		if (type.MoveType == EMovement::Land && type.GridStep == 1) {
+			members.push_back(i);
+			starts.push_back(unit->tilePos);
+		} else if (type.MoveType == EMovement::Naval && type.GridStep == ShipGridStep && !type.CanTransport()) {
+			// a transport may be sent onto the coast, which is off the grid
+			ships.push_back(i);
+			shipStarts.push_back(unit->tilePos);
+		}
+	}
+	const std::vector<Vec2i> memberGoals = GroupMoveGoals(starts, target, Map.Info.MapWidth, Map.Info.MapHeight);
+
+	for (size_t i = 0; i != members.size(); ++i) {
+		goals[members[i]] = memberGoals[i];
+	}
+	// One ship alone keeps the target: where it stops at a tile off the grid is the move's matter.
+	if (ships.size() >= 2) {
+		const std::vector<Vec2i> shipGoals =
+			GroupMoveGridGoals(shipStarts, target, Map.Info.MapWidth, Map.Info.MapHeight, ShipGridStep);
+
+		for (size_t i = 0; i != ships.size(); ++i) {
+			goals[ships[i]] = shipGoals[i];
+		}
+	}
+	return goals;
 }
 
 static void DoRightButton_ForForeignUnit(CUnit *dest)
@@ -287,7 +347,7 @@ DoRightButton_Harvest_Pos(CUnit &unit, const Vec2i &pos, EFlushMode flush, int &
 }
 
 static bool DoRightButton_Worker(
-	CUnit &unit, CUnit *dest, const Vec2i &pos, EFlushMode flush, int &acknowledged)
+	CUnit &unit, CUnit *dest, const Vec2i &pos, const Vec2i &goalPos, EFlushMode flush, int &acknowledged)
 {
 	const CUnitType &type = *unit.Type;
 
@@ -336,7 +396,7 @@ static bool DoRightButton_Worker(
 		PlayUnitSound(unit, EUnitVoice::Acknowledging);
 		acknowledged = 1;
 	}
-	SendCommandMove(unit, pos, flush);
+	SendCommandMove(unit, goalPos, flush);
 	return true;
 }
 
@@ -393,7 +453,7 @@ static bool DoRightButton_AttackUnit(
 }
 
 static void DoRightButton_Attack(
-	CUnit &unit, CUnit *dest, const Vec2i &pos, EFlushMode flush, int &acknowledged)
+	CUnit &unit, CUnit *dest, const Vec2i &pos, const Vec2i &goalPos, EFlushMode flush, int &acknowledged)
 {
 	if (dest != nullptr && unit.CurrentAction() != UnitAction::Built) {
 		if (DoRightButton_AttackUnit(unit, *dest, pos, flush, acknowledged)) {
@@ -411,10 +471,10 @@ static void DoRightButton_Attack(
 			return;
 		}
 	}
-	// empty space
+	// empty space: the unit goes to its own tile of the group
 	if ((KeyModifiers & ModifierControl)) {
 		if (RightButtonAttacks) {
-			SendCommandMove(unit, pos, flush);
+			SendCommandMove(unit, goalPos, flush);
 			if (!acknowledged) {
 				PlayUnitSound(unit, EUnitVoice::Acknowledging);
 				acknowledged = 1;
@@ -424,7 +484,7 @@ static void DoRightButton_Attack(
 				PlayUnitSound(unit, EUnitVoice::Attack);
 				acknowledged = 1;
 			}
-			SendCommandAttack(unit, pos, nullptr, flush);
+			SendCommandAttack(unit, goalPos, nullptr, flush);
 		}
 	} else {
 		if (RightButtonAttacks) {
@@ -432,14 +492,14 @@ static void DoRightButton_Attack(
 				PlayUnitSound(unit, EUnitVoice::Attack);
 				acknowledged = 1;
 			}
-			SendCommandAttack(unit, pos, nullptr, flush);
+			SendCommandAttack(unit, goalPos, nullptr, flush);
 		} else {
 			// Note: move is correct here, right default is move
 			if (!acknowledged) {
 				PlayUnitSound(unit, EUnitVoice::Acknowledging);
 				acknowledged = 1;
 			}
-			SendCommandMove(unit, pos, flush);
+			SendCommandMove(unit, goalPos, flush);
 		}
 	}
 	// FIXME: ALT-RIGHT-CLICK, move but fight back if attacked.
@@ -521,7 +581,8 @@ static bool DoRightButton_NewOrder(
 	return false;
 }
 
-static void DoRightButton_ForSelectedUnit(CUnit &unit, CUnit *dest, const Vec2i &pos, int &acknowledged)
+static void DoRightButton_ForSelectedUnit(
+	CUnit &unit, CUnit *dest, const Vec2i &pos, const Vec2i &goalPos, int &acknowledged)
 {
 	// don't self targeting.
 	if (dest == &unit) {
@@ -574,13 +635,13 @@ static void DoRightButton_ForSelectedUnit(CUnit &unit, CUnit *dest, const Vec2i 
 
 	//  Handle resource workers.
 	if (action == EMouseAction::Harvest) {
-		DoRightButton_Worker(unit, dest, pos, flush, acknowledged);
+		DoRightButton_Worker(unit, dest, pos, goalPos, flush, acknowledged);
 		return;
 	}
 
 	//  Fighters
 	if (action == EMouseAction::SpellCast || action == EMouseAction::Attack) {
-		DoRightButton_Attack(unit, dest, pos, flush, acknowledged);
+		DoRightButton_Attack(unit, dest, pos, goalPos, flush, acknowledged);
 		return;
 	}
 
@@ -608,7 +669,7 @@ static void DoRightButton_ForSelectedUnit(CUnit &unit, CUnit *dest, const Vec2i 
 		PlayUnitSound(unit, EUnitVoice::Acknowledging);
 		acknowledged = 1;
 	}
-	SendCommandMove(unit, pos, flush);
+	SendCommandMove(unit, goalPos, flush);
 }
 
 /**
@@ -657,57 +718,16 @@ void DoRightButton(const PixelPos &mapPixelPos)
 
 	int acknowledged = 0; // to play sound
 
-	auto sz = Selected.size();
-	if (dest == nullptr && sz < 12 && Preference.FormationMovement) {
-		const short magicBoxSize = 7 << Map.Tileset.getLogicalToGraphicalTileSizeShift();
-		std::vector<Vec2i> targetPositions(sz);
-		Vec2i max, min, center;
-		max = min = center = Selected[0]->tilePos;
-		bool tooBig = false;
+	// An order to a tile sends the units as a group, each one to its own goal; an order on a
+	// unit is the same for all of them.
+	const std::vector<Vec2i> goals =
+		dest == nullptr ? GroupMoveGoalsForUnits(Selected, pos) : std::vector<Vec2i>(Selected.size(), pos);
 
-		for (auto i = 1; i < sz; ++i) {
-			auto unit = Selected[i];
-			auto unitTilePos = unit->tilePos;
-			max.x = std::max(unitTilePos.x, max.x);
-			min.x = std::min(unitTilePos.x, min.x);
-			if (max.x - min.x > magicBoxSize) {
-				tooBig = true;
-				break;
-			}
-
-			max.y = std::max(unitTilePos.y, max.y);
-			min.y = std::min(unitTilePos.y, min.y);
-			if (max.y - min.y > magicBoxSize) {
-				tooBig = true;
-				break;
-			}
-
-			center.x += unitTilePos.x;
-			center.y += unitTilePos.y;
-		}
-
-		if (!tooBig) {
-			center.x = center.x / sz;
-			center.y = center.y / sz;
-
-			for (auto i = 0; i < sz; ++i) {
-				auto unit = Selected[i];
-				auto unitTilePos = unit->tilePos;
-				auto targetPosForUnit = pos + (unitTilePos - center);
-				Map.Clamp(targetPosForUnit);
-				if (targetPosForUnit != unitTilePos) {
-					DoRightButton_ForSelectedUnit(*unit, dest, targetPosForUnit, acknowledged);
-				}
-			}
-			return;
-		}
-	}
-
-	for (size_t i = 0; i < sz; ++i) {
+	for (size_t i = 0; i < Selected.size(); ++i) {
 		Assert(Selected[i]);
 		CUnit &unit = *Selected[i];
 
-		DoRightButton_ForSelectedUnit(unit, dest, pos, acknowledged);
+		DoRightButton_ForSelectedUnit(unit, dest, pos, goals[i], acknowledged);
 	}
 	ShowOrdersCount = GameCycle + Preference.ShowOrders * CYCLES_PER_SECOND;
 }
@@ -782,6 +802,23 @@ static void HandleMouseOn(const PixelPos screenPos)
 			} else {
 				CursorOn = ECursorOn::Unknown;
 			}
+			return;
+		}
+		// A unit of the selected group in its cell of the info panel: the cell's number, as in
+		// the Remastered panel.
+		const int groupCell = Selected.size() > 1 ? ClassicGroupCellAt(screenPos.x, screenPos.y) : -1;
+		if (groupCell >= 0) {
+			ButtonAreaUnderCursor = ButtonArea::Selected;
+			ButtonUnderCursor = groupCell;
+			CursorOn = ECursorOn::Button;
+			return;
+		}
+		// A passenger of the selected transport.
+		const int passenger = ClassicPassengerCellAt(screenPos.x, screenPos.y);
+		if (passenger >= 0 && passenger < (int) UI.TransportingButtons.size()) {
+			ButtonAreaUnderCursor = ButtonArea::Transporting;
+			ButtonUnderCursor = passenger;
+			CursorOn = ECursorOn::Button;
 			return;
 		}
 		if (UI.Minimap.Contains(screenPos)) {
@@ -1439,14 +1476,17 @@ static int SendMove(const Vec2i &tilePos)
 			goal = nullptr;
 		}
 
-		for (CUnit *unit : Selected) {
+		const std::vector<Vec2i> goals = GroupMoveGoalsForUnits(Selected, tilePos);
+
+		for (size_t i = 0; i < Selected.size(); ++i) {
+			CUnit *unit = Selected[i];
 			if (goal && CanTransport(*goal, *unit)) {
 				goal->Blink = 4;
 				SendCommandFollow(*goal, *unit, EFlushMode::Off);
 				SendCommandBoard(*unit, *goal, flush);
 				ret = 1;
 			} else {
-				SendCommandMove(*unit, tilePos, flush);
+				SendCommandMove(*unit, goals[i], flush);
 				ret = 1;
 			}
 		}
@@ -1478,18 +1518,23 @@ static int SendAttack(const Vec2i &tilePos)
 	if (dest && dest->Type->BoolFlag[DECORATION_INDEX].value) {
 		dest = nullptr;
 	}
-	for (CUnit *unit : Selected) {
+	// To an empty field the units go as a group, each one to its own goal.
+	const std::vector<Vec2i> goals =
+		dest == nullptr ? GroupMoveGoalsForUnits(Selected, tilePos) : std::vector<Vec2i>(Selected.size(), tilePos);
+
+	for (size_t i = 0; i < Selected.size(); ++i) {
+		CUnit *unit = Selected[i];
 		if (unit->Type->CanAttack) {
 			if (!dest || (dest != unit && CanTarget(*unit->Type, *dest->Type))) {
 				if (dest) {
 					dest->Blink = 4;
 				}
-				SendCommandAttack(*unit, tilePos, dest, flush);
+				SendCommandAttack(*unit, goals[i], dest, flush);
 				ret = 1;
 			}
 		} else {
 			if (unit->CanMove()) {
-				SendCommandMove(*unit, tilePos, flush);
+				SendCommandMove(*unit, goals[i], flush);
 				ret = 1;
 			}
 		}

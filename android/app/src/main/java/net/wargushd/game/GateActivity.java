@@ -14,6 +14,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.text.TextUtils;
@@ -51,6 +53,9 @@ public class GateActivity extends Activity {
     private static final int BTN_FILL = 0xFF1F2A31, BTN_FILL_OFF = 0xFF1A2126, BTN_LINE = 0xFF55707F;
 
     private GateView view;
+    private static final long RETRY_MS = 2000L;
+    private final Handler retry = new Handler(Looper.getMainLooper());
+    private boolean resumed;
 
     // State shown by the screen; refreshed on every resume.
     private boolean accessOk;
@@ -111,7 +116,53 @@ public class GateActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         refresh();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
+        retry.removeCallbacksAndMessages(null);
+    }
+
+    /**
+     * Right after a boot the storage holding the folder may not be mounted yet. While the
+     * remembered folder is missing, look again every two seconds (the look runs on a worker
+     * thread) and re-read the checklist once it is there.
+     */
+    private void watchFolder() {
+        retry.removeCallbacksAndMessages(null);
+        if (!resumed || folder == null || folderExists) {
+            return;
+        }
+        final String path = folder;
+        retry.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final boolean there = new File(path).isDirectory();
+                        retry.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!resumed || !path.equals(folder)) {
+                                    return;
+                                }
+                                if (there) {
+                                    android.util.Log.i("WargusHD", "LAUNCHER gate folder appeared");
+                                    refresh();
+                                } else {
+                                    watchFolder();
+                                }
+                            }
+                        });
+                    }
+                }, "gate-folder").start();
+            }
+        }, RETRY_MS);
     }
 
     /** Re-read everything the checklist shows. */
@@ -136,6 +187,7 @@ public class GateActivity extends Activity {
             }
         }
         view.invalidate();
+        watchFolder();
     }
 
     private boolean canContinue() {

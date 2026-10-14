@@ -39,6 +39,19 @@
 #include "unit.h"
 #include "unit_find.h"
 
+/**
+**  If the explosion takes the wall on a tile.
+**
+**  @param offset       Tile offset from the caster.
+**  @param damageRange  Tiles around the caster that are hit; below 0: no limit of its own.
+**
+**  @return             true if the wall falls.
+*/
+bool DemolishTakesWall(const Vec2i &offset, int damageRange)
+{
+	return damageRange < 0 || (std::abs(offset.x) <= damageRange && std::abs(offset.y) <= damageRange);
+}
+
 void Spell_Demolish::Parse(lua_State *l, int startIndex, int endIndex) /* override */
 {
 	for (int j = startIndex; j < endIndex; ++j) {
@@ -48,6 +61,8 @@ void Spell_Demolish::Parse(lua_State *l, int startIndex, int endIndex) /* overri
 			this->Range = LuaToNumber(l, -1, j + 1);
 		} else if (value == "damage") {
 			this->Damage = LuaToNumber(l, -1, j + 1);
+		} else if (value == "damage-range") {
+			this->DamageRange = LuaToNumber(l, -1, j + 1);
 		} else {
 			LuaError(l, "Unsupported demolish tag: %s", value.data());
 		}
@@ -85,7 +100,12 @@ int Spell_Demolish::Cast(CUnit &caster,
 			if (SquareDistance(ipos, goalPos) > square(this->Range)) {
 				// Not in circle range
 				continue;
-			} else if (mf.isAWall() || mf.RockOnMap() || mf.ForestOnMap()) {
+			} else if (mf.isAWall()) {
+				// With a damage range a wall falls only on the tiles around the caster.
+				if (DemolishTakesWall(ipos - goalPos, this->DamageRange)) {
+					Map.ClearTile(ipos);
+				}
+			} else if (mf.RockOnMap() || mf.ForestOnMap()) {
 				Map.ClearTile(ipos);
 			}
 		}
@@ -98,7 +118,7 @@ int Spell_Demolish::Cast(CUnit &caster,
 		std::vector<CUnit *> table = SelectFixed(minpos, maxpos);
 		for (CUnit *unit : table) {
 			if (unit->Type->MoveType != EMovement::Fly && unit->IsAlive()
-			    && unit->MapDistanceTo(goalPos) <= this->Range) {
+			    && unit->MapDistanceTo(goalPos) <= (this->DamageRange >= 0 ? this->DamageRange : this->Range)) {
 				// Don't hit flying units!
 				HitUnit(&caster, *unit, this->Damage);
 			}

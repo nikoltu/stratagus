@@ -36,6 +36,7 @@
 
 #include "map.h"
 #include "missile.h"
+#include "missile_cadence.h"
 #include "script.h"
 #include "unit.h"
 #include "video.h"
@@ -106,7 +107,11 @@ int Spell_AreaBombardment::Cast(CUnit &caster,
 		const PixelPos start = dest + offset;
 		for (int i = 0; i < shards; ++i) {
 			::Missile *mis = MakeMissile(*missile, start, dest);
-			if (mis->Type->BlizzardSpeed) {
+			if (mis->Type->Class == MissileClass::DeathAndDecay) {
+				// one round of the original's missile after the other
+				mis->Delay = i * DeathAndDecayPeriod;
+				mis->AnimWait = i != 0;
+			} else if (mis->Type->BlizzardSpeed) {
 				mis->Delay = i * mis->Type->Sleep * 2 * PixelTileSize.x / mis->Type->BlizzardSpeed;
 			} else if (mis->Type->Speed) {
 				mis->Delay = i * mis->Type->Sleep * 2 * PixelTileSize.x / mis->Type->Speed;

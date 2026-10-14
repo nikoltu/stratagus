@@ -38,6 +38,19 @@ class CFile;
 extern void LoadGame(const fs::path &filename); /// Load saved game
 extern int SaveGame(const std::string &filename); /// Save game
 extern bool DeleteSaveGame(const std::string &filename); /// Delete save game (guarded)
+/// The shape of the saved game file this build writes (the header's Format; a file without it is 0).
+constexpr int SavedGameFormat = 2;
+/// A file of this format can be read: any up to this build's own.
+inline bool SavedGameFormatReadable(int format) { return format <= SavedGameFormat; }
+/// An automatic save is written now: when a game starts (new or loaded), and every 60 s of wall time.
+constexpr unsigned long AutosavePeriodMs = 60000; /// wall time between two timed automatic saves
+extern bool AutosaveDue(unsigned long nowMs, unsigned long &nextMs, int minutes, bool network, bool replay,
+                        bool gameStart);
+/// A save is written beside its target and moved over it when complete: the name it is written
+/// under (the file layer adds ".gz" itself), and the move. False: nothing was moved, the
+/// unfinished file is removed and the target is as it was.
+extern fs::path SaveGameTemporary(const fs::path &target);
+extern bool CommitSaveGame(const fs::path &target, bool complete);
 extern bool SaveGameLoading;                 /// Save game is in progress of loading
 
 extern void InitModules();              /// Initialize all modules

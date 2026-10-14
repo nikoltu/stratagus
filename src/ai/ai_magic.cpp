@@ -56,11 +56,17 @@ void AiCheckMagic()
 
 	for (CUnit *unit : player.GetUnits()) {
 		if (!unit->Type->CanCastSpell.empty()) {
-			// Check only idle magic units
+			// Check only idle magic units. A caster that already has a cast order is passed
+			// over; the casters after it in the list still get their turn in this pass.
+			bool casting = false;
 			for (const auto &order : unit->Orders) {
 				if (order->Action == UnitAction::SpellCast) {
-					return;
+					casting = true;
+					break;
 				}
+			}
+			if (casting) {
+				continue;
 			}
 			const size_t spellCount = std::min(SpellTypeTable.size(), unit->Type->CanCastSpell.size());
 			if (spellCount != SpellTypeTable.size()) {

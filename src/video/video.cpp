@@ -185,6 +185,7 @@ char VideoForceFullScreen;           /// fullscreen set from commandline
 double NextFrameTicks;               /// Ticks of begin of the next frame
 unsigned long FrameCounter;          /// Current frame number
 unsigned long SlowFrameCounter;      /// Profile, frames out of sync
+unsigned long LongFrameCounter;      /// Profile, frames a whole frame period late
 
 int ClipX1;                          /// current clipping top left
 int ClipY1;                          /// current clipping top left

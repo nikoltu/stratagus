@@ -191,6 +191,8 @@ extern int GetNumWaitingWorkers(const CUnit &mine);
 extern bool AutoAttack(CUnit &unit);
 extern bool AutoRepair(CUnit &unit);
 extern bool AutoCast(CUnit &unit);
+/// The sizes of a type's CanCastSpell and a unit's AutoCastSpell do not fit
+extern bool AutoCastVectorsInconsistent(size_t canCastSpells, size_t autoCastSpells);
 extern void UnHideUnit(CUnit &unit);
 
 /// Generic move action

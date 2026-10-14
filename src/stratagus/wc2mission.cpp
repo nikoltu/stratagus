@@ -47,7 +47,9 @@
 
 #include "wc2mission.h"
 
+#include "action/action_train.h"
 #include "actions.h"
+#include "commands.h"
 #include "iolib.h"
 #include "player.h"
 #include "pud.h"
@@ -173,6 +175,45 @@ const RacePair UpgradeAllowBits[32] = {
 	/* 20 */ {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
 	/* 24 */ {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
 	/* 28 */ {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+};
+
+// ---- spell-state bits ---------------------------------------------------------------------------
+// The original keeps one "acquired" mask per player; a spell button names its bit as its own argument
+// (mask = 1 << argument in the three button predicates) and its icon names the spell. Bits 2 and 12
+// are the argument of no button: UNKNOWN, left unmapped. Bit 20 is no spell (the predicates test it
+// before a spell of the second caster may be researched) and is left unmapped as well.
+// Bits 14 and 19 are the two remaining Death Knight spells, told apart by the mask each spell's
+// own casting routine tests: Death Coil bit 14, Death and Decay bit 19.
+struct SpellBit {
+	const char *ident;
+	int with; /// the bit that has to be set as well, or -1
+};
+
+const SpellBit SpellStateBits[32] = {
+	/*  0 */ {"upgrade-holy-vision", -1},
+	/*  1 */ {"upgrade-healing", -1},
+	/*  2 */ {nullptr, -1}, // UNKNOWN
+	/*  3 */ {"upgrade-exorcism", -1},
+	/*  4 */ {"upgrade-flame-shield", -1},
+	/*  5 */ {"upgrade-fireball", -1},
+	/*  6 */ {"upgrade-slow", -1},
+	/*  7 */ {"upgrade-invisibility", -1},
+	/*  8 */ {"upgrade-polymorph", -1},
+	/*  9 */ {"upgrade-blizzard", -1},
+	/* 10 */ {"upgrade-eye-of-kilrogg", -1},
+	/* 11 */ {"upgrade-bloodlust", -1},
+	/* 12 */ {nullptr, -1}, // UNKNOWN
+	/* 13 */ {"upgrade-raise-dead", -1},
+	/* 14 */ {"upgrade-death-coil", -1},
+	/* 15 */ {"upgrade-whirlwind", -1},
+	/* 16 */ {"upgrade-haste", -1},
+	/* 17 */ {"upgrade-unholy-armor", -1},
+	/* 18 */ {"upgrade-runes", -1},
+	/* 19 */ {"upgrade-death-and-decay", -1},
+	/* 20 */ {nullptr, -1}, // not a spell
+	/* 21 */ {nullptr, -1}, {nullptr, -1}, {nullptr, -1},
+	/* 24 */ {nullptr, -1}, {nullptr, -1}, {nullptr, -1}, {nullptr, -1},
+	/* 28 */ {nullptr, -1}, {nullptr, -1}, {nullptr, -1}, {nullptr, -1},
 };
 
 inline uint16_t rdU16(const std::string &d, size_t off)
@@ -582,6 +623,7 @@ struct RuleDef {
 	std::vector<RuleTerm> lose;    /// any is enough
 	std::vector<RuleTerm> gate;    /// when not empty: `win` counts only after these were once all true
 	bool arrivalByParam = false;   /// the Arrived term takes its count from the mission's parameter
+	bool genericWin = false;       /// `win` is the generic evaluator's "destroy all" (rule word bit 0x100)
 };
 
 struct CensusAtom {
@@ -589,6 +631,54 @@ struct CensusAtom {
 	int slot = -1;  /// -1: indexed by a register
 	int imm = -1;   /// -1: no immediate (not a compare with a constant)
 };
+
+/// What the dispatcher does for a rule id before it stores the handler: bits it sets in a player's
+/// spell-state mask, and unit types it converts for a slot. Slot -1 is the local player.
+struct StartGrant {
+	int slot = -1;
+	uint32_t mask = 0;
+};
+
+struct StartConvert {
+	int slot = -1;
+	int from = 0;
+	int to = 0;
+	/// The routine's fourth argument. It matters only when the new type is the armed worker of
+	/// either race: with 0 the unit loses the "can be taken over" mark (CUnit::TakeOver), with any
+	/// other value it keeps it.
+	int keep = 0;
+};
+
+/// A write into the record of every living unit of one type in the unit lists of `slots` slots
+/// from `slot` on.
+struct StartUnit {
+	enum What { MarkClear, MarkSet, HitPoints };
+	int slot = 0;
+	int slots = 1;
+	int type = 0;
+	What what = MarkClear;
+	int value = 0; /// the hit points
+};
+
+struct StartActions {
+	std::vector<StartGrant> grants;
+	std::vector<StartConvert> converts;
+	std::vector<StartUnit> units;
+	std::vector<int> enemies; /// slots that become the local player's enemy, both ways
+};
+
+// Fields of the original's unit record that a start action writes: the flag word with the "can be
+// taken over" mark, the hit points, and the type byte the loops compare (the one ReadAtoms knows).
+constexpr int UnitRecFlags = 0x1C;
+constexpr int UnitRecHitPoints = 0x22;
+constexpr int UnitRecType = 0x27;
+constexpr uint32_t UnitRecTakeOver = 0x100;
+
+// Spell-state bit of the second caster's upgrade (knight -> paladin, ogre -> ogre-mage): the three
+// button predicates ask for it before one of that caster's spells may be researched, and the
+// research of the upgrade is what sets it.
+constexpr int SpellStateCasterBit = 20;
+const RacePair SpellStateCaster = {"upgrade-paladin", "upgrade-ogre-mage"};
 
 struct HandlerAtoms {
 	std::vector<CensusAtom> census;
@@ -614,6 +704,8 @@ struct RuleCode {
 	uint32_t typeRow[WC2_PUD_TYPES] = {}; /// unit type -> census row address
 	std::vector<uint8_t> carrierTypes;    /// types of the three rows the evaluator subtracts
 	RuleDef defs[0x1F];
+	uint32_t spellState = 0;              /// the per-player spell-state array (0: start actions not read)
+	StartActions start[0x1F];
 };
 
 RuleCode g_code;
@@ -883,6 +975,7 @@ bool RuleShape(const RuleCode &c, int id, const HandlerAtoms &a, RuleDef &r)
 		case 0x07: // the dispatcher hands this id to the generic evaluator
 			if (c.handler[id] != c.handler[4]) return fail();
 			r.win.push_back(MakeTerm(TermKind::Eliminated, WhoOthers()));
+			r.genericWin = true;
 			break;
 		case 0x08: case 0x1E: // a fixed slot has none of the row (0x1E: and the hero lives)
 			if (C.size() != 1 || ab.size() != 1 || C[0].imm != 0) return fail();
@@ -1028,9 +1121,385 @@ bool RuleShape(const RuleCode &c, int id, const HandlerAtoms &a, RuleDef &r)
 	return true;
 }
 
+// ---- start actions -------------------------------------------------------------------------------
+//
+// Before it stores the handler of a rule id the dispatcher performs the mission's start actions. Two
+// kinds are read here, again as operands of the user's own code: `or dword [state + player*4], mask`
+// (spells the player holds from the start) and calls of the type-conversion routine with four pushed
+// arguments (slot, from, to, flag). Three more forms are read the same way: a loop over a slot's unit
+// list that sets or clears the "can be taken over" mark of one unit type, a loop over the list heads
+// that sets the hit points of one unit type, and the pair of byte stores that makes the local player
+// and one slot enemies. No mask, slot, unit type or amount of a mission is written in this file.
+
+/// The spell-state array: the allow installer seeds it with a constant for every player, in the loop
+/// right behind the three table loads (`mov dword [eax + disp], imm` with eax running down to the
+/// bound of the closing `cmp eax, imm8`). `off` is the file offset behind the allow signature.
+/// Returns 0 unless exactly one array is seeded with a constant other than zero.
+uint32_t FindSpellStateBase(const std::string &d, size_t off)
+{
+	uint32_t seeded = 0;
+	int count = 0;
+	uint32_t va = 0;
+	for (int n = 0; n < 16; ++n) {
+		X86Ins i;
+		if (!x86Decode(d, off, va, i)) {
+			return 0;
+		}
+		if (i.op == 0xC7 && i.hasModrm && i.mod == 2 && i.rm == 0 && i.reg == 0 && i.imm != 0) {
+			seeded = i.disp;
+			++count;
+		} else if (i.op == 0x83 && i.hasModrm && i.mod == 3 && i.reg == 7 && i.rm == 0 && !i.p66) {
+			const int32_t bound = (int8_t) i.imm;
+			return count == 1 && bound == -4 * PlayerMax ? seeded + (uint32_t) bound : 0;
+		}
+		off += (size_t) i.len;
+		va += (uint32_t) i.len;
+	}
+	return 0;
+}
+
+struct StartScan {
+	uint32_t loaded[8] = {};      /// register -> the byte global it was last loaded from (movzx), or 0
+	int shift[8] = {};            /// ... and by how many bits it was shifted left since
+	std::vector<int> pending;     /// pushed arguments: a constant, -1 the local player, -2 anything else
+	uint32_t localPlayer = 0;     /// the byte global that indexes the grants
+	uint32_t listBase = 0;        /// the per-slot unit list heads (0: the unit loops are not read)
+	int unit[8] = {-1, -1, -1, -1, -1, -1, -1, -1}; /// register -> slot whose list it walks, -2 the
+	                              /// slot of the list head loop, -1 not a unit
+	bool immKnown[8] = {};        /// register holds a constant ...
+	uint32_t imm[8] = {};         /// ... this one
+	int headReg = -1;             /// register that walks the list heads
+	int type = -1;                /// unit type the loop compares
+	std::vector<size_t> open;     /// unit actions of the list head loop that wait for its bound
+	bool hasRow = false, hasCol = false; /// the two stores of a stance change ...
+	uint32_t row = 0, col = 0;    /// ... and their addresses
+	bool bad = false;
+
+	/// A call returned: the scratch registers hold something else.
+	void afterCall()
+	{
+		memset(loaded, 0, sizeof(loaded));
+		memset(shift, 0, sizeof(shift));
+		for (int r = 0; r < 3; ++r) {
+			unit[r] = -1;
+			immKnown[r] = false;
+		}
+	}
+	/// The block of a rule id (or a called routine) ended: half an action is no action.
+	void endOfBlock()
+	{
+		if (!open.empty() || hasRow || hasCol) {
+			bad = true;
+		}
+	}
+};
+
+struct ConvertCall {
+	int id;
+	uint32_t target;
+	StartConvert c;
+};
+
+/// One instruction of the dispatcher, or of a routine it calls for the id.
+void ScanStartIns(const X86Ins &i, uint32_t state, int id, StartScan &s, StartActions &out,
+                  std::vector<ConvertCall> &calls)
+{
+	uint32_t addr = 0;
+	int index = 0, scale = 0;
+	int d8 = 0;
+	// ---- the unit loops: writes into the record of a unit of a slot's list
+	if (s.listBase != 0 && i.hasModrm && i.op != 0x0F && i.memBased(d8) && s.unit[i.rm] != -1) {
+		if (i.op == 0x80 && i.reg == 7 && d8 == UnitRecType) { // cmp byte [unit + type], imm
+			s.type = (int) i.imm;
+			return;
+		}
+		const bool flagOp = i.p66 && (i.op == 0x09 || i.op == 0x21); // or / and word [unit + d8], reg
+		const bool store = i.p66 && i.op == 0x89;                    // mov word [unit + d8], reg
+		if (flagOp || store) {
+			StartUnit u;
+			u.slot = std::max(s.unit[i.rm], 0);
+			u.slots = s.unit[i.rm] >= 0 ? 1 : 0;
+			u.type = s.type;
+			const uint32_t v = s.imm[i.reg] & 0xFFFF;
+			bool fits = s.immKnown[i.reg] && s.type >= 0;
+			if (flagOp) {
+				// Only the mark, and only for the units of one fixed slot.
+				fits = fits && d8 == UnitRecFlags && u.slots == 1
+				    && v == (i.op == 0x09 ? UnitRecTakeOver : (~UnitRecTakeOver & 0xFFFF));
+				u.what = i.op == 0x09 ? StartUnit::MarkSet : StartUnit::MarkClear;
+			} else {
+				fits = fits && d8 == UnitRecHitPoints && v != 0;
+				u.what = StartUnit::HitPoints;
+				u.value = (int) v;
+			}
+			if (!fits) {
+				s.bad = true;
+				return;
+			}
+			if (u.slots == 0) {
+				s.open.push_back(out.units.size());
+			}
+			out.units.push_back(u);
+			return;
+		}
+		// Any other write into a unit of the list is a start action this reader does not know.
+		const bool write = i.op == 0x88 || i.op == 0x89 || i.op == 0xC6 || i.op == 0xC7
+		                || ((i.op == 0x80 || i.op == 0x81 || i.op == 0x83) && i.reg != 7)
+		                || (i.op < 0x38 && (i.op & 7) < 2) || i.op == 0xFE || (i.op == 0xFF && i.reg < 2);
+		if (write) {
+			s.bad = true;
+			return;
+		}
+	}
+	if (s.listBase != 0 && s.headReg >= 0 && i.op == 0x81 && i.hasModrm && i.mod == 3 && i.reg == 7
+	    && i.rm == s.headReg && !i.p66) { // cmp head, bound: the slots the list head loop covers
+		const uint32_t span = i.imm - s.listBase;
+		if (span == 0 || span % 4 != 0 || span / 4 > (uint32_t) PlayerMax) {
+			s.bad = true;
+			return;
+		}
+		for (size_t k : s.open) {
+			out.units[k].slots = (int)(span / 4);
+		}
+		s.open.clear();
+		return;
+	}
+	// ---- the stance change: mov byte [P*16 + a], 0 and mov byte [P + b], 0 are the two cells
+	// [P][slot] and [slot][P] of one 16 x 16 byte matrix, so b - a = 15 * slot.
+	if (i.op == 0xC6 && i.hasModrm && i.mod == 2 && i.reg == 0 && i.rm != 4 && s.loaded[i.rm] != 0) {
+		const int sh = s.shift[i.rm];
+		if ((s.localPlayer != 0 && s.localPlayer != s.loaded[i.rm]) || i.imm != 0 || (sh != 0 && sh != 4)
+		    || (sh == 4 ? s.hasRow : s.hasCol)) {
+			s.bad = true;
+			return;
+		}
+		s.localPlayer = s.loaded[i.rm];
+		(sh == 4 ? s.hasRow : s.hasCol) = true;
+		(sh == 4 ? s.row : s.col) = i.disp;
+		if (s.hasRow && s.hasCol) {
+			const uint32_t span = s.col - s.row;
+			if (s.col < s.row || span % 15 != 0 || span / 15 >= (uint32_t) PlayerMax) {
+				s.bad = true;
+				return;
+			}
+			out.enemies.push_back((int)(span / 15));
+			s.hasRow = s.hasCol = false;
+		}
+		return;
+	}
+	if (i.op == 0xC1 && i.hasModrm && i.mod == 3 && i.reg == 4) { // shl reg, imm
+		s.shift[i.rm] += (int) i.imm;
+		return;
+	}
+	if ((i.op == 0x81 || i.op == 0x83) && i.hasModrm && i.reg == 1 && !i.p66) { // or dword [..], imm
+		const uint32_t mask = i.op == 0x83 ? (uint32_t)(int32_t)(int8_t) i.imm : i.imm;
+		if (i.memIndexed(index, scale, addr) && scale == 2 && addr == state) {
+			// The index has to be the local player's slot: one and the same global for every grant.
+			if (s.loaded[index] == 0 || (s.localPlayer != 0 && s.localPlayer != s.loaded[index])) {
+				s.bad = true;
+				return;
+			}
+			s.localPlayer = s.loaded[index];
+			out.grants.push_back({-1, mask});
+		} else if (i.memAbs(addr) && addr >= state && addr < state + 4 * PlayerMax && (addr - state) % 4 == 0) {
+			out.grants.push_back({(int)((addr - state) / 4), mask});
+		}
+		return;
+	}
+	if (i.op == 0x0F && i.op2 == 0xB6 && i.hasModrm && i.memAbs(addr)) { // movzx reg, byte [global]
+		s.loaded[i.reg] = addr;
+		s.shift[i.reg] = 0;
+		s.unit[i.reg] = -1;
+		s.immKnown[i.reg] = false;
+		return;
+	}
+	if (i.op == 0x6A) {
+		s.pending.push_back((int) i.imm);
+		return;
+	}
+	if (i.op >= 0x50 && i.op <= 0x57) {
+		s.pending.push_back(s.loaded[i.op - 0x50] != 0 ? -1 : -2);
+		return;
+	}
+	if (i.op == 0xE8) {
+		if (s.pending.size() == 4) { // pushed last to first: flag, to, from, slot
+			calls.push_back({id, i.target, {s.pending[3], s.pending[2], s.pending[1], s.pending[0]}});
+		}
+		s.pending.clear();
+		s.afterCall();
+		return;
+	}
+	if (i.hasTarget || i.op == 0xC3) {
+		s.pending.clear();
+		return;
+	}
+	if (i.op >= 0xB8 && i.op <= 0xBF) { // mov reg, imm
+		const int r = i.op - 0xB8;
+		s.loaded[r] = 0;
+		s.unit[r] = -1;
+		s.immKnown[r] = true;
+		s.imm[r] = i.imm;
+		if (s.listBase != 0 && i.imm == s.listBase) {
+			s.headReg = r;
+		} else if (s.headReg == r) {
+			s.headReg = -1;
+		}
+	} else if ((i.op == 0x8B || i.op == 0x89) && i.hasModrm && i.mod == 3 && !i.p66) { // mov reg, reg
+		const int to = i.op == 0x8B ? i.reg : i.rm;
+		const int from = i.op == 0x8B ? i.rm : i.reg;
+		s.loaded[to] = s.loaded[from];
+		s.shift[to] = s.shift[from];
+		s.unit[to] = s.unit[from];
+		s.immKnown[to] = s.immKnown[from];
+		s.imm[to] = s.imm[from];
+		if (s.headReg == to) {
+			s.headReg = -1;
+		}
+	} else if ((i.op == 0x8B || i.op == 0x8A || i.op == 0xA0 || i.op == 0xA1) && i.op != 0x0F) {
+		const int r = i.hasModrm ? i.reg : 0;
+		s.loaded[r] = 0;
+		s.immKnown[r] = false;
+		if (s.headReg == r) {
+			s.headReg = -1;
+		}
+		// The head of a slot's unit list, the head the list head loop stands on, or the next
+		// unit of the list the register already walks.
+		const bool wide = i.op == 0x8B || i.op == 0xA1;
+		if (wide && s.listBase != 0 && i.memAbs(addr) && addr >= s.listBase
+		    && addr < s.listBase + 4 * PlayerMax && (addr - s.listBase) % 4 == 0) {
+			s.unit[r] = (int)((addr - s.listBase) / 4);
+			s.type = -1;
+		} else if (wide && i.hasModrm && i.mod == 0 && i.rm != 4 && i.rm != 5 && i.rm == s.headReg) {
+			s.unit[r] = -2;
+			s.type = -1;
+		} else if (!(wide && i.hasModrm && i.mod == 1 && i.rm == r && s.unit[r] != -1)) {
+			s.unit[r] = -1;
+		}
+	}
+}
+
+/// Collect the start actions of every rule id from the decoded dispatcher. A routine the dispatcher
+/// calls without arguments inside the block of an id is read one level deep. False (and nothing kept)
+/// when a grant is not indexed by the local player or the conversion calls do not agree on one routine.
+bool ReadStartActions(const std::string &d, const PeImage &pe, const std::vector<X86Ins> &dispatcher,
+                      uint32_t state, uint32_t listBase, StartActions out[0x1F])
+{
+	StartScan s;
+	s.listBase = listBase;
+	std::vector<ConvertCall> calls;
+	uint32_t convertFn = 0;
+	int cur = -1;
+	for (const X86Ins &i : dispatcher) {
+		if (i.p66 && i.op == 0x85 && i.mod == 3 && i.reg == 1 && i.rm == 1) { // test cx,cx
+			s.endOfBlock();
+			cur = 0;
+			continue;
+		}
+		if (i.p66 && i.op == 0x83 && i.mod == 3 && i.reg == 7 && i.rm == 1) { // cmp cx,imm8
+			s.endOfBlock();
+			cur = (int) i.imm;
+			continue;
+		}
+		if (cur < 0 || cur >= 0x1F) {
+			continue;
+		}
+		if (i.op == 0xE8 && s.pending.empty() && InText(pe, i.target)) {
+			std::vector<X86Ins> body;
+			if (x86Function(d, pe, i.target, body)) {
+				StartScan inner;
+				inner.localPlayer = s.localPlayer;
+				inner.listBase = listBase;
+				for (const X86Ins &b : body) {
+					ScanStartIns(b, state, cur, inner, out[cur], calls);
+				}
+				inner.endOfBlock();
+				s.localPlayer = inner.localPlayer;
+				s.bad = s.bad || inner.bad;
+			}
+			s.afterCall();
+			continue;
+		}
+		const size_t before = calls.size();
+		ScanStartIns(i, state, cur, s, out[cur], calls);
+		if (calls.size() > before) {
+			// The conversion routine is the one the dispatcher itself calls with four arguments.
+			if (convertFn != 0 && convertFn != calls.back().target) {
+				s.bad = true;
+			}
+			convertFn = calls.back().target;
+		}
+	}
+	for (const ConvertCall &c : calls) {
+		if (c.target != convertFn) {
+			continue; // a four-argument call of something else inside a called routine
+		}
+		const StartConvert &v = c.c;
+		if (v.slot < -1 || v.slot >= PlayerMax || v.from < 0 || v.from >= WC2_PUD_TYPES
+		    || v.to < 0 || v.to >= WC2_PUD_TYPES || v.keep < 0) {
+			s.bad = true;
+			break;
+		}
+		out[c.id].converts.push_back(v);
+	}
+	s.endOfBlock();
+	for (int id = 0; id < 0x1F; ++id) {
+		for (const StartUnit &u : out[id].units) {
+			if (u.type < 0 || u.type >= WC2_PUD_TYPES || u.slots < 1 || u.slot + u.slots > PlayerMax) {
+				s.bad = true;
+			}
+		}
+	}
+	if (s.bad) {
+		for (int id = 0; id < 0x1F; ++id) {
+			out[id] = StartActions();
+		}
+		return false;
+	}
+	return true;
+}
+
+/// One line per start action: "<id> grant <P|slot> <mask>" / "<id> convert <P|slot> <from> <to> <flag>" /
+/// "<id> mark <slot> <type> <0|1>" / "<id> hitpoints <first slot>-<last slot> <type> <amount>" /
+/// "<id> enemy P <slot>".
+std::string DescribeStart(const StartActions start[0x1F], int only = -1)
+{
+	std::string s;
+	char line[96];
+	for (int id = 0; id < 0x1F; ++id) {
+		if (only >= 0 && id != only) {
+			continue;
+		}
+		for (const StartGrant &g : start[id].grants) {
+			const std::string who = g.slot < 0 ? "P" : std::to_string(g.slot);
+			snprintf(line, sizeof(line), "%02x grant %s %08x\n", id, who.c_str(), (unsigned) g.mask);
+			s += line;
+		}
+		for (const StartConvert &c : start[id].converts) {
+			const std::string who = c.slot < 0 ? "P" : std::to_string(c.slot);
+			snprintf(line, sizeof(line), "%02x convert %s %d %d %d\n", id, who.c_str(), c.from, c.to, c.keep);
+			s += line;
+		}
+		for (const StartUnit &u : start[id].units) {
+			if (u.what == StartUnit::HitPoints) {
+				snprintf(line, sizeof(line), "%02x hitpoints %d-%d %d %d\n", id, u.slot, u.slot + u.slots - 1,
+				         u.type, u.value);
+			} else {
+				snprintf(line, sizeof(line), "%02x mark %d %d %d\n", id, u.slot, u.type,
+				         u.what == StartUnit::MarkSet ? 1 : 0);
+			}
+			s += line;
+		}
+		for (int slot : start[id].enemies) {
+			snprintf(line, sizeof(line), "%02x enemy P %d\n", id, slot);
+			s += line;
+		}
+	}
+	return s;
+}
+
 /// Read the dispatcher, the generic evaluator, the row table and every handler. `vicHit` is the file
 /// offset of the victory-loader signature. Leaves g_code.valid false on any mismatch.
-void ReadRuleCode(const std::string &d, const PeImage &pe, size_t vicHit)
+void ReadRuleCode(const std::string &d, const PeImage &pe, size_t vicHit, size_t allowEnd)
 {
 	RuleCode &c = g_code;
 	c = RuleCode();
@@ -1058,11 +1527,12 @@ void ReadRuleCode(const std::string &d, const PeImage &pe, size_t vicHit)
 	}
 	const uint32_t dispVa = pe.imageBase + pe.text->va + (uint32_t)(dispHit - pe.text->raw);
 	std::vector<X86Ins> ins;
-	if (!x86Function(d, pe, dispVa, ins)) {
+	std::vector<X86Ins> dispatcher;
+	if (!x86Function(d, pe, dispVa, dispatcher)) {
 		return;
 	}
 	int cur = -1;
-	for (const X86Ins &i : ins) {
+	for (const X86Ins &i : dispatcher) {
 		if (i.p66 && i.op == 0x85 && i.mod == 3 && i.reg == 1 && i.rm == 1) { // test cx,cx
 			cur = 0;
 		} else if (i.p66 && i.op == 0x83 && i.mod == 3 && i.reg == 7 && i.rm == 1) { // cmp cx,imm8
@@ -1076,7 +1546,6 @@ void ReadRuleCode(const std::string &d, const PeImage &pe, size_t vicHit)
 			return;
 		}
 	}
-
 	// Rule 4's handler is a bare jump to the generic evaluator.
 	if (!x86Function(d, pe, c.handler[4], ins) || ins.size() != 1 || ins[0].op != 0xE9) {
 		return;
@@ -1138,6 +1607,13 @@ void ReadRuleCode(const std::string &d, const PeImage &pe, size_t vicHit)
 	}
 	if (listRefs != 1) {
 		return;
+	}
+
+	// Start actions: independent of the rule shapes below, and off as a whole when the spell-state
+	// array is not found or an action does not fit.
+	c.spellState = FindSpellStateBase(d, allowEnd);
+	if (c.spellState != 0 && !ReadStartActions(d, pe, dispatcher, c.spellState, c.listBase, c.start)) {
+		c.spellState = 0;
 	}
 
 	int shaped = 0;
@@ -1225,7 +1701,7 @@ bool EnsureRuleTables()
 	g_tablesValid = true;
 	// P1: the victory rules. A failure here leaves the tables above in use and every mission on the
 	// rules it has today.
-	ReadRuleCode(d, pe, vicHit);
+	ReadRuleCode(d, pe, vicHit, allowHit + sizeof(allowPat));
 	return true;
 }
 
@@ -1331,6 +1807,7 @@ struct LiveRule {
 	int regionW = 0, regionH = 0;
 	unsigned long lastCycle = 0;
 	int lastOutcome = 0;
+	bool arrivalPossible = false;                /// the generic arrival rule could once still be met
 };
 
 LiveRule g_live;
@@ -1425,6 +1902,45 @@ bool Eliminated(int p)
 		}
 	}
 	return true;
+}
+
+/// The generic "destroy all" rule over the game's slots 0..7 (MissionGenericWinHolds).
+bool GenericWinHolds()
+{
+	if (!ThisPlayer) {
+		return false;
+	}
+	const int self = ThisPlayer->Index;
+	int ownUnits = 0;
+	bool ownProducing = false;
+	for (const CUnit *u : ThisPlayer->GetUnits()) {
+		if (!u->IsAlive() || u->Type->BoolFlag[WALL_INDEX].value) {
+			continue;
+		}
+		ownUnits += u->Type->Building ? 0 : 1;
+		ownProducing = ownProducing || u->CurrentAction() == UnitAction::Train
+		            || u->CurrentAction() == UnitAction::Built;
+	}
+	MissionSlotCensus slots[WC2_RULE_SLOTS];
+	for (int p = 0; p < WC2_RULE_SLOTS; ++p) {
+		MissionSlotCensus &slot = slots[p];
+		const bool rescue = Players[p].Type == PlayerTypes::PlayerRescuePassive
+		                 || Players[p].Type == PlayerTypes::PlayerRescueActive;
+		slot.tested = MissionSlotTested(p == self, Players[p].IsEnemy(*ThisPlayer) || ThisPlayer->IsEnemy(Players[p]),
+		                                rescue);
+		for (const CUnit *u : Players[p].GetUnits()) {
+			if (!u->IsAlive() || u->Type->BoolFlag[WALL_INDEX].value) {
+				continue;
+			}
+			if (u->Type->Building) {
+				++slot.buildings;
+			} else {
+				++slot.units;
+				slot.carriers += TypeIn(u->Type, g_code.carrierTypes) ? 1 : 0;
+			}
+		}
+	}
+	return MissionGenericWinHolds(ownUnits, ownProducing, slots, WC2_RULE_SLOTS);
 }
 
 /// The Circle of Power units of the map (PUD unit type 100 in wc2pud::UnitScriptNames).
@@ -1572,7 +2088,7 @@ int EvaluateRule()
 			return 0;
 		}
 	}
-	if (AllHold(g_live.def.win)) {
+	if (g_live.def.genericWin ? GenericWinHolds() : AllHold(g_live.def.win)) {
 		return 2;
 	}
 	if (!g_live.def.winAlt.empty() && AllHold(g_live.def.winAlt)) {
@@ -1720,6 +2236,22 @@ int CclMissionRuleOutcome(lua_State *l)
 	return 1;
 }
 
+/// One of the units counted on the circle is of a hero type ("hero" is the unit type's own flag).
+bool HeroArrived()
+{
+	const int flag = UnitTypeVar.BoolFlagNameLookup["hero"];
+	if (flag == -1) {
+		return false;
+	}
+	for (const int id : g_live.arrived) {
+		const CUnit &u = UnitManager->GetSlotUnit(id);
+		if (u.Type != nullptr && u.Type->BoolFlag[flag].value) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /// Lua: MissionCircleArrivals([needHero]) -> how many of the player's units taken over from a
 /// rescue slot have stood on a Circle of Power (counted once each, as Arrivals does). With needHero
 /// the count is 0 until one of them is of a hero type (parameter bit 0x1000 of the generic rule,
@@ -1731,27 +2263,98 @@ int CclMissionCircleArrivals(lua_State *l)
 	RuleTerm any;
 	const int n = Arrivals(any);
 	if (needHero) {
-		const int flag = UnitTypeVar.BoolFlagNameLookup["hero"];
-		bool hero = false;
-		if (flag != -1) {
-			for (const int id : g_live.arrived) {
-				const CUnit &u = UnitManager->GetSlotUnit(id);
-				if (u.Type != nullptr && u.Type->BoolFlag[flag].value) {
-					hero = true;
-					break;
-				}
-			}
-		}
-		lua_pushnumber(l, hero ? n : 0);
+		lua_pushnumber(l, HeroArrived() ? n : 0);
 		return 1;
 	}
 	lua_pushnumber(l, n);
 	return 1;
 }
 
+/// Lua: MissionCircleLost(param) -> true when the generic arrival rule (ids 0x200 and 0x04) can no
+/// longer be met: the units already counted on the circle plus the living units that still carry
+/// the "taken over from a rescue slot" mark are fewer than the parameter asks for, or the parameter
+/// asks for a hero and none of them is one (the original's evaluator, VA 0x4DDA00, with its two
+/// counters of marked living units). A marked unit here is a unit of a rescue slot that can still
+/// be taken over, or a unit the player took over that has not been counted yet.
+/// Never true before the rule could be met once: a map without such units keeps its other rules.
+int CclMissionCircleLost(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const int param = (int) LuaToNumber(l, 1);
+	RuleTerm any;
+	const int arrived = Arrivals(any);
+	const int flag = UnitTypeVar.BoolFlagNameLookup["hero"];
+	int marked = 0;
+	bool heroMarked = false;
+	for (int p = 0; p < PlayerMax; ++p) {
+		const bool own = &Players[p] == ThisPlayer;
+		for (const CUnit *u : Players[p].GetUnits()) {
+			if (!u->IsAlive() || u->Type == nullptr) {
+				continue;
+			}
+			if (own) {
+				if (u->RescuedFrom == nullptr
+				    || std::find(g_live.arrived.begin(), g_live.arrived.end(), UnitNumber(*u)) != g_live.arrived.end()) {
+					continue;
+				}
+			} else if (!UnitCanBeTakenOver(u->TakeOver, Players[p].Type)) {
+				continue;
+			}
+			++marked;
+			heroMarked = heroMarked || (flag != -1 && u->Type->BoolFlag[flag].value);
+		}
+	}
+	const int outcome = MissionArrivalOutcome(param, arrived, HeroArrived(), marked, heroMarked);
+	if (outcome != 1) {
+		g_live.arrivalPossible = true;
+	}
+	lua_pushboolean(l, outcome == 1 && g_live.arrivalPossible);
+	return 1;
+}
+
+/// Lua: MissionRuleState({gate = <bool>, arrived = {<unit number>, ...}}) - a saved game hands back
+/// what the running rule had counted: the units already counted on the circle (they stay counted
+/// after leaving it or dying) and the rule's opened gate. Read after the save's header has
+/// installed the mission's rule.
+int CclMissionRuleState(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	if (!lua_istable(l, 1)) {
+		LuaError(l, "incorrect argument");
+	}
+	lua_getfield(l, 1, "gate");
+	g_live.gateOpen = lua_toboolean(l, -1) != 0;
+	lua_pop(l, 1);
+	g_live.arrived.clear();
+	lua_getfield(l, 1, "arrived");
+	if (lua_istable(l, -1)) {
+		const int n = lua_rawlen(l, -1);
+		for (int i = 1; i <= n; ++i) {
+			lua_rawgeti(l, -1, i);
+			const int id = (int) lua_tonumber(l, -1);
+			lua_pop(l, 1);
+			if (id >= 0 && std::find(g_live.arrived.begin(), g_live.arrived.end(), id) == g_live.arrived.end()) {
+				g_live.arrived.push_back(id);
+			}
+		}
+	}
+	lua_pop(l, 1);
+	return 0;
+}
+
+/// The start actions of the running mission's rule id, or null.
+const StartActions *StartOfRunningMission()
+{
+	if (!g_rules.valid || !g_code.valid || g_code.spellState == 0 || g_rules.victoryId >= 0x1F) {
+		return nullptr;
+	}
+	return &g_code.start[g_rules.victoryId];
+}
+
 /// Lua: GetMissionRules() -> {index=, victory=, param=, unitAllow=, upgradeAllow=, rule=, gate=,
-/// terms=} or nil. `rule` is true when the mission's own victory rule was read and installed;
-/// `terms` lists it (see DescribeRule).
+/// terms=, start=, takeover=} or nil. `rule` is true when the mission's own victory rule was read and installed;
+/// `terms` lists it (see DescribeRule); `start` lists the start actions read for the rule id (see
+/// DescribeStart), applied or not.
 int CclGetMissionRules(lua_State *l)
 {
 	LuaCheckArgs(l, 0);
@@ -1783,6 +2386,26 @@ int CclGetMissionRules(lua_State *l)
 	lua_rawset(l, -3);
 	lua_pushstring(l, "terms");
 	lua_pushstring(l, DescribeRule().c_str());
+	lua_rawset(l, -3);
+	lua_pushstring(l, "start");
+	lua_pushstring(l, StartOfRunningMission() ? DescribeStart(g_code.start, g_rules.victoryId).c_str() : "");
+	lua_rawset(l, -3);
+	// One line per slot that has a unit whose "can be taken over" mark a start action changed.
+	std::string marks;
+	for (int p = 0; p < PlayerMax; ++p) {
+		int never = 0, always = 0;
+		for (const CUnit *u : Players[p].GetUnits()) {
+			never += u->TakeOver == 1;
+			always += u->TakeOver == 2;
+		}
+		if (never || always) {
+			char line[64];
+			snprintf(line, sizeof(line), "%d never=%d always=%d\n", p, never, always);
+			marks += line;
+		}
+	}
+	lua_pushstring(l, "takeover");
+	lua_pushstring(l, marks.c_str());
 	lua_rawset(l, -3);
 	return 1;
 }
@@ -1854,6 +2477,195 @@ void ApplyMissionAllow()
 	           g_rules.index, units, upgrades);
 }
 
+bool MissionGenericWinHolds(int ownUnits, bool ownProducing, const MissionSlotCensus *slots, int count)
+{
+	if (ownUnits <= 0 || ownProducing) {
+		return false;
+	}
+	for (int i = 0; i < count; ++i) {
+		if (slots[i].tested && (slots[i].buildings != 0 || slots[i].units - slots[i].carriers != 0)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+std::vector<std::string> MissionSpellGrantUpgrades(uint32_t mask, uint32_t *unknown)
+{
+	std::vector<std::string> out;
+	uint32_t rest = 0;
+	for (int bit = 0; bit < 32; ++bit) {
+		if (!((mask >> bit) & 1u)) {
+			continue;
+		}
+		const SpellBit &b = SpellStateBits[bit];
+		if (b.ident == nullptr || (b.with >= 0 && !((mask >> b.with) & 1u))) {
+			rest |= 1u << bit;
+			continue;
+		}
+		out.push_back(b.ident);
+	}
+	if (unknown) {
+		*unknown = rest;
+	}
+	return out;
+}
+
+void ApplyMissionStart()
+{
+	const StartActions *start = StartOfRunningMission();
+	if (!start) {
+		return;
+	}
+	int granted = 0;
+	for (const StartGrant &g : start->grants) {
+		CPlayer *player = g.slot < 0 ? ThisPlayer : &Players[g.slot];
+		if (!player) {
+			continue;
+		}
+		uint32_t unknown = 0;
+		for (const std::string &ident : MissionSpellGrantUpgrades(g.mask, &unknown)) {
+			const int id = UpgradeIdByIdent(ident);
+			// A game that already holds the spell (a default of the scripts, or state carried by a
+			// save) is left as it is.
+			if (id == -1 || UpgradeIdAllowed(*player, id) == 'R') {
+				continue;
+			}
+			UpgradeAcquire(*player, AllUpgrades[id].get());
+			++granted;
+		}
+		// The second caster's upgrade, by the race of the player that gets it. Its conversion of the
+		// knights / ogres is the one the rule also asks for by itself.
+		if ((unknown >> SpellStateCasterBit) & 1u) {
+			unknown &= ~(1u << SpellStateCasterBit);
+			const bool orc = player->Race >= 0 && player->Race < MAX_RACES && PlayerRaces.Name[player->Race] == "orc";
+			const int id = UpgradeIdByIdent(orc ? SpellStateCaster.orc : SpellStateCaster.human);
+			if (id != -1 && UpgradeIdAllowed(*player, id) != 'R') {
+				UpgradeAcquire(*player, AllUpgrades[id].get());
+				++granted;
+			}
+		}
+		if (unknown) {
+			DebugPrint("ApplyMissionStart: spell-state bits %08x of rule %02x have no known meaning, not applied\n",
+			           unknown, g_rules.victoryId);
+		}
+	}
+	// The type conversions: every unit of the slot that has the old type gets the new one in place,
+	// and a unit of the old type in training comes out as the new one - the engine's own conversion,
+	// the one an upgrade with "convert-to" performs. A second call finds no unit of the old type.
+	int converted = 0;
+	ResolveRuleTypes();
+	for (const StartConvert &c : start->converts) {
+		CPlayer *player = c.slot < 0 ? ThisPlayer : &Players[c.slot];
+		const CUnitType *from = g_live.type[c.from];
+		CUnitType *to = const_cast<CUnitType *>(g_live.type[c.to]);
+		if (!player || !from || !to || from == to) {
+			DebugPrint("ApplyMissionStart: conversion %d -> %d of rule %02x has no unit type here, not applied\n",
+			           c.from, c.to, g_rules.victoryId);
+			continue;
+		}
+		// With 0 as the last argument a unit that becomes the armed worker of either race can no
+		// longer be taken over.
+		const bool unmark = c.keep == 0 && (to->Ident == "unit-attack-peasant" || to->Ident == "unit-attack-peon");
+		const std::vector<CUnit *> units = player->GetUnits();
+		for (CUnit *unit : units) {
+			if (!unit || !unit->IsAlive()) {
+				continue;
+			}
+			if (unit->Type == from) {
+				CommandTransformIntoType(*unit, *to);
+				if (unmark) {
+					unit->TakeOver = 1;
+				}
+				++converted;
+				continue;
+			}
+			for (auto &order : unit->Orders) {
+				if (order->Action == UnitAction::Train) {
+					COrder_Train &train = static_cast<COrder_Train &>(*order);
+					if (&train.GetUnitType() == from) {
+						train.ConvertUnitType(*unit, *to);
+					}
+				}
+			}
+		}
+	}
+	// The unit loops: the "can be taken over" mark of one unit type of a slot, or its hit points.
+	int written = 0;
+	for (const StartUnit &a : start->units) {
+		const CUnitType *type = g_live.type[a.type];
+		if (!type) {
+			DebugPrint("ApplyMissionStart: unit type %d of rule %02x has no unit type here, not applied\n",
+			           a.type, g_rules.victoryId);
+			continue;
+		}
+		for (int p = a.slot; p < a.slot + a.slots && p < PlayerMax; ++p) {
+			for (CUnit *unit : Players[p].GetUnits()) {
+				if (!unit || !unit->IsAlive() || unit->Type != type) {
+					continue;
+				}
+				if (a.what == StartUnit::HitPoints) {
+					// The original writes the unit's own value and leaves the type's maximum alone;
+					// here a value above the maximum would not survive the next clamp.
+					unit->Variable[HP_INDEX].Max = std::max(unit->Variable[HP_INDEX].Max, a.value);
+					unit->Variable[HP_INDEX].Value = a.value;
+				} else {
+					unit->TakeOver = a.what == StartUnit::MarkSet ? 2 : 1;
+					NoRescueCheck = false;
+				}
+				++written;
+			}
+		}
+	}
+	// The stance change: the local player and the slot are enemies from now on, both ways.
+	for (int slot : start->enemies) {
+		if (ThisPlayer && slot != ThisPlayer->Index) {
+			ThisPlayer->SetDiplomacyEnemyWith(Players[slot]);
+			Players[slot].SetDiplomacyEnemyWith(*ThisPlayer);
+		}
+	}
+	DebugPrint("ApplyMissionStart: mission %d rule %02x: %d spell upgrades granted, %d units converted, %d units written, %d stance changes\n",
+	           g_rules.index, g_rules.victoryId, granted, converted, written, (int) start->enemies.size());
+}
+
+std::string MissionStartActionsOfCode(const std::string &code, uint32_t va, uint32_t stateBase,
+                                      uint32_t listBase, uint32_t entry)
+{
+	// A one-section image over the given bytes; the decoder reads up to 16 bytes ahead.
+	const std::string d = code + std::string(16, '\xCC');
+	PeImage pe;
+	pe.imageBase = va;
+	PeSection s;
+	s.vsize = s.rawSize = (uint32_t) code.size();
+	pe.sections.push_back(s);
+	pe.text = &pe.sections[0];
+	std::vector<X86Ins> ins;
+	StartActions start[0x1F];
+	if (!x86Function(d, pe, entry ? entry : va, ins) || !ReadStartActions(d, pe, ins, stateBase, listBase, start)) {
+		return "";
+	}
+	return DescribeStart(start);
+}
+
+uint32_t MissionSpellStateBaseOfCode(const std::string &code)
+{
+	return FindSpellStateBase(code + std::string(16, '\xCC'), 0);
+}
+
+int MissionArrivalOutcome(int param, int arrived, bool heroArrived, int marked, bool heroMarked)
+{
+	// The arrival counter carries bit 0x1000 once a hero-class unit arrived and the parameter asks
+	// for one.
+	const int counted = arrived + ((heroArrived && (param & 0x1000)) ? 0x1000 : 0);
+	if (counted >= param) {
+		return 2;
+	}
+	if ((counted & 0xEFFF) + marked + ((heroMarked || (counted & 0x1000)) ? 0x1000 : 0) < param) {
+		return 1;
+	}
+	return 0;
+}
+
 const WC2MissionRules &CurrentMissionRules()
 {
 	return g_rules;
@@ -1882,6 +2694,30 @@ bool MissionAllowsDamage(const CUnit *attacker, const CUnit &target)
 	return attacker != nullptr && attacker->Type != nullptr && attacker->Type->Ident == "unit-white-mage";
 }
 
+std::string MissionRuleStateLine(const std::vector<int> &arrived, bool gateOpen)
+{
+	if (arrived.empty() && !gateOpen) {
+		return "";
+	}
+	// Guarded: a build without the function reads the file all the same.
+	std::string line = "if (MissionRuleState ~= nil) then MissionRuleState({gate = ";
+	line += gateOpen ? "true" : "false";
+	line += ", arrived = {";
+	for (size_t i = 0; i < arrived.size(); ++i) {
+		line += (i ? ", " : "") + std::to_string(arrived[i]);
+	}
+	line += "}}) end\n";
+	return line;
+}
+
+void SaveMissionRuleState(CFile &file)
+{
+	const std::string line = MissionRuleStateLine(g_live.arrived, g_live.gateOpen);
+	if (!line.empty()) {
+		file.printf("\n--- the mission rule's counts\n%s", line.c_str());
+	}
+}
+
 void ClearMissionRules()
 {
 	g_rules = WC2MissionRules();
@@ -1893,6 +2729,8 @@ void WC2MissionCclRegister()
 	lua_register(Lua, "GetMissionRules", CclGetMissionRules);
 	lua_register(Lua, "MissionRuleOutcome", CclMissionRuleOutcome);
 	lua_register(Lua, "MissionCircleArrivals", CclMissionCircleArrivals);
+	lua_register(Lua, "MissionCircleLost", CclMissionCircleLost);
+	lua_register(Lua, "MissionRuleState", CclMissionRuleState);
 }
 
 //@}

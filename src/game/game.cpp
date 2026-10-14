@@ -53,6 +53,7 @@
 #include "map.h"
 #include "minimap.h"
 #include "missile.h"
+#include "mods.h"
 #include "netconnect.h"
 #include "network.h"
 #include "online_service.h"
@@ -638,15 +639,8 @@ double GameCycleRate = 38.5;
 void SetGameSpeed(int speed)
 {
 	if (GameCycle == 0 || FastForwardCycle < GameCycle) {
-		// The original's scale, measured on the running client at five knob positions (cycle 652
-		// of the project journal): 0 % = 12.5, 25 % = 19.0, 50 % = 25.0, 75 % = 38.5 (its factory
-		// setting), 100 % = 76.8 game frames per second. Between the stops: a straight line (not
-		// measured).
-		static const double stops[5] = {12.5, 19.0, 25.0, 38.5, 76.8};
 		GameSpeedPercent = std::clamp(speed, 0, 100);
-		const int lower = std::min(GameSpeedPercent / 25, 3);
-		const double part = (GameSpeedPercent - lower * 25) / 25.0;
-		GameCycleRate = stops[lower] + (stops[lower + 1] - stops[lower]) * part;
+		GameCycleRate = GameSpeedCycleRate(GameSpeedPercent);
 		CyclesPerSecond = static_cast<int>(GameCycleRate + 0.5);
 		SetVideoSync();
 	}
@@ -957,6 +951,8 @@ void CreateGame(const fs::path &filename, CMap *map)
 		UpdateLoadingScreen();
 		// After ApplyUpgrades so the mission gate is the last word on what this level may build.
 		ApplyMissionAllow();
+		// The spells the mission's rule hands a player at the start (a loaded game carries them).
+		ApplyMissionStart();
 		UpdateLoadingScreen();
 	}
 	CclCommand("if (MapLoaded ~= nil) then MapLoaded() end");
@@ -1609,6 +1605,23 @@ static int CclSavedGameInfo(lua_State *l)
 			if (LuaLoadFile(fs::path(StratagusLibPath) / filename) == -1) {
 				ErrorPrint("Load failed: '%s'\n", filename.data());
 			}
+			// Likewise the map's own unit data and upgrade costs (a new game takes them in
+			// CreateGame): the stats the file names further down are only those that differed from
+			// the map's defaults at the time of saving, so the defaults must be the map's again
+			// before they are read. The file's first line has made the save's map the current one.
+			extern void ApplyMapUnitData(const fs::path &mapPath); // wc2data.cpp
+			if (CurrentNativePudBytes() == nullptr) {
+				ErrorPrint("Saved game: no map data in memory for '%s', unit data stays at the defaults\n",
+				           CurrentMapPath);
+			}
+			ApplyMapUnitData(CurrentMapPath);
+			InitUnitTypes(1);
+		} else if (value == "Format") {
+			// A file written by a later build, whose shape this one does not know, is refused.
+			const int format = LuaToNumber(l, -1);
+			if (!SavedGameFormatReadable(format)) {
+				LuaError(l, "Saved game format %d is newer than this build reads (%d)", format, SavedGameFormat);
+			}
 		} else if (value == "SyncHash") {
 			SyncHash = LuaToNumber(l, -1);
 		} else if (value == "SyncRandSeed") {
@@ -1618,6 +1631,43 @@ static int CclSavedGameInfo(lua_State *l)
 		}
 	}
 	return 0;
+}
+
+/**
+**  Whether the last saved game that was asked for could not be read.
+**
+**  @param l  Lua state.
+**
+**  @return   true: the file did not load and no game was started from it.
+*/
+static int CclLastLoadFailed(lua_State *l)
+{
+	LuaCheckArgs(l, 0);
+	extern bool LastLoadFailed; // loadgame.cpp
+	lua_pushboolean(l, LastLoadFailed);
+	return 1;
+}
+
+/**
+**  Whether a saved game's file is there to be read (the name as StartSavedGame takes it).
+**
+**  @param l  Lua state.
+*/
+static int CclSavedGameReadable(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	extern fs::path ExpandPath(const std::string &path); // savegame.cpp
+	const fs::path file = ExpandPath(std::string(LuaToString(l, 1)));
+	std::error_code ec;
+	bool there = fs::is_regular_file(file, ec) && !ec;
+	if (!there) {
+		// The file layer also reads "<name>.gz" under the plain name.
+		fs::path packed = file;
+		packed += ".gz";
+		there = fs::is_regular_file(packed, ec) && !ec;
+	}
+	lua_pushboolean(l, there);
+	return 1;
 }
 
 void LuaRegisterModules()
@@ -1654,6 +1704,8 @@ void LuaRegisterModules()
 	lua_register(Lua, "GetStratagusHomepage", CclGetStratagusHomepage);
 
 	lua_register(Lua, "SavedGameInfo", CclSavedGameInfo);
+	lua_register(Lua, "LastLoadFailed", CclLastLoadFailed);
+	lua_register(Lua, "SavedGameReadable", CclSavedGameReadable);
 
 	AiCclRegister();
 	AnimationCclRegister();
@@ -1664,6 +1716,7 @@ void LuaRegisterModules()
 	GroupCclRegister();
 	MapCclRegister();
 	MissileCclRegister();
+	ModsCclRegister();
 	NetworkCclRegister();
 	PathfinderCclRegister();
 	PlayerCclRegister();

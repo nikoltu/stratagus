@@ -40,6 +40,7 @@
 #include "game.h"
 #include "debug_bridge.h"
 #include "shaders.h"
+#include "frame_pace.h"
 #include "frame_profiler.h"
 #include "network.h"
 #include "online_service.h"
@@ -50,6 +51,7 @@
 #include "unit.h"
 #include "loadingscreen.h"
 #include "video.h"
+#include "hd_classic_hud.h"
 #include "widgets.h"
 
 #include <climits>
@@ -168,9 +170,11 @@ static int GetRefreshRate()
 */
 void SetVideoSync()
 {
-	int fps = GetRefreshRate();
-	int nativeFps = fps;
-	if (fps < CyclesPerSecond) {
+	const int nativeFps = GetRefreshRate();
+	// Presentation is capped (60 a second); the simulation runs from elapsed time and is not on
+	// this clock. --benchmark does not wait for the frame grid at all.
+	const int fps = framepace::targetFps(nativeFps, CyclesPerSecond);
+	if (nativeFps < CyclesPerSecond) {
 		fprintf(stdout, "WARNING: Game speed is faster than monitor refresh rate.\n");
 		FrameTicks = 1000.0 / CyclesPerSecond;
 		SDL_GL_SetSwapInterval(0); // disable vsync, so we can run faster than the refresh
@@ -1799,6 +1803,8 @@ void WaitEventsOneFrame()
 		return;
 	}
 
+	ApplyAudioFocus();
+
 	// Observe-only debug bridge: cheap throttled poll of the wdbg/ command channel.
 	DebugBridge_Poll();
 #ifdef __ANDROID__
@@ -1808,6 +1814,17 @@ void WaitEventsOneFrame()
 	Uint32 ticks = SDL_GetTicks();
 	if (ticks > NextFrameTicks) { // We are too slow :(
 		++SlowFrameCounter;
+		// A frame that is a whole period late is a stall; one that is a millisecond late is the
+		// beat between the timer grid and the display. Counted apart, and named once a second.
+		if (ticks > NextFrameTicks + FrameTicks) {
+			static Uint32 lastLongFrameLine = 0;
+			++LongFrameCounter;
+			if (lastLongFrameLine == 0 || ticks - lastLongFrameLine >= 1000) {
+				lastLongFrameLine = ticks;
+				ErrorPrint("LONG frame %u ms late at cycle %lu\n",
+				           (unsigned) (ticks - (Uint32) NextFrameTicks), GameCycle);
+			}
+		}
 	}
 
 	InputMouseTimeout(*GetCallbacks(), ticks);
@@ -2041,8 +2058,8 @@ void GreyFrameUnderMenu(bool menuUp, bool live)
 		lastRead = now;
 		for (size_t i = 0; i < px.size(); i += 4) {
 			// bytes are R, G, B, A in this format
-			const unsigned v = (px[i] * 13933u + px[i + 1] * 46871u + px[i + 2] * 4732u + 32768u) >> 16;
-			px[i] = px[i + 1] = px[i + 2] = static_cast<uint8_t>(v);
+			px[i] = px[i + 1] = px[i + 2] =
+				static_cast<uint8_t>(classichud::greyOf(px[i], px[i + 1], px[i + 2]));
 			px[i + 3] = 255;
 		}
 		if (!grey) {

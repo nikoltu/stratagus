@@ -34,6 +34,8 @@
 
 #include "vec2i.h"
 
+#include <vector>
+
 /*----------------------------------------------------------------------------
 --  Declarations
 ----------------------------------------------------------------------------*/
@@ -45,6 +47,7 @@ class SpellType;
 class CUnitType;
 class CUpgrade;
 enum class EDiplomacy;
+enum class UnitAction : char;
 
 enum class EFlushMode
 {
@@ -104,6 +107,8 @@ extern void CommandResourceLoc(CUnit &unit, const Vec2i &pos, EFlushMode flush);
 extern void CommandResource(CUnit &unit, CUnit &dest, EFlushMode flush);
 /// Prepare command return
 extern void CommandReturnGoods(CUnit &unit, CUnit *depot, EFlushMode flush);
+/// Is a train order refused (training queue off and a production order held)?
+extern bool TrainOrderRefused(bool queueEnabled, const std::vector<UnitAction> &orders);
 /// Prepare command train
 extern void CommandTrainUnit(CUnit &unit, CUnitType &what, EFlushMode flush);
 /// Prepare command cancel training

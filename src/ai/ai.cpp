@@ -446,6 +446,11 @@ void AiInit(CPlayer &player)
 	CAiType *ait = nullptr;
 	if (it == AiTypes.end()) {
 		LogPrint("AI: Found no matching ai scripts at all, defaulting to the first AI!\n");
+		// A name nothing defines is an error of the map or of the scripts: say which name, for
+		// which player, and what runs in its place.
+		LogPrint("AI: ERROR: player %d: no AI named '%s' for race '%s'; '%s' runs in its place\n",
+		         player.Index, player.AiName.c_str(), PlayerRaces.Name[player.Race].c_str(),
+		         AiTypes[0]->Name.c_str());
 		ait = AiTypes[0].get();
 	} else {
 		ait = it->get();
@@ -1014,6 +1019,10 @@ void AiEachCycle(CPlayer &player)
 	AiPlayer = player.Ai.get();
 	// The original's script of this player, when the map named one: it advances every cycle.
 	Wc2AiCycle(player.Index);
+	// Its casters are looked at every 50 cycles (local evidence record PAI-001), not once a second.
+	if (AiPlayer && wc2ai::CastPassDue(GameCycle) && Wc2AiRuns(player.Index)) {
+		AiCheckMagic();
+	}
 }
 
 /**
@@ -1045,8 +1054,10 @@ void AiEachSecond(CPlayer &player)
 	//  Handle the force manager.
 	AiForceManager();
 
-	//  Check for magic actions.
-	AiCheckMagic();
+	//  Check for magic actions. A player run by its original script has its own pass (AiEachCycle).
+	if (!Wc2AiRuns(player.Index)) {
+		AiCheckMagic();
+	}
 
 	// At most 1 explorer each 5 seconds
 	if (GameCycle > AiPlayer->LastExplorationGameCycle + 5 * CYCLES_PER_SECOND) {

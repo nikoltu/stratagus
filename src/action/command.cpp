@@ -668,6 +668,27 @@ void CommandReturnGoods(CUnit &unit, CUnit *depot, EFlushMode flush)
 }
 
 /**
+**  Is a train order refused? Without the queue a building holds one production order at
+**  most: none is taken while it trains, upgrades itself or researches, or has such an order
+**  waiting.
+**
+**  @param queueEnabled  the training queue is on (then nothing is refused here)
+**  @param orders        the actions of the building's orders, the running one first
+*/
+bool TrainOrderRefused(bool queueEnabled, const std::vector<UnitAction> &orders)
+{
+	if (queueEnabled) {
+		return false;
+	}
+	for (const UnitAction action : orders) {
+		if (action == UnitAction::Train || action == UnitAction::UpgradeTo || action == UnitAction::Research) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
 **  Building starts training an unit.
 **
 **  @param unit   pointer to unit.
@@ -688,6 +709,15 @@ void CommandTrainUnit(CUnit &unit, CUnitType &type, EFlushMode)
 	// Not already training?
 	if (!EnableTrainingQueue && unit.CurrentAction() == UnitAction::Train) {
 		DebugPrint("Unit queue disabled!\n");
+		return;
+	}
+	// A second order that arrives before the first one has started (two clicks inside the
+	// command delay) or while the building researches or upgrades is refused as well.
+	std::vector<UnitAction> actions;
+	for (const auto &pending : unit.Orders) {
+		actions.push_back(pending->Action);
+	}
+	if (TrainOrderRefused(EnableTrainingQueue, actions)) {
 		return;
 	}
 

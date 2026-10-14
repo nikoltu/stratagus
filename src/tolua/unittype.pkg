@@ -20,3 +20,8 @@ extern CUnitType *UnitTypeOrcWall;
 
 void SetMapStat(std::string ident, std::string variable_key, int value, std::string variable_type);
 void SetMapSound(std::string ident, std::string sound, std::string sound_type, std::string sound_subtype = "");
+
+// HD preload: threads that decode the atlas pages (0 = on the main thread, one by one).
+void SetHDPreloadWorkers(int count);
+// HD preload: decoded pages held at one time, the one in upload counted (default 2, at most 4).
+void SetHDPreloadWindow(int count);

@@ -1214,4 +1214,20 @@ CUnit *AttackUnitsInReactRange(const CUnit &unit)
 	return AttackUnitsInReactRange(unit, NoFilter());
 }
 
+/**
+**  Attack units in the range of the idle target search.
+**
+**  @param unit  Find unit for this idle unit.
+**
+**  @return      Pointer to unit which should be attacked.
+*/
+CUnit *AttackUnitsInIdleRange(const CUnit &unit)
+{
+	Assert(unit.Type->CanAttack);
+	const int range = IdleSearchRange(unit.Player->Type != PlayerTypes::PlayerPerson,
+	                                  unit.Stats->Variables[ATTACKRANGE_INDEX].Max,
+	                                  unit.Type->ReactRangeComputer);
+	return AttackUnitsInDistance(unit, range, NoFilter());
+}
+
 //@}

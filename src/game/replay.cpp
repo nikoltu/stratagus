@@ -657,6 +657,18 @@ void CleanReplayLog()
 }
 
 /**
+**  Does a replayed "input" line run as Lua text?
+**
+**  A line with a leading '-' is written by the console of a debug build only (InputKey), and only
+**  a debug build runs it. Everywhere else the line is what the recording game took it for: a
+**  cheat word, looked up among the known ones. A replay file cannot make a release build run text.
+*/
+bool ReplayInputRunsLua(const std::string &value, bool debugBuild)
+{
+	return debugBuild && !value.empty() && value[0] == '-';
+}
+
+/**
 **  Do next replay
 */
 static void DoNextReplay()
@@ -767,7 +779,12 @@ static void DoNextReplay()
 		const bool state = to_number(val) != 0;
 		SendCommandSharedVision(arg1, state, arg2);
 	} else if (action == "input") {
-		if (val[0] == '-') {
+#ifdef DEBUG
+		const bool debugBuild = true;
+#else
+		const bool debugBuild = false;
+#endif
+		if (ReplayInputRunsLua(val, debugBuild)) {
 			CclCommand(val.substr(1).data(), false);
 		} else {
 			HandleCheats(val);

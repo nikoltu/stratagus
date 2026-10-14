@@ -24,6 +24,7 @@
 
 #include <doctest.h>
 
+#include "hd_synth_graphics.h"
 #include "video.h"
 #include "../../src/video/hd_classic_hud.h"
 
@@ -34,8 +35,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -2459,6 +2463,367 @@ TEST_CASE("classichud hitPointFill: width and colour of the bar")
 	CHECK(colour == 2);
 	CHECK(classichud::hitPointFill(0, 30, colour) == 0);
 	CHECK(classichud::hitPointFill(5, 0, colour) == 0);
+	// o21_52: a building site at 108 / 400, 13 px of bar_red (columns 7..19).
+	CHECK(classichud::hitPointFill(108, 400, colour) == 13);
+	CHECK(colour == 2);
+	// o30_C04_*: Grunt 37 / 60, 30 px yellow (columns 7..36); Grunt 17 / 60, 14 px red; Peon
+	// 16 / 30, 26 px yellow; a2_p03: Peon 7 / 30, 11 px red.
+	CHECK(classichud::hitPointFill(37, 60, colour) == 30);
+	CHECK(colour == 1);
+	CHECK(classichud::hitPointFill(17, 60, colour) == 14);
+	CHECK(colour == 2);
+	CHECK(classichud::hitPointFill(16, 30, colour) == 26);
+	CHECK(colour == 1);
+	CHECK(classichud::hitPointFill(7, 30, colour) == 11);
+	CHECK(colour == 2);
+}
+
+TEST_CASE("classichud tooltipBox: lines, the cost row and the requirement line")
+{
+	using namespace classichud;
+	// One line (o11_55), 640 x 480 and 720 x 540 (o30_C09_*).
+	CHECK(tooltipBox(768, 1).fill[0].y == 692);
+	CHECK(tooltipBox(768).fill[0].y == 692);
+	CHECK(tooltipLineMidY(768, 1, 0, false) == doctest::Approx(tooltipMidY(768)));
+	CHECK(tooltipBox(480, 1).fill[0].y == 404);
+	CHECK(tooltipBox(480, 1).fill[0].y + tooltipBox(480, 1).fill[0].h - 1 == 451);
+	CHECK(tooltipBox(540, 1).fill[0].y == 464);
+	// Three lines (o30_C05_hover_build_cell0): top row 662, capitals from 682 / 697 / 712.
+	const TooltipBox three = tooltipBox(768, 3);
+	CHECK(three.fill[0].y == 662);
+	CHECK(three.fill[0].y + three.fill[0].h - 1 == 739);
+	CHECK(three.fill[0].x == 195);
+	CHECK(three.fill[1].x == 188);
+	CHECK(tooltipLineMidY(768, 3, 0, false) == doctest::Approx(686.0));
+	CHECK(tooltipLineMidY(768, 3, 1, false) == doctest::Approx(701.0));
+	CHECK(tooltipLineMidY(768, 3, 2, false) == doctest::Approx(716.0));
+	// Four lines, the last one the requirement (o30_C05_hover_dim_keep): top row 646, the side
+	// lines from 653 to 732, capitals from 666 / 681 / 696 / 712.
+	const TooltipBox four = tooltipBox(768, 4);
+	CHECK(four.fill[0].y == 646);
+	CHECK(four.fill[1].y == 653);
+	CHECK(four.fill[1].y + four.fill[1].h - 1 == 732);
+	CHECK(four.line[3].y == 653);
+	CHECK(four.line[3].h == 80);
+	CHECK(four.line[6].y == 739);
+	CHECK(tooltipLineMidY(768, 4, 0, false) == doctest::Approx(670.0));
+	CHECK(tooltipLineMidY(768, 4, 1, false) == doctest::Approx(685.0));
+	CHECK(tooltipLineMidY(768, 4, 2, false) == doctest::Approx(700.0));
+	CHECK(tooltipLineMidY(768, 4, 3, true) == doctest::Approx(716.0));
+	// Four lines without it (o30_C05_hover_arrow_upgrade): the same box, capitals from 711.
+	CHECK(tooltipLineMidY(768, 4, 3, false) == doctest::Approx(715.0));
+	// The cost row of that box: icons 14 x 14 at x 204 / 270 / 336, rows 678..691, the number
+	// 18 px right of its icon.
+	const double costMid = tooltipLineMidY(768, 4, 1, false);
+	for (int k = 0; k < TooltipCostMax; ++k) {
+		const Rect icon = tooltipCostIcon(k, costMid);
+		CHECK(icon.x == 204 + 66 * k);
+		CHECK(icon.y == 678);
+		CHECK(icon.y + icon.h - 1 == 691);
+		CHECK(icon.w == 14);
+		CHECK(icon.x + TooltipCostTextDX == 222 + 66 * k);
+		CHECK(contains(four.fill[1], icon.x, icon.y));
+		CHECK(contains(four.fill[1], icon.x + icon.w - 1, icon.y + icon.h - 1));
+	}
+	CHECK(TooltipX + TooltipTextW <= TooltipBoxX + TooltipBoxW - TooltipBoxCutRight);
+	CHECK(TooltipBoxAlpha * 3 == 255);
+}
+
+TEST_CASE("classichud messageMidY: the message line above the bottom strip")
+{
+	using namespace classichud;
+	CHECK(messageMidY(768) == doctest::Approx(722.0));
+	CHECK(messageMidY(582) == doctest::Approx(536.0));
+	CHECK(messageMidY(480) == doctest::Approx(434.0));
+	// Inside the map view (it starts at x 176), in the rows of the tooltip box.
+	CHECK(MessageX == 176 + 7);
+	const TooltipBox box = tooltipBox(768);
+	CHECK(contains(box.fill[1], MessageX + 8, (int) messageMidY(768)));
+}
+
+TEST_CASE("classichud objectiveMidY: the rows of the objectives block")
+{
+	using namespace classichud;
+	CHECK(objectiveMidY(0) == doctest::Approx(32.0));
+	CHECK(objectiveMidY(1) == doctest::Approx(48.0));
+	CHECK(objectiveMidY(2) == doctest::Approx(64.0));
+	CHECK(ObjectivesX == 185);
+}
+
+TEST_CASE("classichud: the cell of the unit in training")
+{
+	using namespace classichud;
+	CHECK(TrainingCell.x == 106);
+	CHECK(TrainingCell.x + TrainingCell.w - 1 == 159);
+	CHECK(TrainingCell.y == 238);
+	CHECK(TrainingCell.y + TrainingCell.h - 1 == 283);
+	CHECK(TrainingCell.x >= InfoPanel.x);
+	CHECK(TrainingCell.x + TrainingCell.w <= InfoPanel.x + InfoPanel.w);
+	CHECK(TrainingCell.y + TrainingCell.h <= CompleteBar.y);
+	const Rect picture = cellPicture(TrainingCell);
+	CHECK(picture.x == 110);
+	CHECK(picture.y == 242);
+	CHECK(picture.w == PictureW);
+	CHECK(picture.h == PictureH);
+	// The label is a stat label of row 1, left of the cell.
+	CHECK(TrainingLabelMidY == doctest::Approx(PanelStatMidY + PanelStatPitch));
+	CHECK(PanelColonX < TrainingCell.x);
+	// o30_C01_human_hall_trains_b: 41 px done (columns 12..52); the mill: 32 px.
+	CHECK(completeFill(27, 100) == 41);
+	CHECK(completeFill(32, 152) == 32);
+}
+
+TEST_CASE("classichud magicFill: the bar in the Magic row")
+{
+	using namespace classichud;
+	// o30_C14_mage_selected: 29 px of 59 at 127 of 255.
+	CHECK(magicFill(127, 255) == 29);
+	CHECK(magicFill(255, 255) == 59);
+	CHECK(magicFill(300, 255) == 59);
+	CHECK(magicFill(0, 255) == 0);
+	CHECK(magicFill(5, 0) == 0);
+	const Rect bar = magicBar(MagicRow);
+	CHECK(bar.x == 104);
+	CHECK(bar.y == 306);
+	CHECK(bar.w == 63);
+	CHECK(bar.h == 14);
+	const Rect inside = magicFillArea(bar);
+	CHECK(inside.x == 106);
+	CHECK(inside.y == 308);
+	CHECK(inside.w == 59);
+	CHECK(inside.h == 10);
+	// The bar stands on its stat row, the number on the bar's middle.
+	CHECK(bar.y + bar.h / 2.0 == doctest::Approx(PanelStatMidY + PanelStatPitch * MagicRow + 1.0));
+	CHECK(MagicTextMidX == doctest::Approx(bar.x + bar.w / 2.0));
+	CHECK(bar.x + bar.w <= InfoPanel.x + InfoPanel.w);
+}
+
+TEST_CASE("classichud groupCell: the cells of a group and their bars")
+{
+	using namespace classichud;
+	// Up to 9: cells of the portrait's size at x 5 / 61 / 117, y 165 / 220 / 275.
+	CHECK(groupCell(0, true).x == PortraitCell.x);
+	CHECK(groupCell(0, true).y == PortraitCell.y);
+	CHECK(groupCell(0, true).w == 54);
+	CHECK(groupCell(0, true).h == 46);
+	CHECK(groupCell(4, true).x == 61);
+	CHECK(groupCell(4, true).y == 220);
+	CHECK(groupCell(8, true).x == 117);
+	CHECK(groupCell(8, true).y == 275);
+	// The bar of cell 0 is the bar of the single portrait.
+	const Rect bar = groupBar(groupCell(0, true));
+	CHECK(bar.x == HitPointBar.x);
+	CHECK(bar.y == HitPointBar.y);
+	CHECK(bar.w == HitPointBar.w);
+	CHECK(bar.h == HitPointBar.h);
+	const Rect fill = groupFill(groupCell(0, true));
+	CHECK(fill.x == HitPointFill.x);
+	CHECK(fill.y == HitPointFill.y);
+	CHECK(fill.w == HitPointFill.w);
+	CHECK(fill.h == HitPointFill.h);
+	CHECK(groupFill(groupCell(3, true)).y == 266);
+	CHECK(groupFill(groupCell(6, true)).y == 321);
+	CHECK(groupFill(groupCell(8, true)).y + HitPointFill.h - 1 == 325);
+	CHECK(groupBar(groupCell(8, true)).y + HitPointBar.h <= InfoPanel.y + InfoPanel.h);
+	// Taps: the corners, the 2 px between cells, the bar's rows, outside.
+	CHECK(groupCellAt(5, 165, true) == 0);
+	CHECK(groupCellAt(58, 210, true) == 0);
+	CHECK(groupCellAt(59, 170, true) == -1);
+	CHECK(groupCellAt(60, 170, true) == -1);
+	CHECK(groupCellAt(61, 170, true) == 1);
+	CHECK(groupCellAt(170, 320, true) == 8);
+	CHECK(groupCellAt(171, 320, true) == -1);
+	CHECK(groupCellAt(10, 211, true) == -1);
+	CHECK(groupCellAt(10, 219, true) == -1);
+	CHECK(groupCellAt(10, 220, true) == 3);
+	CHECK(groupCellAt(10, 321, true) == -1);
+	CHECK(groupCellAt(4, 170, true) == -1);
+	CHECK(groupCellAt(10, 164, true) == -1);
+	// 10 to 12: cells 40 wide at x 5 / 47 / 89 / 131.
+	CHECK(groupCell(3, false).x == 131);
+	CHECK(groupCell(3, false).y == 165);
+	CHECK(groupCell(3, false).w == 40);
+	CHECK(groupCell(3, false).h == 46);
+	CHECK(groupCell(9, false).x == 47);
+	CHECK(groupCell(9, false).y == 275);
+	CHECK(groupCell(11, false).x + GroupSmallW == InfoPanel.x + InfoPanel.w);
+	const Rect small = cellPicture(groupCell(1, false));
+	CHECK(small.w == GroupSmallPictureW);
+	CHECK(small.h == PictureH);
+	CHECK(GroupSmallPictureSrcX == 7);
+	CHECK(GroupSmallPictureSrcX + GroupSmallPictureW - 1 == 38);
+	// Their bars: fill columns 7..42, 49..84, 91..126, 133..168.
+	for (int c = 0; c < 4; ++c) {
+		const Rect f = groupFill(groupCell(c, false));
+		CHECK(f.x == 7 + 42 * c);
+		CHECK(f.x + f.w - 1 == 42 + 42 * c);
+		CHECK(groupBar(groupCell(c, false)).w == 40);
+	}
+	CHECK(groupCellAt(45, 170, false) == -1);
+	CHECK(groupCellAt(47, 170, false) == 1);
+	CHECK(groupCellAt(170, 320, false) == 11);
+	// Fill: the single bar's width for its 50 px, 36 px for a narrow cell.
+	int colour = -1;
+	int single = -1;
+	for (const int hp : {0, 1, 7, 14, 15, 16, 17, 29, 30, 37, 45, 59, 60, 61}) {
+		CHECK(groupHitPointFill(hp, 60, 50, colour) == hitPointFill(hp, 60, single));
+		CHECK(colour == single);
+	}
+	CHECK(groupHitPointFill(60, 60, 36, colour) == 36);
+	CHECK(colour == 0);
+	CHECK(groupHitPointFill(37, 60, 36, colour) == 22);
+	CHECK(colour == 1);
+	CHECK(groupHitPointFill(5, 0, 36, colour) == 0);
+}
+
+TEST_CASE("classichud: passengers of a transport sit in the group rows 1 and 2")
+{
+	using namespace classichud;
+	CHECK(passengerCell(0).x == 5);
+	CHECK(passengerCell(0).y == 220);
+	CHECK(passengerCell(2).x == 117);
+	CHECK(passengerCell(3).x == 5);
+	CHECK(passengerCell(3).y == 275);
+	CHECK(passengerCell(5).x == 117);
+	CHECK(passengerCell(5).y == 275);
+	CHECK(groupFill(passengerCell(0)).y == 266);
+	CHECK(groupFill(passengerCell(5)).y == 321);
+	// The ship's own portrait cell is no passenger.
+	CHECK(passengerCellAt(10, 170) == -1);
+	CHECK(passengerCellAt(10, 225) == 0);
+	CHECK(passengerCellAt(120, 280) == 5);
+	CHECK(passengerCellAt(59, 225) == -1);
+	CHECK(passengerCellAt(10, 268) == -1);
+	CHECK(PassengerMax == 6);
+}
+
+TEST_CASE("classichud completeFill: the bar of a building under construction")
+{
+	using namespace classichud;
+	// Inside the info panel, under its texts; the inside is the sprite less its padding of 3.
+	CHECK(CompleteBar.x >= InfoPanel.x);
+	CHECK(CompleteBar.x + CompleteBar.w <= InfoPanel.x + InfoPanel.w);
+	CHECK(CompleteBar.y + CompleteBar.h <= InfoPanel.y + InfoPanel.h);
+	CHECK(CompleteFill.x == CompleteBar.x + 3);
+	CHECK(CompleteFill.y == CompleteBar.y + 3);
+	CHECK(CompleteFill.w == CompleteBar.w - 6);
+	CHECK(CompleteFill.h == CompleteBar.h - 6);
+	CHECK(CompleteFill.x == 12);
+	CHECK(CompleteFill.x + CompleteFill.w - 1 == 163);
+	CHECK(completeFill(0, 100) == 0);
+	CHECK(completeFill(-5, 100) == 0);
+	CHECK(completeFill(5, 0) == 0);
+	// o21_52: 40 px done (columns 12..51) = 26.3 % of the 152.
+	CHECK(completeFill(2632, 10000) == 40);
+	CHECK(completeFill(40, 152) == 40);
+	CHECK(completeFill(26, 100) == 39);
+	CHECK(completeFill(27, 100) == 41);
+	CHECK(completeFill(99, 100) == 150);
+	CHECK(completeFill(100, 100) == 152);
+	CHECK(completeFill(500, 100) == 152);
+	CHECK(completeFill(2000000000, 2000000000) == 152);
+	CHECK(completeFill(1999999999, 2000000000) == 151);
+	// The words stand on the inside's middle; the Remastered panel's place of them is that place.
+	CHECK(CompleteTextMidX == doctest::Approx(CompleteFill.x + CompleteFill.w / 2.0));
+	CHECK(CompleteTextMidY == doctest::Approx(CompleteFill.y + CompleteFill.h / 2.0));
+	CHECK(panelX(396.0) == doctest::Approx(CompleteTextMidX));
+	CHECK(panelMidY(1437.75) == doctest::Approx(CompleteTextMidY));
+}
+
+TEST_CASE("classichud tooltipBox: the box under the hint")
+{
+	using namespace classichud;
+	const TooltipBox box = tooltipBox(768);
+	// o11_55: columns 195..411 in the rows 692..739, columns 188..419 in the rows 699..732.
+	CHECK(box.fill[0].x == 195);
+	CHECK(box.fill[0].y == 692);
+	CHECK(box.fill[0].x + box.fill[0].w - 1 == 411);
+	CHECK(box.fill[0].y + box.fill[0].h - 1 == 739);
+	CHECK(box.fill[1].x == 188);
+	CHECK(box.fill[1].y == 699);
+	CHECK(box.fill[1].x + box.fill[1].w - 1 == 419);
+	CHECK(box.fill[1].y + box.fill[1].h - 1 == 732);
+	// The line: one pixel thick, every piece on the edge of the black, the outline closed (every
+	// corner pixel of the twelve-cornered shape is on two pieces).
+	int corners = 0;
+	for (int i = 0; i < TooltipBoxLines; ++i) {
+		const Rect &l = box.line[i];
+		CHECK((l.w == 1 || l.h == 1));
+		CHECK((contains(box.fill[0], l.x, l.y) || contains(box.fill[1], l.x, l.y)));
+		CHECK((contains(box.fill[0], l.x + l.w - 1, l.y + l.h - 1)
+		       || contains(box.fill[1], l.x + l.w - 1, l.y + l.h - 1)));
+		for (int j = i + 1; j < TooltipBoxLines; ++j) {
+			const Rect &m = box.line[j];
+			if (l.x < m.x + m.w && m.x < l.x + l.w && l.y < m.y + m.h && m.y < l.y + l.h) {
+				++corners;
+			}
+		}
+	}
+	CHECK(corners == 12);
+	CHECK(box.line[0].x == 195);
+	CHECK(box.line[0].y == 692);
+	CHECK(box.line[0].w == 217);
+	CHECK(box.line[3].x == 419);
+	CHECK(box.line[3].y == 699);
+	CHECK(box.line[3].h == 34);
+	CHECK(box.line[6].y == 739);
+	CHECK(box.line[9].x == 188);
+	// The hint inside it: ink from x 204, capital rows 712..719.
+	CHECK(contains(box.fill[1], TooltipX, (int) tooltipMidY(768) - 4));
+	CHECK(contains(box.fill[1], TooltipX, (int) tooltipMidY(768) + 3));
+	// Hung on the bottom at another height.
+	const TooltipBox low = tooltipBox(582);
+	CHECK(low.fill[0].y == 582 - 76);
+	CHECK(low.fill[0].y + low.fill[0].h - 1 == 582 - 29);
+	CHECK(low.fill[0].x == box.fill[0].x);
+	CHECK(low.line[3].h == box.line[3].h);
+}
+
+TEST_CASE("classichud greyOf: the frame under a window is its luma")
+{
+	using namespace classichud;
+	// o21_14 -> o21_40, the orc frame at the same pixels.
+	CHECK(greyOf(0x34, 0x20, 0x00) == 0x22);
+	CHECK(greyOf(0x50, 0x30, 0x08) == 0x34);
+	CHECK(greyOf(0x3c, 0x24, 0x04) == 0x27);
+	CHECK(greyOf(0x48, 0x2c, 0x04) == 0x2f);
+	// The human frame is grey already and stays (o11_16 / o11_28).
+	CHECK(greyOf(0x28, 0x28, 0x28) == 0x28);
+	CHECK(greyOf(0x58, 0x58, 0x58) == 0x58);
+	CHECK(greyOf(0x34, 0x34, 0x34) == 0x34);
+	CHECK(greyOf(0, 0, 0) == 0);
+	CHECK(greyOf(255, 255, 255) == 255);
+}
+
+TEST_CASE("classichud faceName: the sprite of a button by its state")
+{
+	using namespace classichud;
+	CHECK(faceName("hud_human_small", false) == "hud_human_small");
+	CHECK(faceName("hud_human_small", true) == "hud_human_small_active");
+	CHECK(faceName("hud_orc_small", true) == "hud_orc_small_active");
+	CHECK(faceName("portrait_button", true) == "portrait_button_active");
+	CHECK(faceName("portrait_button_highlight", true) == "portrait_button_highlight_active");
+	CHECK(faceName("f5", true) == "f5_active");
+}
+
+TEST_CASE("hd_atlas classicMinimapSlot: a tile past the sheet's end is refused")
+{
+	// The colour file: records from megatile 16 on.
+	CHECK(hdatlas::classicMinimapRecord(16, 16, 400) == 0);
+	CHECK(hdatlas::classicMinimapRecord(415, 16, 400) == 399);
+	CHECK(hdatlas::classicMinimapRecord(416, 16, 400) == -1);
+	CHECK(hdatlas::classicMinimapRecord(15, 16, 400) == -1);
+	CHECK(hdatlas::classicMinimapRecord(0, 16, 400) == -1);
+	CHECK(hdatlas::classicMinimapRecord(-1, 16, 400) == -1);
+	CHECK(hdatlas::classicMinimapRecord(16, 16, 0) == -1);
+	// A tileset sheet of 16 tiles a row and 24 rows: tiles 0..383.
+	CHECK(hdatlas::tileSheetHolds(0, 16, 24));
+	CHECK(hdatlas::tileSheetHolds(383, 16, 24));
+	CHECK_FALSE(hdatlas::tileSheetHolds(384, 16, 24));
+	CHECK_FALSE(hdatlas::tileSheetHolds(5000, 16, 24));
+	CHECK_FALSE(hdatlas::tileSheetHolds(-1, 16, 24));
+	CHECK_FALSE(hdatlas::tileSheetHolds(3, 0, 24));
+	CHECK_FALSE(hdatlas::tileSheetHolds(3, 16, 0));
 }
 
 TEST_CASE("classichud text: the face for a capital's height and its scale")
@@ -2529,6 +2894,27 @@ TEST_CASE("hd_atlas minimapMarkPixels: one pixel more than the unit's tiles cove
 	CHECK(hdatlas::minimapMarkPixels(3, 64, fac) == 5);
 	CHECK(hdatlas::minimapMarkPixels(1, 2 * fac, fac) == 3);
 	CHECK(hdatlas::minimapMarkPixels(1, 4 * fac, fac) == 5);
+}
+
+TEST_CASE("hd_atlas classicMinimapMarkPixels: the measured marks of the original's classic minimap")
+{
+	constexpr int fac = 48;
+	// scale = pixels a tile * fac on the 128-pixel minimap: map 128 -> 48, 96 -> 64, 64 -> 96, 32 -> 192
+	// 128 map: every one-tile unit 2 x 2 (o14_03)
+	CHECK(hdatlas::classicMinimapMarkPixels(1, 48, fac) == 2);
+	// 96 map: Peasant 2 x 2, Gold Mine (3 tiles) 4 x 4
+	CHECK(hdatlas::classicMinimapMarkPixels(1, 64, fac) == 2);
+	CHECK(hdatlas::classicMinimapMarkPixels(3, 64, fac) == 4);
+	// 64 map: Peasant 2 x 2, Gold Mine 6 x 6, Town Hall (4 tiles) 8 x 8
+	CHECK(hdatlas::classicMinimapMarkPixels(1, 96, fac) == 2);
+	CHECK(hdatlas::classicMinimapMarkPixels(3, 96, fac) == 6);
+	CHECK(hdatlas::classicMinimapMarkPixels(4, 96, fac) == 8);
+	// 32 map: Peasant 4 x 4, Gold Mine 12 x 12, Town Hall 16 x 16
+	CHECK(hdatlas::classicMinimapMarkPixels(1, 192, fac) == 4);
+	CHECK(hdatlas::classicMinimapMarkPixels(3, 192, fac) == 12);
+	CHECK(hdatlas::classicMinimapMarkPixels(4, 192, fac) == 16);
+	// the Remastered view keeps its rule
+	CHECK(hdatlas::minimapMarkPixels(1, 192, fac) == 5);
 }
 
 TEST_CASE("hd_atlas classicMinimapViewPixels: the view rectangle of every measured capture")
@@ -2665,4 +3051,439 @@ TEST_CASE("classichud splitStatLine: the label to the colon, the value from its 
 	// The hit point figure: 1003.5 units is row 223.0 (measured 222.83, 223.0, 222.5).
 	CHECK(panelSmallMidY(1003.5) == doctest::Approx(223.0));
 	CHECK(panelSmallMidY(1003.5) - 222.83 < 0.5);
+}
+
+TEST_CASE("hd_atlas maskAlpha: the luminance of a team mask pixel")
+{
+	CHECK(hdatlas::maskAlpha(0, 0, 0) == 0);
+	CHECK(hdatlas::maskAlpha(255, 255, 255) == 255);
+	CHECK(hdatlas::maskAlpha(255, 0, 0) == 76);
+	CHECK(hdatlas::maskAlpha(10, 20, 30) == 18); // 4640 >> 8
+}
+
+TEST_CASE("hd_atlas runOrdered: results are handed over in list order, two at most undelivered")
+{
+	// Nine jobs that end in an order of their own: the long ones first in the list.
+	const int sleepMs[9] = {40, 5, 25, 1, 30, 2, 20, 1, 10};
+	std::mutex lock;
+	std::vector<int> ended;      // order the workers finished in
+	std::vector<int> consumed;   // order the caller got them in
+	int alive = 0;               // results made and not yet through consume
+	int aliveMax = 0;
+	const std::thread::id caller = std::this_thread::get_id();
+	bool consumeOnCaller = true;
+	bool decodeOffCaller = true;
+	int idles = 0;
+
+	const int high = hdatlas::runOrdered<int>(
+		9, 2, 2, 5,
+		[&](int i) {
+			{
+				std::lock_guard<std::mutex> guard(lock);
+				++alive;
+				aliveMax = alive > aliveMax ? alive : aliveMax;
+				decodeOffCaller = decodeOffCaller && std::this_thread::get_id() != caller;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs[i]));
+			std::lock_guard<std::mutex> guard(lock);
+			ended.push_back(i);
+			return i * 10;
+		},
+		[&](int i, int result) {
+			CHECK(result == i * 10);
+			consumeOnCaller = consumeOnCaller && std::this_thread::get_id() == caller;
+			std::this_thread::sleep_for(std::chrono::milliseconds(3)); // the upload
+			std::lock_guard<std::mutex> guard(lock);
+			consumed.push_back(i);
+			--alive;
+		},
+		[&](int) { ++idles; });
+
+	CHECK(consumed == std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7, 8});
+	CHECK(ended.size() == 9);
+	CHECK(ended != consumed); // job 1 ended before job 0
+	CHECK(high == 2);
+	CHECK(aliveMax == 2);
+	CHECK(alive == 0);
+	CHECK(consumeOnCaller);
+	CHECK(decodeOffCaller);
+	CHECK(idles > 0); // 40 ms of waiting for job 0 at 5 ms a call
+}
+
+TEST_CASE("hd_atlas runOrdered: one worker, a window of one, nothing to do")
+{
+	std::vector<int> consumed;
+	int alive = 0;
+	int aliveMax = 0;
+	std::mutex lock;
+	const int high = hdatlas::runOrdered<int>(
+		4, 1, 1, 100,
+		[&](int i) {
+			std::lock_guard<std::mutex> guard(lock);
+			aliveMax = ++alive > aliveMax ? alive : aliveMax;
+			return i;
+		},
+		[&](int i, int result) {
+			std::lock_guard<std::mutex> guard(lock);
+			consumed.push_back(result);
+			CHECK(result == i);
+			--alive;
+		},
+		[](int) {});
+	CHECK(consumed == std::vector<int>{0, 1, 2, 3});
+	CHECK(high == 1);
+	CHECK(aliveMax == 1);
+
+	int calls = 0;
+	CHECK(hdatlas::runOrdered<int>(0, 2, 2, 100, [&](int) { ++calls; return 0; },
+	                               [&](int, int) { ++calls; }, [&](int) { ++calls; }) == 0);
+	CHECK(calls == 0);
+	// More workers than jobs, a window larger than the list.
+	consumed.clear();
+	CHECK(hdatlas::runOrdered<int>(2, 4, 8, 100, [](int i) { return i + 1; },
+	                               [&](int, int result) { consumed.push_back(result); }, [](int) {}) == 2);
+	CHECK(consumed == std::vector<int>{1, 2});
+}
+
+TEST_CASE("hd_atlas stemIsOfOtherBiome: the pages of another biome, by whole tokens")
+{
+	CHECK(hdatlas::stemIsOfOtherBiome("units_human_forest_sprites", "winter"));
+	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("units_human_forest_masks", "forest"));
+	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("units_orc_common_sprites", "winter"));
+	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("units_orc_common_masks", "forest"));
+	CHECK(hdatlas::stemIsOfOtherBiome("units_common_xswamp_sprites", "swamp"));
+	CHECK(hdatlas::stemIsOfOtherBiome("units_common_swamp_sprites", "xswamp"));
+	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("units_human_swamp_sprites", "swamp"));
+	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("units_common_xswamp_sprites", "xswamp"));
+	CHECK(hdatlas::stemIsOfOtherBiome("units_common_winter_sprites", "forest"));
+	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("", "forest"));
+}
+
+TEST_CASE("hd_atlas runOrdered: a window of three lets a third page start, never a fourth")
+{
+	// The preload's list in small: a long page, a short one, a long one ... With a window of two
+	// the third job waits for the first to be consumed; with three it starts beside the first.
+	const int sleepMs[9] = {40, 5, 25, 1, 30, 2, 20, 1, 10};
+	for (const int workers : {2, 3}) {
+		std::mutex lock;
+		std::vector<int> consumed;
+		int alive = 0;
+		int aliveMax = 0;
+		int running = 0;
+		int runningMax = 0;
+		const int high = hdatlas::runOrdered<int>(
+			9, workers, 3, 5,
+			[&](int i) {
+				{
+					std::lock_guard<std::mutex> guard(lock);
+					aliveMax = ++alive > aliveMax ? alive : aliveMax;
+					runningMax = ++running > runningMax ? running : runningMax;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs[i]));
+				std::lock_guard<std::mutex> guard(lock);
+				--running;
+				return i * 10;
+			},
+			[&](int i, int result) {
+				CHECK(result == i * 10);
+				std::this_thread::sleep_for(std::chrono::milliseconds(3));
+				std::lock_guard<std::mutex> guard(lock);
+				consumed.push_back(i);
+				--alive;
+			},
+			[](int) {});
+		CAPTURE(workers);
+		CHECK(consumed == std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7, 8});
+		CHECK(high == 3);      // job 1 ends while job 0 runs: job 2 is taken with two undelivered
+		CHECK(aliveMax == 3);
+		CHECK(alive == 0);
+		CHECK(runningMax <= workers);
+	}
+}
+
+TEST_CASE("atlas mask page: one pass gives the bytes of the two passes")
+{
+	// 16 x 16, every index once. Index 0 is NOT black, another index has its colour, two more
+	// share one: the key is the index, not the colour.
+	auto makePage = []() {
+		SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, 16, 16, 8, SDL_PIXELFORMAT_INDEX8);
+		REQUIRE(s != nullptr);
+		SDL_Color colors[256];
+		for (int i = 0; i < 256; ++i) {
+			colors[i].r = (Uint8) i;
+			colors[i].g = (Uint8) ((i * 7 + 3) & 255);
+			colors[i].b = (Uint8) (255 - i);
+			colors[i].a = 255;
+		}
+		colors[0] = SDL_Color{200, 100, 50, 255};
+		colors[17] = colors[0];
+		colors[40] = colors[41];
+		colors[255] = SDL_Color{255, 255, 255, 255};
+		colors[1] = SDL_Color{0, 0, 0, 255};
+		REQUIRE(SDL_SetPaletteColors(s->format->palette, colors, 0, 256) == 0);
+		for (int y = 0; y < 16; ++y) {
+			Uint8 *row = static_cast<Uint8 *>(s->pixels) + y * s->pitch;
+			for (int x = 0; x < 16; ++x) {
+				row[x] = (Uint8) (y * 16 + x);
+			}
+		}
+		return s;
+	};
+	SDL_Surface *one = AtlasPageToRGBA(makePage(), true, false, true);
+	SDL_Surface *two = AtlasPageToRGBA(makePage(), true, false, false);
+	REQUIRE(one != nullptr);
+	REQUIRE(two != nullptr);
+	REQUIRE(one->format->format == SDL_PIXELFORMAT_RGBA32);
+	REQUIRE(two->format->format == SDL_PIXELFORMAT_RGBA32);
+	REQUIRE(one->w == 16);
+	REQUIRE(one->h == 16);
+	int differ = 0;
+	for (int y = 0; y < 16; ++y) {
+		const Uint8 *a = static_cast<const Uint8 *>(one->pixels) + y * one->pitch;
+		const Uint8 *b = static_cast<const Uint8 *>(two->pixels) + y * two->pitch;
+		differ += std::memcmp(a, b, 16 * 4) != 0;
+	}
+	CHECK(differ == 0);
+	// the numbers themselves: white, alpha = luminance; index 0 clear whatever its colour
+	auto at = [one](int index) {
+		return static_cast<const Uint8 *>(one->pixels) + (index / 16) * one->pitch + (index % 16) * 4;
+	};
+	CHECK(at(0)[0] == 255);
+	CHECK(at(0)[3] == 0);                                     // the key
+	CHECK(at(1)[3] == 0);                                     // black
+	CHECK(at(17)[3] == hdatlas::maskAlpha(200, 100, 50));     // the key's colour under another index
+	CHECK(at(17)[3] != 0);
+	CHECK(at(255)[3] == hdatlas::maskAlpha(255, 255, 255));
+	CHECK(at(255)[1] == 255);
+	CHECK(at(40)[3] == at(41)[3]);
+	SDL_FreeSurface(one);
+	SDL_FreeSurface(two);
+
+	// A mask that is not 8-bit goes the old way under either flag.
+	auto makeRgba = []() {
+		SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, 4, 1, 32, SDL_PIXELFORMAT_RGBA32);
+		REQUIRE(s != nullptr);
+		const Uint8 bytes[16] = {0, 0, 0, 255, 10, 20, 30, 255, 255, 255, 255, 0, 90, 90, 90, 7};
+		std::memcpy(s->pixels, bytes, 16);
+		return s;
+	};
+	SDL_Surface *r1 = AtlasPageToRGBA(makeRgba(), true, false, true);
+	SDL_Surface *r2 = AtlasPageToRGBA(makeRgba(), true, false, false);
+	REQUIRE(r1 != nullptr);
+	REQUIRE(r2 != nullptr);
+	CHECK(std::memcmp(r1->pixels, r2->pixels, 16) == 0);
+	CHECK(static_cast<const Uint8 *>(r1->pixels)[7] == 18);
+	SDL_FreeSurface(r1);
+	SDL_FreeSurface(r2);
+	CHECK(AtlasPageToRGBA(nullptr, true, false) == nullptr);
+}
+
+namespace
+{
+
+hdiconcache::Key iconKey()
+{
+	hdiconcache::Key key;
+	key.width = 150;
+	key.height = 24304;
+	key.set = "forest";
+	key.sources[0] = {41000, 1700000001};
+	key.sources[1] = {9000000, 1700000002};
+	key.sources[2] = {39000, 1700000003};
+	key.sources[3] = {800000, 1700000004};
+	key.pathHash = 0x1234567890abcdefULL;
+	return key;
+}
+
+} // namespace
+
+TEST_CASE("icon strip cache: the header answers for one key only")
+{
+	const hdiconcache::Key key = iconKey();
+	const uint64_t pixels = (uint64_t) key.width * key.height * 4;
+	const uint64_t fileSize = hdiconcache::HEADER_BYTES + pixels;
+	const auto header = hdiconcache::encodeHeader(key, true, 0xfeedULL);
+	bool team = false;
+	uint64_t sum = 0;
+	REQUIRE(hdiconcache::checkHeader(header.data(), header.size(), fileSize, key, team, sum));
+	CHECK(team);
+	CHECK(sum == 0xfeedULL);
+	const auto plain = hdiconcache::encodeHeader(key, false, 1);
+	REQUIRE(hdiconcache::checkHeader(plain.data(), plain.size(), fileSize, key, team, sum));
+	CHECK_FALSE(team);
+
+	auto refused = [&](const hdiconcache::Key &other) {
+		bool t = true;
+		uint64_t s = 77;
+		const bool ok = hdiconcache::checkHeader(header.data(), header.size(), fileSize, other, t, s);
+		CHECK(t);       // untouched on a refusal
+		CHECK(s == 77);
+		return !ok;
+	};
+	// every source file: another size, another time, gone
+	for (int i = 0; i < hdiconcache::SOURCES; ++i) {
+		hdiconcache::Key other = key;
+		other.sources[i].size += 1;
+		CHECK(refused(other));
+		other = key;
+		other.sources[i].mtime += 1;
+		CHECK(refused(other));
+		other = key;
+		other.sources[i] = {};
+		CHECK(refused(other));
+	}
+	hdiconcache::Key other = key;
+	other.set = "ice";
+	CHECK(refused(other));
+	other = key;
+	other.set = "fores";
+	CHECK(refused(other));
+	other = key;
+	other.builder = key.builder + 1;   // a build with another builder
+	CHECK(refused(other));
+	other = key;
+	other.height = key.height + 124;   // another layout
+	CHECK(refused(other));
+	other = key;
+	other.width = 151;
+	CHECK(refused(other));
+	other = key;
+	other.pathHash ^= 1;               // another game folder
+	CHECK(refused(other));
+	other = key;
+	other.set = "";
+	CHECK(refused(other));
+	other = key;
+	other.set = "a_set_name_too_long";
+	CHECK(refused(other));
+
+	// the file: cut short, grown, too short for a header
+	CHECK_FALSE(hdiconcache::checkHeader(header.data(), header.size(), fileSize - 1, key, team, sum));
+	CHECK_FALSE(hdiconcache::checkHeader(header.data(), header.size(), fileSize + 1, key, team, sum));
+	CHECK_FALSE(hdiconcache::checkHeader(header.data(), header.size(), hdiconcache::HEADER_BYTES, key, team, sum));
+	CHECK_FALSE(hdiconcache::checkHeader(header.data(), header.size() - 1, fileSize, key, team, sum));
+	CHECK_FALSE(hdiconcache::checkHeader(nullptr, 0, fileSize, key, team, sum));
+	// any one damaged byte of the header
+	int accepted = 0;
+	for (size_t i = 0; i < header.size(); ++i) {
+		auto bad = header;
+		bad[i] ^= 0x10;
+		accepted += hdiconcache::checkHeader(bad.data(), bad.size(), fileSize, key, team, sum);
+	}
+	CHECK(accepted == 0);
+
+	CHECK(hdiconcache::fileName("forest") == "hd_iconstrip_forest.bin");
+	CHECK(hdiconcache::fileName("xswamp") == "hd_iconstrip_xswamp.bin");
+	CHECK(hdiconcache::fileName("").empty());
+	CHECK(hdiconcache::fileName("../forest").empty());
+	CHECK(hdiconcache::fileName("a/b").empty());
+	CHECK(hdiconcache::fileName("Forest").empty());
+
+	// the sum sees a change anywhere, the tail under eight bytes included, and the order
+	std::vector<unsigned char> block(1003);
+	for (size_t i = 0; i < block.size(); ++i) {
+		block[i] = (unsigned char) (i * 31 + 7);
+	}
+	const uint64_t whole = hdiconcache::payloadSum(block.data(), block.size());
+	for (const size_t at : {(size_t) 0, (size_t) 7, (size_t) 8, (size_t) 500, (size_t) 999, (size_t) 1002}) {
+		auto bad = block;
+		bad[at] ^= 1;
+		CHECK(hdiconcache::payloadSum(bad.data(), bad.size()) != whole);
+	}
+	auto swapped = block;
+	std::swap(swapped[16], swapped[24]);
+	CHECK(hdiconcache::payloadSum(swapped.data(), swapped.size()) != whole);
+	// row by row = in one piece when a row is whole steps (the strip: 600 bytes a row)
+	CHECK(hdiconcache::payloadSum(block.data() + 600, 400, hdiconcache::payloadSum(block.data(), 600))
+	      == hdiconcache::payloadSum(block.data(), 1000));
+}
+
+TEST_CASE("icon strip cache: a written strip is read back byte for byte, a damaged file is not read")
+{
+	const fs::path dir = caseDir("iconstrip_cache");
+	const fs::path file = dir / "sub" / hdiconcache::fileName("forest");
+	hdiconcache::Key key = iconKey();
+	key.width = 150;
+	key.height = 124 * 3;
+	SDL_Surface *strip = SDL_CreateRGBSurfaceWithFormat(0, 150, 124 * 3, 32, SDL_PIXELFORMAT_RGBA32);
+	REQUIRE(strip != nullptr);
+	for (int y = 0; y < strip->h; ++y) {
+		Uint8 *row = static_cast<Uint8 *>(strip->pixels) + y * strip->pitch;
+		for (int x = 0; x < strip->w * 4; ++x) {
+			row[x] = (Uint8) (x * 13 + y * 7 + (x * y) % 5);
+		}
+	}
+	bool team = false;
+	CHECK(ReadHDIconStripCache(file, key, team) == nullptr);   // nothing there yet
+	REQUIRE(WriteHDIconStripCache(file, key, strip, true));     // makes the directory
+	CHECK(fs::file_size(file) == hdiconcache::HEADER_BYTES + (uintmax_t) 150 * 124 * 3 * 4);
+	CHECK_FALSE(fs::exists(fs::path(file.string() + ".tmp")));
+
+	SDL_Surface *back = ReadHDIconStripCache(file, key, team);
+	REQUIRE(back != nullptr);
+	CHECK(team);
+	REQUIRE(back->format->format == SDL_PIXELFORMAT_RGBA32);
+	REQUIRE(back->w == strip->w);
+	REQUIRE(back->h == strip->h);
+	int differ = 0;
+	for (int y = 0; y < strip->h; ++y) {
+		differ += std::memcmp(static_cast<const Uint8 *>(strip->pixels) + y * strip->pitch,
+		                      static_cast<const Uint8 *>(back->pixels) + y * back->pitch, 150 * 4) != 0;
+	}
+	CHECK(differ == 0);
+	SDL_FreeSurface(back);
+
+	// another key: the game folder changed
+	hdiconcache::Key other = key;
+	other.sources[1].mtime += 1;
+	team = false;
+	CHECK(ReadHDIconStripCache(file, other, team) == nullptr);
+	CHECK_FALSE(team);
+
+	// the file's bytes
+	std::vector<char> bytes;
+	{
+		std::ifstream in(file, std::ios::binary);
+		bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+	}
+	auto put = [&](const std::vector<char> &data) {
+		std::ofstream out(file, std::ios::binary | std::ios::trunc);
+		out.write(data.data(), (std::streamsize) data.size());
+	};
+	// one pixel byte changed: the size and the header hold, the sum does not
+	auto bad = bytes;
+	bad[hdiconcache::HEADER_BYTES + 150 * 4 * 200 + 3] ^= 0x40;
+	put(bad);
+	CHECK(ReadHDIconStripCache(file, key, team) == nullptr);
+	// cut short
+	bad.assign(bytes.begin(), bytes.end() - 600);
+	put(bad);
+	CHECK(ReadHDIconStripCache(file, key, team) == nullptr);
+	bad.assign(bytes.begin(), bytes.begin() + 40);
+	put(bad);
+	CHECK(ReadHDIconStripCache(file, key, team) == nullptr);
+	put({});
+	CHECK(ReadHDIconStripCache(file, key, team) == nullptr);
+	// a new write replaces the damaged file
+	REQUIRE(WriteHDIconStripCache(file, key, strip, false));
+	team = true;
+	back = ReadHDIconStripCache(file, key, team);
+	REQUIRE(back != nullptr);
+	CHECK_FALSE(team);
+	SDL_FreeSurface(back);
+
+	// a strip of another size than the key says is not written
+	hdiconcache::Key wrong = key;
+	wrong.height += 124;
+	CHECK_FALSE(WriteHDIconStripCache(dir / "other.bin", wrong, strip, true));
+	CHECK_FALSE(fs::exists(dir / "other.bin"));
+	CHECK_FALSE(WriteHDIconStripCache(dir / "other.bin", key, nullptr, true));
+	// a place that cannot be written: false, nothing thrown, nothing left
+	const fs::path blocked = dir / "blocked";
+	{
+		std::ofstream out(blocked);
+		out << "x";
+	}
+	CHECK_FALSE(WriteHDIconStripCache(blocked / "strip.bin", key, strip, true));
+	SDL_FreeSurface(strip);
 }
