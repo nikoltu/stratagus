@@ -1196,17 +1196,15 @@ final class EditorPage {
     }
 
     // ----- the Players rows of the panel (owner decision 94, E3 = option A) -----
-    // Read only: colour, "Player n", the controller's word, the race - only the slots that are not
-    // Nobody, at most as many as fit (six at a pitch of 138 in the 1014 panel); below them
-    // "Edit in the map's Players". Rects of table 6.17 pl0..: row [2080, 1236, 1640, 132], colour
-    // 96 at [2104, +18], name [2230, 300] cap 44, controller [2550, +12, 590, 108], race
-    // [3176, +12, 520, 108]; the two fields drawn as the shown-only property rows (darker, no mark).
-    private static final float PL_ROW_X = 2080f, PL_ROW_W = 1640f, PL_ROWS_DOWN = 114f, PL_ROW_H = 132f, PL_PITCH = 138f;
-    private static final float PL_SWATCH_X = 2104f, PL_SWATCH = 96f, PL_NAME_X = 2230f, PL_NAME_W = 300f;
-    private static final float PL_KEY_X = 2550f, PL_KEY_W = 590f, PL_RACE_X = 3176f, PL_RACE_W = 520f;
-    private static final float PL_FIELD_DOWN = 12f, PL_FIELD_H = 108f, PL_NOTE_GAP = 24f, CAP_NOTE = 30f;
-    /** The rows the panel shows at most (E3: six fit at pitch 138). */
-    private static final int PL_ROWS_MOST = 6;
+    // Read only, only the slots that are not Nobody; below them "Edit in the map's Players".
+    // Owner decision 95 (E7 = option A): compact cells in two columns, filled row by row - colour,
+    // "Player n", then controller and race as text with no fields; three rows hold six slots. A map
+    // with more slots than cells shows one slot fewer and a last cell "+n" (a number, no new word).
+    private static final float PL_CELLS_DOWN = 104f, PL_CELL_H = 56f, PL_CELL_PITCH = 62f, PL_CELL_GAP = 24f;
+    private static final float PL_SWATCH_IN = 12f, PL_SWATCH = 40f, PL_NAME_IN = 68f, PL_NAME_W = 200f, PL_KEY_IN = 280f;
+    private static final float PL_NOTE_GAP = 24f, CAP_NOTE = 30f, CAP_CELL = 30f;
+    /** The rows of cells the panel shows at most (E7: three rows, six slots). */
+    private static final int PL_ROWS_MOST = 3;
     /** By the file's (or working copy's) path, length and time: the eight slots' owner and race, or null. */
     private final java.util.Map<String, int[][]> slotFacts = new java.util.HashMap<String, int[][]>();
 
@@ -1249,31 +1247,35 @@ final class EditorPage {
         if (slots == null) {
             return;
         }
-        // As many rows as the panel holds above the note, at most six.
-        final float room = plH - PL_ROWS_DOWN - (PL_NOTE_GAP + CAP_NOTE + PL_NOTE_GAP);
-        final int fit = (room < PL_ROW_H) ? 0 : 1 + (int) Math.floor((room - PL_ROW_H) / PL_PITCH);
-        // slots[0]: every slot not Nobody, in order (MapRules.playerRows); the first that fit are shown.
-        final int[] rows = java.util.Arrays.copyOf(slots[0], Math.min(slots[0].length, Math.min(PL_ROWS_MOST, fit)));
-        float bottom = PL_Y + PL_ROWS_DOWN;
-        for (int r = 0; r < rows.length; ++r) {
-            final int s = rows[r];
-            final float y = PL_Y + PL_ROWS_DOWN + r * PL_PITCH;
-            kit.fill(c, PL_ROW_X, y, PL_ROW_W, PL_ROW_H, ROW_FAINT, 10f);
-            final float sy = y + (PL_ROW_H - PL_SWATCH) / 2f;
-            kit.fill(c, PL_SWATCH_X, sy, PL_SWATCH, PL_SWATCH, Profiles.COLORS[s & 7], 8f);
-            kit.outline(c, PL_SWATCH_X, sy, PL_SWATCH, PL_SWATCH, LINE, 8f);
-            kit.textMiddle(c, kit.fit(kit.own("Player") + " " + (s + 1), CAP_BODY, PL_NAME_W), PL_NAME_X, y, PL_ROW_H,
-                           CAP_BODY, INK, true);
-            final float fy = y + PL_FIELD_DOWN;
-            kit.fill(c, PL_KEY_X, fy, PL_KEY_W, PL_FIELD_H, PROP_FILL_FIXED, 10f);
-            kit.textCentre(c, kit.fit(PlayersSheet.ownerWord(kit, slots[1][s]), CAP_MID, PL_KEY_W - 24f), PL_KEY_X, fy,
-                           PL_KEY_W, PL_FIELD_H, CAP_MID, INK_MUTED, true);
-            kit.fill(c, PL_RACE_X, fy, PL_RACE_W, PL_FIELD_H, PROP_FILL_FIXED, 10f);
-            kit.textCentre(c, kit.fit(raceWord(slots[2][s]), CAP_MID, PL_RACE_W - 24f), PL_RACE_X, fy, PL_RACE_W,
-                           PL_FIELD_H, CAP_MID, INK_MUTED, true);
-            bottom = y + PL_ROW_H;
+        // As many rows as the panel holds above the note, at most three.
+        final float room = plH - PL_CELLS_DOWN - (PL_NOTE_GAP + CAP_NOTE + PL_NOTE_GAP);
+        final int fit = (room < PL_CELL_H) ? 0 : 1 + (int) Math.floor((room - PL_CELL_H) / PL_CELL_PITCH);
+        final int cells = 2 * Math.min(PL_ROWS_MOST, fit);
+        // slots[0]: every slot not Nobody, in order (MapRules.playerRows).
+        final int shown = MapRules.playerCellsShown(slots[0].length, cells);
+        final int used = Math.min(cells, slots[0].length);
+        final float cw = (INFO_W - 2f * INFO_PAD - PL_CELL_GAP) / 2f;
+        float bottom = PL_Y + PL_CELLS_DOWN;
+        for (int i = 0; i < used; ++i) {
+            final float x = INFO_X + INFO_PAD + (i % 2) * (cw + PL_CELL_GAP);
+            final float y = PL_Y + PL_CELLS_DOWN + (i / 2) * PL_CELL_PITCH;
+            kit.fill(c, x, y, cw, PL_CELL_H, ROW_FAINT, 8f);
+            bottom = y + PL_CELL_H;
+            if (i >= shown) {
+                kit.textCentre(c, "+" + (slots[0].length - shown), x, y, cw, PL_CELL_H, CAP_CELL, INK_MUTED, true);
+                continue;
+            }
+            final int s = slots[0][i];
+            final float sy = y + (PL_CELL_H - PL_SWATCH) / 2f;
+            kit.fill(c, x + PL_SWATCH_IN, sy, PL_SWATCH, PL_SWATCH, Profiles.COLORS[s & 7], 6f);
+            kit.outline(c, x + PL_SWATCH_IN, sy, PL_SWATCH, PL_SWATCH, LINE, 6f);
+            kit.textMiddle(c, kit.fit(kit.own("Player") + " " + (s + 1), CAP_CELL, PL_NAME_W), x + PL_NAME_IN, y,
+                           PL_CELL_H, CAP_CELL, INK, true);
+            final String says = PlayersSheet.ownerWord(kit, slots[1][s]) + " · " + raceWord(slots[2][s]);
+            kit.textMiddle(c, kit.fit(says, CAP_CELL, cw - PL_KEY_IN - 16f), x + PL_KEY_IN, y, PL_CELL_H, CAP_CELL,
+                           INK_MUTED, true);
         }
-        if (fit > 0 || rows.length > 0) {
+        if (fit > 0 || used > 0) {
             kit.textTop(c, kit.fit(kit.own("Edit in the map's Players"), CAP_NOTE, INFO_W - 2f * INFO_PAD),
                         INFO_X + INFO_PAD, bottom + PL_NOTE_GAP, CAP_NOTE, INK_MUTED, true);
         }

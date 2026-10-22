@@ -1371,8 +1371,13 @@ public final class CanvasView extends View {
      * the game has no such string (Neutral) or the player's table lacks the key.
      */
     private static String raceName(Host host, int race) {
-        final String own = host.word(RACE_NAME[race]);
-        return (RACE_KEY[race] == null) ? own : host.term(RACE_KEY[race], own);
+        if (RACE_KEY[race] == null) {
+            // A tab of units (Neutral): its own key "<word> (tab)" for languages whose plural differs
+            // from the owner's word; untranslated, the owner's word.
+            final String tab = host.word(RACE_NAME[race] + " (tab)");
+            return tab.equals(RACE_NAME[race] + " (tab)") ? host.word(RACE_NAME[race]) : tab;
+        }
+        return host.term(RACE_KEY[race], host.word(RACE_NAME[race]));
     }
 
     private int unitColour(MapModel.Unit u) {
@@ -1425,7 +1430,16 @@ public final class CanvasView extends View {
         r.set(x, y, x + BRUSH_W * unit, y + BRUSH_H * unit);
     }
 
-    private float listBottom() { return Math.max(LIST_Y + U_ROW, ownerKeyY() - LIST_FOOT_GAP); }
+    /**
+     * Owner decision 95 (E5 = option C): on a view too low for the word Player and one list row
+     * above it, the word is left out and the list ends above the numbered cells; the cells keep
+     * their place. Taller views keep the word.
+     */
+    private boolean ownerWordShown() { return ownerKeyY() - LIST_FOOT_GAP >= LIST_Y + U_ROW; }
+
+    private float listBottom() {
+        return Math.max(LIST_Y + U_ROW, (ownerWordShown() ? ownerKeyY() : ownerY(0)) - LIST_FOOT_GAP);
+    }
 
     /** The height of the race's list: its groups one under the other. */
     private float listHigh() {
@@ -1531,7 +1545,7 @@ public final class CanvasView extends View {
             fill.setColor(BAR_THUMB);
             c.drawRect(BAR_X * unit, ty * unit, (BAR_X + BAR_W) * unit, (ty + thumb) * unit, fill);
         }
-        if (host != null) {
+        if (host != null && ownerWordShown()) {
             host.text(c, host.word("Player"), BRUSH_KEY_X, ownerKeyY(), PALETTE_W, OWNER_KEY_H, CAP_KEY, INK_MUTED, false);
         }
         for (int i = 0; i < MapRules.PLAYERS; ++i) {

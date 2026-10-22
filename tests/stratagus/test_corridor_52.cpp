@@ -3238,3 +3238,144 @@ TEST_CASE("column 74: the same column through a 2-tile neck - all pass, nobody r
 		CHECK(r.longestStand <= 3 * 16);
 	}
 }
+
+// ---- Live run 80 A5 (work/CALIB_RUN80.md A5, log/a5g1.tsv / a5g3.tsv; map WHD_TEST80) ---------------
+// 9 Footmen box-selected and sent past a forest pocket: forest rows 19-21 and 25-27 over x 4-9 and a
+// spur x 7-9, y 22-24; the pocket's inside x 4-6, y 22-24 is open to the west. G3 (to 10,23, the tile
+// just east of the spur): the formation goals of 1568 / 1570 fall on the spur (9,22 / 9,24) and the
+// original stored 7,22 / 7,24 - the goal walked back toward the unit to the last forest tile before
+// the free pocket (the ORIG47 pull, goal_pull.h). Both stopped in the pocket (6,23 / 6,24), the 7
+// others arrived d 0-2. G1 (to 11,23, all goals free): all 9 arrived d 0-2 after 14-22 steps.
+namespace
+{
+void LayRun80Pocket()
+{
+	const auto forest = [](int x0, int x1, int y0, int y1) {
+		for (int y = y0; y <= y1; ++y) {
+			for (int x = x0; x <= x1; ++x) {
+				Map.Field(x, y)->Flags = MapFieldLandAllowed | MapFieldForest | MapFieldUnpassable;
+			}
+		}
+	};
+	forest(12, 15, 0, 19); // the forest band (its neck at y 9 left out: not on these ways)
+	forest(4, 9, 19, 21);
+	forest(4, 9, 25, 27);
+	forest(7, 9, 22, 24);  // the spur
+	ClearGoalRegionMap();
+}
+
+struct Pocket80Result {
+	std::vector<Vec2i> goals;  /// the group goal of each unit
+	std::vector<Vec2i> pulled; /// the goal after the pull at the first Execute
+	std::vector<Vec2i> ends;
+	std::vector<int> steps;
+	bool allStill = true;
+};
+
+Pocket80Result RunPocket80(const std::vector<Vec2i> &starts, const Vec2i &target)
+{
+	CAnimations slow;
+	CorridorWorld w;
+	SlowFootman(w, slow);
+	LayRun80Pocket();
+	MoveStopsAtStandingCrowd = true;
+	std::vector<CUnit *> units;
+	for (const Vec2i &s : starts) {
+		units.push_back(&w.Place(w.footman, s));
+	}
+	Pocket80Result r;
+	r.goals = GroupMoveGoals(starts, target, 128, 128);
+	for (size_t i = 0; i != units.size(); ++i) {
+		units[i]->Orders.clear();
+		units[i]->Orders.push_back(COrder::NewActionMove(r.goals[i]));
+		units[i]->pathFinderData->output.Length = 0;
+	}
+	r.pulled.assign(units.size(), Vec2i(-1, -1));
+	r.steps.assign(units.size(), 0);
+	std::vector<Vec2i> last(units.size());
+	for (size_t i = 0; i != units.size(); ++i) {
+		last[i] = units[i]->tilePos;
+	}
+	for (int cycle = 0; cycle != 3000; ++cycle) {
+		bool all = true;
+		for (size_t i = 0; i != units.size(); ++i) {
+			CUnit &u = *units[i];
+			if (u.CurrentAction() == UnitAction::Still) {
+				continue;
+			}
+			all = false;
+			w.Cycle(u);
+			--GameCycle;
+			if (u.CurrentAction() == UnitAction::Move && r.pulled[i].x < 0) {
+				const auto &order = static_cast<const COrder_Move &>(*u.CurrentOrder());
+				if (order.GetGoalPulled()) {
+					r.pulled[i] = order.GetGoalPos();
+				}
+			}
+			if (u.tilePos != last[i]) {
+				last[i] = u.tilePos;
+				++r.steps[i];
+			}
+		}
+		++GameCycle;
+		if (all) {
+			break;
+		}
+	}
+	std::string text;
+	for (size_t i = 0; i != units.size(); ++i) {
+		const CUnit &u = *units[i];
+		r.ends.push_back(u.tilePos);
+		r.allStill = r.allStill && u.CurrentAction() == UnitAction::Still;
+		text += "\n " + std::to_string(starts[i].x) + "," + std::to_string(starts[i].y) + " goal "
+		        + std::to_string(r.goals[i].x) + "," + std::to_string(r.goals[i].y) + " pulled "
+		        + std::to_string(r.pulled[i].x) + "," + std::to_string(r.pulled[i].y) + " end "
+		        + std::to_string(u.tilePos.x) + "," + std::to_string(u.tilePos.y) + " d" + std::to_string(Cheb(u.tilePos, target))
+		        + " steps " + std::to_string(r.steps[i]);
+	}
+	MESSAGE("pocket 80 -> " << target.x << "," << target.y << text);
+	return r;
+}
+} // namespace
+
+TEST_CASE("pocket 80: a formation goal on the spur is pulled back to its edge, the unit stops in the pocket")
+{
+	// G3, in the order of the live ids 1564 1565 1566 1568 1569 1570 1571 1577 1578
+	const std::vector<Vec2i> starts = {{3, 25}, {2, 24}, {2, 23}, {1, 23}, {4, 23}, {1, 25}, {3, 24}, {4, 24}, {2, 25}};
+	const Vec2i target(10, 23);
+	const Pocket80Result r = RunPocket80(starts, target);
+	// the live stored goals: 7 plain formation goals, 7,22 / 7,24 for the two on the spur
+	const std::vector<Vec2i> live = {{11, 24}, {10, 23}, {10, 22}, {7, 22}, {12, 22}, {7, 24}, {11, 23}, {12, 23}, {10, 24}};
+	CHECK(r.allStill);
+	for (size_t i = 0; i != starts.size(); ++i) {
+		const bool spur = i == 3 || i == 5;
+		CHECK(r.pulled[i] == live[i]);
+		if (spur) {
+			CHECK(r.goals[i] == Vec2i(9, live[i].y)); // the formation goal itself lies on the spur
+			// live 6,23 / 6,24: in the pocket next to the pulled goal, d 4 from the clicked tile
+			CHECK(r.ends[i].x >= 4);
+			CHECK(r.ends[i].x <= 6);
+			CHECK(r.ends[i].y >= 22);
+			CHECK(r.ends[i].y <= 24);
+		} else {
+			CHECK(r.goals[i] == live[i]);
+			CHECK(Cheb(r.ends[i], target) <= 2); // live d 0-2
+		}
+	}
+}
+
+TEST_CASE("pocket 80: the group round the pocket to free goals - all arrive (live G1)")
+{
+	const std::vector<Vec2i> starts = {{2, 25}, {1, 24}, {2, 24}, {1, 23}, {2, 23}, {1, 22}, {2, 22}, {3, 23}, {2, 21}};
+	const Vec2i target(11, 23);
+	const Pocket80Result r = RunPocket80(starts, target);
+	const std::vector<Vec2i> live = {{12, 23}, {11, 23}, {12, 23}, {11, 23}, {12, 23}, {11, 23}, {12, 23}, {13, 23}, {12, 23}};
+	CHECK(r.allStill);
+	int longest = 0;
+	for (size_t i = 0; i != starts.size(); ++i) {
+		CHECK(r.goals[i] == live[i]);
+		CHECK(Cheb(r.ends[i], target) <= 2); // live d 0-2
+		longest = std::max(longest, r.steps[i]);
+	}
+	CHECK(longest <= 26); // live 14-22 steps round the pocket
+}

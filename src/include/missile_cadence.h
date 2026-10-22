@@ -215,6 +215,20 @@ constexpr int DeathAndDecayPeriod = 24;
 /// Area hits of one Death and Decay missile
 constexpr int DeathAndDecayRounds = 10;
 
+// Live run 80 A9 (CALIB_RUN80.md; dd1 / dd3, hp at the client frame counter): the first area hit
+// came 48 frames after the cast order began; a Stop 43 frames in released no cloud (dd2). Ours hit
+// at the Death Knight's cast swing (10 cycles to "attack", orc/anim.lua SpellCast) + tick 18 = 28.
+// The cloud is now held back 20 cycles (hidden while held: Missile::Delay), so 10 + 20 + 18 = 48;
+// the period 24, the 10 rounds and the 40-cycle recast stay as measured. Calibrated, not decoded.
+
+/// Cycles a Death and Decay cloud is held back after the cast, before its first round
+constexpr int DeathAndDecayReleaseDelay = 20;
+/// Cycles of the Death Knight's cast swing from the order to the cast (orc/anim.lua SpellCast)
+constexpr int DeathKnightCastSwing = 10;
+/// Cycles from the cast order to the first area hit of a Death and Decay (live run 80: 48)
+constexpr int DeathAndDecayFirstHitAfterOrder =
+	DeathKnightCastSwing + DeathAndDecayReleaseDelay + DeathAndDecayFirstHit;
+
 /// A Death and Decay missile makes its area hit on this tick of its life
 constexpr bool DeathAndDecayHitsOn(int tick)
 {
@@ -222,6 +236,15 @@ constexpr bool DeathAndDecayHitsOn(int tick)
 	    && tick < DeathAndDecayFirstHit + DeathAndDecayRounds * DeathAndDecayPeriod
 	    && (tick - DeathAndDecayFirstHit) % DeathAndDecayPeriod == 0;
 }
+
+// The Blizzard (live run 80 A9, bz1: one cast on a Lumber Mill, hp at the client frame counter): the
+// hits of one spot came every 25 - 28 frames, 11 of them from frame 312 to 574 (262 frames = 10 x
+// 26.2), a second spot's hits a few frames later in the same rhythm, the last at 581: one cast 269
+// frames from its first hit to its last. The port had a shard every 2 tiles / BlizzardSpeed 4 =
+// 32 cycles at the 64-pixel tile (320 cycles a cast); calibrated, not decoded.
+
+/// Cycles from one Blizzard shard of a spot to the next
+constexpr int BlizzardShardPeriod = 26;
 
 /// Picture of a Death and Decay missile on a tick of a round of 24; a round that follows
 /// another one begins with the picture the script left

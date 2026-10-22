@@ -179,6 +179,15 @@ final class LoadPage {
         return gone;
     }
 
+    /**
+     * What a save's row shows: its name without the file suffix. The autosave is named by the
+     * game's own string (key autosave, as the original's save list names it, NG92); only that
+     * one name is looked up, so a save the player called anything else keeps its name.
+     */
+    static String caption(SkinKit kit, Save s) {
+        return "autosave".equals(s.name) ? kit.string("autosave", "Autosave") : s.name;
+    }
+
     Save selectedSave() {
         return (selected >= 0 && selected < saves.size()) ? saves.get(selected) : null;
     }
@@ -271,7 +280,7 @@ final class LoadPage {
             if (sel) {
                 kit.fill(c, rowX(), y, 10f, ROW_H, GOLD, 0f);
             }
-            kit.textMiddle(c, kit.fit(s.name, CAP_BODY, rowW() - 36f - 520f), rowX() + 36f, y, ROW_H,
+            kit.textMiddle(c, kit.fit(caption(kit, s), CAP_BODY, rowW() - 36f - 520f), rowX() + 36f, y, ROW_H,
                            CAP_BODY, INK, true);
             kit.textMiddleRight(c, stamp.format(new Date(s.modified)), rowX() + rowW() - 36f, y, ROW_H,
                                 CAP_MID, sel ? INK : INK_MUTED, true);
@@ -282,7 +291,7 @@ final class LoadPage {
         final Save s = selectedSave();
         if (s != null) {
             final float tx = DETAIL_X + 60f, tw = DETAIL_W - 120f, ty = TOP + 66f;
-            kit.textTop(c, kit.fit(s.name, CAP_BODY, tw), tx, ty, CAP_BODY, GOLD, true);
+            kit.textTop(c, kit.fit(caption(kit, s), CAP_BODY, tw), tx, ty, CAP_BODY, GOLD, true);
             final String[] what = describe(kit, s);
             kit.textTop(c, kit.fit(what[0], CAP_MID, tw), tx, ty + LINE_PITCH, CAP_MID, INK, true);
             kit.textTop(c, kit.fit(what[1], CAP_MID, tw), tx, ty + LINE_PITCH * 2f, CAP_MID, INK_MUTED, true);

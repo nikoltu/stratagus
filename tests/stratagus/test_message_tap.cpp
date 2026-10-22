@@ -69,3 +69,15 @@ TEST_CASE("target cursor: an order waiting - yellow over ground, green over own,
 	// A neutral unit (gold mine) keeps the ground colour (not read in run 70).
 	CHECK(targetcursor::pick(true, true, false, true) == Pick::Yellow);
 }
+
+TEST_CASE("target cursor run 79: neutral critters, gold mine and Circle of Power show the ground colour")
+{
+	// Live run 79: the attack cursor over two sheep, the gold mine and the Circle of Power was
+	// the very cursor of bare ground (yellow); over an own Archer it was green.
+	using targetcursor::Pick;
+	const Pick ground = targetcursor::pick(true, false, false, false);
+	CHECK(ground == Pick::Yellow);
+	CHECK(targetcursor::pick(true, true, false, true) == ground); // critter / mine / circle
+	CHECK(targetcursor::pick(true, true, true, false) == Pick::Green);
+	CHECK(targetcursor::pick(true, true, true, false) != ground);
+}

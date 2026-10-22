@@ -313,6 +313,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             // the name, the portrait and the colour (board 2B).
             profile = Profiles.create(this, "Player", 8, 1);
             firstProfile = (profile != null);
+            if (firstProfile) {
+                defaultScenarioChoices();
+            }
         }
         if (prefs().getBoolean(PREF_REOPEN_LANGUAGES, false)) {
             prefs().edit().remove(PREF_REOPEN_LANGUAGES).apply();
@@ -1188,6 +1191,25 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         revealMap = true;
     }
 
+    /**
+     * Owner decision 98 (2026-10-23): the Custom Scenario choices a new profile starts with -
+     * Forest, Medium resources ("standard"), and the lists' own first values for race (Random),
+     * opponents and units (Map Default) and the original's computer player. The map and the list
+     * tab stay. The stored values are what openScenario reads next.
+     */
+    private void defaultScenarioChoices() {
+        race = 0;
+        opponents = 0;
+        resources = 2;
+        units = 0;
+        tileset = 1;
+        bot = 0;
+        prefs().edit()
+            .putInt("scenarioRace", 0).putInt("scenarioOpponents", 0)
+            .putInt("scenarioResources", 2).putInt("scenarioUnits", 0)
+            .putInt("scenarioTileset", 1).putString("scenarioBot", "").apply();
+    }
+
     private void startScenario() {
         if (profile == null || selectedMap >= maps.size()) {
             return;
@@ -1462,6 +1484,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     Profiles.create(this, done.name(), 8, Profiles.count(this) % Profiles.COLORS.length);
                 if (made != null) {
                     profile = made;
+                    // Owner decision 98: a new profile starts from the defaults, not from the
+                    // last profile's Custom Scenario choices.
+                    defaultScenarioChoices();
                     profileChanged();
                 }
             } else {
@@ -1494,7 +1519,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         if (save == null) {
             return;
         }
-        sheet = new ConfirmSheet(kit.own("Delete this saved game?"), save.name,
+        sheet = new ConfirmSheet(kit.own("Delete this saved game?"), LoadPage.caption(kit, save),
                                  kit.string("common_cancel", "Cancel"),
                                  kit.string("common_delete", "Delete"));
         sheetAction = new Runnable() {
@@ -1561,8 +1586,14 @@ public class HomeActivity extends Activity implements LanPage.Starter {
      */
     private boolean launch(String fields, String playerName) {
         // No game is started without the game's files: the engine would come up on nothing.
-        if (!GateActivity.isSatisfied(this)) {
-            filesOk = false;
+        // The side panel's "Game files" line follows this check both ways: files that came back
+        // since the last resume show as OK at once, not only after the next resume.
+        final boolean satisfied = GateActivity.isSatisfied(this);
+        if (satisfied != filesOk) {
+            filesOk = satisfied;
+            view.invalidate();
+        }
+        if (!satisfied) {
             android.util.Log.i("WargusHD", "LAUNCH refused: game files missing");
             tell(kit.own("The game files are missing"), kit.own("Choose the game folder in Options, Game Files."));
             return false;
@@ -1849,7 +1880,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     }
                 } else if ("defeat".equals(outcome) || "draw".equals(outcome) || "quit".equals(outcome)) {
                     // A draw (a surrender ends as one) is shown and counted as a defeat (design 29.4); a game
-                    // left by Quit / Exit counts as one too (owner decision 81).
+                    // left by Quit / Exit counts as one too (owner decision 81); a campaign mission left
+                    // so is not in the record at all (owner decision 98, launch.lua Finished).
                     ++profile.defeats;
                 }
                 // The profile's own line among the game's players.
@@ -2175,7 +2207,11 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             kit.backdrop(c, page == PAGE_NONE ? backdropStart : backdropPage, w, h, 0xFF0D1114);
 
             drawRail(c);
-            drawChip(c);
+            // Not under the open map view: the editor's bar (168 high) covers the chip, and the
+            // foot of its statistics line (down to 186) showed below the bar (LT 1.0.5 read, ed2_top).
+            if (!(page == ENTRY_EDITOR && editor.canvasOpen())) {
+                drawChip(c);
+            }
             if (page == ENTRY_SCENARIO) {
                 drawScenario(c);
             } else if (page == ENTRY_LOAD) {

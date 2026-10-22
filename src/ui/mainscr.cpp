@@ -251,10 +251,12 @@ static void UiDrawCellLifeBar(const CUnit &unit, int x, int y, int cellW, int ce
 **  selection that shares no unit with the one before is laid out from the first cell again.
 **  LetUnitDie empties the cell of a unit that dies. Only pointers are compared, a unit in the
 **  list is never touched unless it is selected. `Selected` itself is never changed from here.
-**  Not established in the original: what the panel shows when one unit is left of a group
-**  (here: the single unit's panel; its cell is still kept for the selection after it), and a
-**  unit taken out of the selection by a Shift-click (here: as a unit that died, its cell stays
-**  empty).
+**  Live run 79 (CALIB_RUN79, panel series every 400 ms): a group of 3 (Peasant, Archer, Archer)
+**  whose middle Archer dies keeps the dead cell empty and the third in its place for the 12 s
+**  watched; a group of 2 whose second unit dies shows the single unit's panel (name, Level,
+**  stats, its own command card) from the next frame on - as here. Not established: what a
+**  later selection does with a cell kept that way, and a unit taken out of the selection by a
+**  Shift-click (here: as a unit that died, its cell stays empty).
 */
 static std::vector<CUnit *> SelectionCells;
 static const std::vector<CUnit *> NoSelectionCells;
@@ -1411,6 +1413,13 @@ void SetMaxMessageCount(int newMax)
 static void DrawInfoPanelBackground(unsigned frame)
 {
 	if (UI.InfoPanel.G) {
+		// FIX-ROUND 3.4.89 (big test 3.5.0 finding 4): the HD skins' panel (ui/<race>/hd/
+		// infopanel_blank.png) is one picture for every state, while the classic panel has four
+		// (none / plain / mana / training). A state beyond the graphic's frames draws its first
+		// frame instead of being skipped with a warning.
+		if (static_cast<int>(frame) >= UI.InfoPanel.G->NumFrames) {
+			frame = 0;
+		}
 		UI.InfoPanel.G->DrawFrame(frame, UI.InfoPanel.X, UI.InfoPanel.Y);
 	}
 }

@@ -1537,6 +1537,67 @@ bool HandleMouseScrollArea(const PixelPos &mousePos)
 }
 
 /**
+**  Classic view: the mouse in the scroll band of the 4:3 box (hdatlas::classicScrollEdges,
+**  live run 80 A3: 6 logical pixels inside the box at the left / top, 10 at the right /
+**  bottom, the black bars beside the box too). The window-edge margins of the Remastered
+**  view (ScrollMargin*) are not used here.
+**
+**  @param mousePos  Screen position.
+**
+**  @return   true if the mouse is in the scroll band, false otherwise
+*/
+bool HandleClassicMouseScrollArea(const PixelPos &mousePos)
+{
+	if (IsTouchPointerParked()) {
+		return false;
+	}
+	int dx = 0;
+	int dy = 0;
+	hdatlas::classicScrollEdges(hdatlas::classicScreen(Video.Width, Video.Height), mousePos.x,
+	                            mousePos.y, dx, dy);
+	if (dx < 0) {
+		if (dy < 0) {
+			CursorOn = ECursorOn::ScrollLeftUp;
+			MouseScrollState = ScrollLeftUp;
+			GameCursor = UI.ArrowNW.Cursor;
+		} else if (dy > 0) {
+			CursorOn = ECursorOn::ScrollLeftDown;
+			MouseScrollState = ScrollLeftDown;
+			GameCursor = UI.ArrowSW.Cursor;
+		} else {
+			CursorOn = ECursorOn::ScrollLeft;
+			MouseScrollState = ScrollLeft;
+			GameCursor = UI.ArrowW.Cursor;
+		}
+	} else if (dx > 0) {
+		if (dy < 0) {
+			CursorOn = ECursorOn::ScrollRightUp;
+			MouseScrollState = ScrollRightUp;
+			GameCursor = UI.ArrowNE.Cursor;
+		} else if (dy > 0) {
+			CursorOn = ECursorOn::ScrollRightDown;
+			MouseScrollState = ScrollRightDown;
+			GameCursor = UI.ArrowSE.Cursor;
+		} else {
+			CursorOn = ECursorOn::ScrollRight;
+			MouseScrollState = ScrollRight;
+			GameCursor = UI.ArrowE.Cursor;
+		}
+	} else if (dy < 0) {
+		CursorOn = ECursorOn::ScrollUp;
+		MouseScrollState = ScrollUp;
+		GameCursor = UI.ArrowN.Cursor;
+	} else if (dy > 0) {
+		CursorOn = ECursorOn::ScrollDown;
+		MouseScrollState = ScrollDown;
+		GameCursor = UI.ArrowS.Cursor;
+	} else {
+		return false;
+	}
+	return true;
+}
+
+/**
 **  Keep coordinates in window and update cursor position
 **
 **  @param x  screen pixel X position.

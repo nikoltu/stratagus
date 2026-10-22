@@ -141,9 +141,11 @@ final class OptionsPage {
         tab = Math.max(0, Math.min(TABS.length - 1, which));
     }
 
-    // The Languages tab (owner's rule): one row to a language, the one in use marked.
-    private static final int LANGUAGE_TAB = 4;
-    private static final float LANG_PITCH = 138f, LANG_H = 120f;
+    // The Languages tab (owner's rule): one row to a language, the one in use marked. Owner decision
+    // 95 (L1 = option B): two columns of six rows, filled down the first column, then the second;
+    // more than twelve languages lengthen both columns (eight rows each fit the S20+'s panel).
+    private static final int LANGUAGE_TAB = 4, LANG_ROWS = 6;
+    private static final float LANG_PITCH = 138f, LANG_H = 120f, LANG_GAP = 48f;
     private static final int ROW_SELECTED = 0x36F0D250, ROW_FAINT = 0x10FFFFFF;
     private String languageInUse = "enUS", languageAsked;
     /** The rows of the tab: the game's languages and a switched-on language mod's (SkinKit.languages). */
@@ -156,18 +158,24 @@ final class OptionsPage {
         return asked;
     }
 
+    private int languageRows() { return Math.max(LANG_ROWS, (languages.length + 1) / 2); }
+    private float languageW() { return (RIGHT - X0 - 120f - LANG_GAP) / 2f; }
+    private float languageX(int i) { return X0 + 60f + (i / languageRows()) * (languageW() + LANG_GAP); }
+    private float languageY(int i) { return PAGE_Y + 48f + LANG_PITCH * (i % languageRows()); }
+
     private void drawLanguages(Canvas c, SkinKit kit) {
-        final float x = X0 + 60f, w = RIGHT - X0 - 120f;
+        final float w = languageW();
         for (int i = 0; i < languages.length; ++i) {
-            final float y = PAGE_Y + 48f + LANG_PITCH * i;
+            final float x = languageX(i), y = languageY(i);
             final boolean inUse = languages[i][0].equals(languageInUse);
             kit.fill(c, x, y, w, LANG_H, inUse ? ROW_SELECTED : ROW_FAINT, 10f);
             if (inUse) {
                 kit.fill(c, x, y, 10f, LANG_H, GOLD, 0f);
                 kit.textMiddleRight(c, kit.own("In use"), x + w - 36f, y, LANG_H, CAP_SMALL, INK_MUTED, true);
             }
-            kit.textMiddle(c, kit.string(languages[i][1], languages[i].length > 2 ? languages[i][2] : languages[i][0]), x + 36f, y,
-                           LANG_H, CAP_BODY, inUse ? GOLD : INK, true);
+            final String name = kit.string(languages[i][1], languages[i].length > 2 ? languages[i][2] : languages[i][0]);
+            final float room = w - 72f - (inUse ? kit.width(kit.own("In use"), CAP_SMALL) + 36f : 0f);
+            kit.textMiddle(c, kit.fit(name, CAP_BODY, room), x + 36f, y, LANG_H, CAP_BODY, inUse ? GOLD : INK, true);
         }
     }
     private SharedPreferences store;
@@ -652,16 +660,16 @@ final class OptionsPage {
             licencesAsked = true;
             return true;
         }
-        if (tab == LANGUAGE_TAB && in(x, y, X0 + 60f, PAGE_Y + 48f, RIGHT - X0 - 120f,
-                                      LANG_PITCH * languages.length)) {
-            final int row = (int) ((y - PAGE_Y - 48f) / LANG_PITCH);
-            if (row >= 0 && row < languages.length
-                && y - PAGE_Y - 48f - row * LANG_PITCH < LANG_H
-                && !languages[row][0].equals(languageInUse)) {
-                languageAsked = languages[row][0];
-                return true;
+        if (tab == LANGUAGE_TAB) {
+            for (int i = 0; i < languages.length; ++i) {
+                if (in(x, y, languageX(i), languageY(i), languageW(), LANG_H)) {
+                    if (languages[i][0].equals(languageInUse)) {
+                        return false;
+                    }
+                    languageAsked = languages[i][0];
+                    return true;
+                }
             }
-            return false;
         }
         if (tab == SOURCE_TAB && store != null
             && in(x, y, rx - SWITCH_W - 24f, sourceSwitchY(), SWITCH_W + 48f, ROW_H)) {

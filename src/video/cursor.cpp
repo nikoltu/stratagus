@@ -234,6 +234,26 @@ static void DrawVisibleRectangleCursor(PixelPos corner1, PixelPos corner2)
 **  (at Zoom != 1 a native-scale draw after the upscale would be 1/Zoom sized
 **  and misaligned). The caller supplies the viewport and the target tile.
 */
+/// Classic preview: the solid pixels of one tile (32 x 32 classic pixels, half of them).
+static constexpr int ClassicGhostRectsMax = hdatlas::ClassicTilePx * hdatlas::ClassicTilePx / 2;
+
+/// Classic preview: is the forest tile at `pos` surrounded by forest (its 8 neighbours on the
+/// map)? Run 80 A2: the band's west column (next to grass) took 109,69,69, the columns inside
+/// 77,60,60. A neighbour off the map counts as forest (the map edge is no forest edge: not
+/// measured).
+static bool ClassicForestAllRound(const Vec2i &pos)
+{
+	for (int dy = -1; dy <= 1; ++dy) {
+		for (int dx = -1; dx <= 1; ++dx) {
+			const Vec2i n(pos.x + dx, pos.y + dy);
+			if ((dx || dy) && Map.Info.IsPointOnMap(n) && !Map.Field(n)->ForestOnMap()) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 {
 	const PixelPos screenPos = vp.TilePosToScreen_TopLeft(mpos);
@@ -298,6 +318,15 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 	int h = hdatlas::tilesBeforeViewEnd(mpos.y, CursorBuilding->TileHeight, vp.MapPos.y, vp.MapHeight);
 	const int w0 = hdatlas::tilesBeforeViewEnd(mpos.x, CursorBuilding->TileWidth, vp.MapPos.x, vp.MapWidth);
 
+	// Classic view (F5): the original's preview, measured in live run 80 (A2): a one-pixel
+	// checker in classic pixels per tile, the odd pixels one opaque colour, green when the tile
+	// is free and a red that depends on the ground when it is blocked; the even pixels leave
+	// the building art drawn above (on every tile) and the terrain showing. The Remastered view
+	// keeps its translucent squares below.
+	const bool classicGhost = IsClassicView();
+	SDL_Rect checker[ClassicGhostRectsMax];
+	hdatlas::ClassicRect cells[ClassicGhostRectsMax];
+
 	while (h-- > 0) {
 		int w = w0;
 		while (w-- > 0) {
@@ -312,6 +341,23 @@ void DrawBuildingCursorViewport(const CViewport &vp, const Vec2i &mpos)
 				color = ColorGreen;
 			} else {
 				color = ColorRed;
+			}
+			if (classicGhost) {
+				const CMapField &field = *Map.Field(posIt);
+				const bool explored = field.playerInfo.IsExplored(*ThisPlayer);
+				const bool forest = field.ForestOnMap();
+				const hdatlas::ClassicGhostGround ground = hdatlas::classicGhostGround(
+					explored, forest, forest && ClassicForestAllRound(posIt), field.CoastOnMap(),
+					field.WaterOnMap());
+				const hdatlas::ClassicGhostRgb rgb =
+					hdatlas::classicGhostColour(color == ColorGreen, ground);
+				const int n = hdatlas::classicGhostCheckerRects(screenPos.x + w * tileW,
+				                                                screenPos.y + h * tileH, tileW, tileH, cells);
+				for (int i = 0; i < n; ++i) {
+					checker[i] = {cells[i].x, cells[i].y, cells[i].w, cells[i].h};
+				}
+				Video.FillRectanglesClip(Video.MapRGB(TheScreen->format, rgb.r, rgb.g, rgb.b), checker, n);
+				continue;
 			}
 			// NG20: step and size by the ZOOMED tile. PixelTileSize is the unzoomed tile, so at any
 			// zoom != 1 the tint squares drifted out of step with the tiles they mark -- wrong pitch

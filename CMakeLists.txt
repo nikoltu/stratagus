@@ -55,6 +55,13 @@ option(DOWNLOAD_FREEPATS OFF)
 
 project(stratagus)
 
+if(ANDROID)
+	# FIX-ROUND 3.4.89: __FILE__ (ErrorPrint / Assert prefixes) and debug info carried the build
+	# folder (C:/Git/stratagus/...) into libmain.so and into every logcat line. Map the source and
+	# build roots away: paths read "src/video/sdl.cpp". Every in-tree target after this line.
+	add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}/=" "-ffile-prefix-map=${CMAKE_BINARY_DIR}/=build/")
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/third-party/CMakeLists.txt")
 	add_subdirectory(third-party EXCLUDE_FROM_ALL SYSTEM)
 else()

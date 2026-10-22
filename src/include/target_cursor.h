@@ -37,8 +37,10 @@
 ///   mine and tree - the original has no hover cursor (no magnifier);
 /// - while an order waits for its target (A = attack), the crosshair is coloured by what is under
 ///   it: yellow over ground and trees, green over an own unit, red over an enemy unit.
-/// Allied units take the own colour and neutral ones (a gold mine) the ground colour: neither
-/// was read in run 70 (UNMEASURED; the engine's old grouping kept).
+/// Neutral units take the ground colour: live run 79 (CALIB_RUN79) read the same yellow cursor
+/// (one handle, one bit hash) over two critters (sheep), the gold mine and the Circle of Power
+/// as over bare ground, and green over an own Archer. Allied units take the own colour: not
+/// read (no allied unit in the scene; UNMEASURED, the engine's old grouping kept).
 namespace targetcursor
 {
 

@@ -1229,4 +1229,15 @@ public final class MapRules {
         }
         return java.util.Arrays.copyOf(out, n);
     }
+
+    /**
+     * The slots a panel of `cells` cells names (owner decision 95, E7 = option A): all of them when
+     * they fit, else one fewer, the last cell then counting the rest ("+n").
+     */
+    public static int playerCellsShown(int players, int cells) {
+        if (cells <= 0 || players <= 0) {
+            return 0;
+        }
+        return (players <= cells) ? players : cells - 1;
+    }
 }

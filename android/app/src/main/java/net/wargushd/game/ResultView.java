@@ -38,6 +38,8 @@ final class ResultView extends View {
     private static final float TILE_W = 492f, TILE_H = 300f, TILE_Y = 372f, TILE_GAP = 72f;
     private static final float LINE_PITCH = 82.5f, TABLE_Y = 1200f, TABLE_H_FULL = 720f;
     private static final float ROW_H = 132f, ROW_PITCH = 138f, BUTTON_W = 720f, BUTTON_H = 120f;
+    /** The closest the table's rows are set when they would not all fit (owner decision 98). */
+    private static final float MIN_ROW_PITCH = 76f;
     private static final float CAP_TITLE = 60f, CAP_BODY = 44f, CAP_MID = 36f, CAP_SMALL = 30f;
 
     private static final int SHADE = 0xAA000000, PANEL_FILL = 0xDE140F0A, LINE = 0xFF92743E;
@@ -71,6 +73,8 @@ final class ResultView extends View {
     private String map = "";
     private long score;
     private int rank;
+    /** A cheat was used in the game: the rank tile shows "Cheater!" (the score is 0; live run 80 B4). */
+    private boolean cheater;
     private boolean orc;
     private int opponents;
     private JSONArray players = new JSONArray();
@@ -209,6 +213,10 @@ final class ResultView extends View {
             // The game's own total (with the victory bonus) and rank, when the record has them.
             score = game.optLong("score", score);
             rank = game.optInt("rank_index", 0);
+            cheater = game.optBoolean("cheater", false);
+            if (cheater) {
+                score = 0L;
+            }
             orc = "orc".equals(game.optString("race"));
             cycles = game.optLong("cycles", 0L);
             final String mode = whole.optString("mode");
@@ -254,6 +262,25 @@ final class ResultView extends View {
         kit.textTop(c, name, px + 48f, y, CAP_MID, INK_MUTED, true);
         kit.textTopRight(c, grouped(total - added + shown), px + 900f, y, CAP_MID, INK, true);
         kit.textTopRight(c, "+" + grouped(shown), px + pw - 48f, y, CAP_MID, ADDED, true);
+    }
+
+    /** A profile box line: the usual pitch, or the LAN form's closer one in the short view. */
+    private void boxLine(Canvas c, boolean compact, float px, float pw, int row, String name, long total,
+                         long added) {
+        if (compact) {
+            lanDelta(c, px, pw, row, name, total, added);
+        } else {
+            delta(c, px, pw, row, name, total, added);
+        }
+    }
+
+    /** The rank tile's value: "Cheater!" after a cheat (the game's rank_txt_39, live run 80 B4),
+     *  else the rank earned, else "-". */
+    private String rankText() {
+        if (cheater) {
+            return kit.string("rank_txt_39", "Cheater!");
+        }
+        return (rank > 0) ? kit.string(Profiles.rankKey(rank, orc), "-") : "-";
     }
 
     /** A number with its thousands set apart by a space. */
@@ -303,13 +330,52 @@ final class ResultView extends View {
      * the table and the buttons, and from the table only when that is used up.
      */
     private float winH() { return Math.min(WIN_H_FULL, kit.height - 2f * WIN_Y); }
-    private float tableH() { return Math.min(TABLE_H_FULL, buttonY() - 48f - TABLE_Y); }
     private float buttonY() { return WIN_Y + winH() - INSET - BUTTON_H; }
-    private float rowsTop() { return TABLE_Y + 96f; }
-    private float rowsBottom() { return TABLE_Y + tableH() - 12f; }
+
+    /**
+     * Owner decision 99 (2026-10-23, FIX_ROUND_3489 option A): the short view of a phone. When
+     * the table at its usual place (TABLE_Y) would hold fewer than two rows even at the closest
+     * pitch, the left-hand lines under the tiles (they repeat the subtitle) are left out, the
+     * profile box is set at the LAN form's pitch 54, and the table stands under the tiles from
+     * COMPACT_TABLE_Y, as wide as the tiles, beside the profile box. Tablets keep their form.
+     */
+    private boolean compact() {
+        final float usual = Math.min(TABLE_H_FULL, buttonY() - 48f - TABLE_Y);
+        return usual - 108f + 6f < 2f * MIN_ROW_PITCH;
+    }
+    private static final float COMPACT_TABLE_Y = TILE_Y + TILE_H + 88f;
+    /** The tiles' width: three tiles and their two gaps. */
+    private static final float COMPACT_TABLE_W = TILE_W * 3f + TILE_GAP * 2f;
+    /** Where the numbers' columns start in the narrower table; the relation is left out there. */
+    private static final float COMPACT_NAME_AREA = 420f;
+
+    private float tableY() { return compact() ? COMPACT_TABLE_Y : TABLE_Y; }
+    private float tableW() { return compact() ? COMPACT_TABLE_W : iw(); }
+    private float tableH() {
+        return compact() ? buttonY() - 48f - COMPACT_TABLE_Y : Math.min(TABLE_H_FULL, buttonY() - 48f - TABLE_Y);
+    }
+    private float rowsTop() { return tableY() + 96f; }
+    private float rowsBottom() { return tableY() + tableH() - 12f; }
+
+    /**
+     * Owner decision 98 (2026-10-23): the table shows every player of the game, as the original's
+     * results screen does. When the rows at their full pitch would not all fit, they are set
+     * closer, down to MIN_ROW_PITCH (eight rows fit a 16:10 tablet's table); only below that are
+     * they dragged inside the table as before.
+     */
+    private float rowPitch() {
+        final float room = rowsBottom() - rowsTop() + 6f;
+        final int n = Math.max(1, rows.size());
+        if (n * ROW_PITCH <= room) {
+            return ROW_PITCH;
+        }
+        return Math.max(MIN_ROW_PITCH, room / n);
+    }
+
+    private float rowH() { return rowPitch() - 6f; }
 
     private float maxScroll() {
-        return Math.max(0f, rows.size() * ROW_PITCH - 6f - (rowsBottom() - rowsTop()));
+        return Math.max(0f, rows.size() * rowPitch() - 6f - (rowsBottom() - rowsTop()));
     }
 
     private void well(Canvas c, float x, float y, float w, float h) {
@@ -364,11 +430,18 @@ final class ResultView extends View {
         final String lengthPart = played.isEmpty() ? "" : " - " + played;
         final String missionName = (mission >= 1 && mission <= ROMAN.length)
             ? ROMAN[mission - 1] + ". " + kit.string(code + "_" + mission + "_name", "") : map;
+        final boolean compact = compact();
         if (story) {
-            kit.textTop(c, kit.string(expansion ? "campaign_expansion" : "campaign_base",
-                                      expansion ? "Expansion" : "Campaign")
-                        + " - " + kit.string(orcSide ? "orc" : "human", orcSide ? "Orc" : "Human")
-                        + " - " + missionName + lengthPart, ix, 288f, CAP_SMALL, INK_MUTED, true);
+            // In the short view the progress line under the tiles is left out; its count joins
+            // the subtitle so that it is not lost.
+            final String progress = (compact && completed >= 0)
+                ? " - " + kit.own(victory ? "Progress saved" : "Progress unchanged") + ": " + completed + " / " + length
+                : "";
+            final String sub = kit.string(expansion ? "campaign_expansion" : "campaign_base",
+                                          expansion ? "Expansion" : "Campaign")
+                + " - " + kit.string(orcSide ? "orc" : "human", orcSide ? "Orc" : "Human")
+                + " - " + missionName + lengthPart + progress;
+            kit.textTop(c, compact ? kit.fit(sub, CAP_SMALL, iw) : sub, ix, 288f, CAP_SMALL, INK_MUTED, true);
         } else {
             kit.textTop(c, map + " - " + kit.own(loaded ? "Saved game" : "Custom Scenario") + " - " + who + lengthPart, ix, 288f,
                         CAP_SMALL, INK_MUTED, true);
@@ -381,7 +454,7 @@ final class ResultView extends View {
         };
         final String[] values = {
             kit.string(victory ? "rank_txt_41" : "rank_txt_40", victory ? "Won" : "Lost"),
-            (rank > 0) ? kit.string(Profiles.rankKey(rank, orc), "-") : "-",
+            rankText(),
             grouped(counted(score)),
         };
         for (int i = 0; i < 3; ++i) {
@@ -391,7 +464,9 @@ final class ResultView extends View {
             kit.textCentreTop(c, kit.fit(values[i], CAP_TITLE, TILE_W - 60f), gx + 30f, TILE_Y + 162f,
                               TILE_W - 60f, CAP_TITLE, victory ? GOLD : INK, true);
         }
-        if (story) {
+        if (compact) {
+            // Short view: the table stands where these lines would be.
+        } else if (story) {
             kit.textTop(c, kit.fit(missionName, CAP_BODY, 1620f), ix, 744f, CAP_BODY, GOLD, true);
             if (completed >= 0) {
                 kit.textTop(c, kit.own(victory ? "Progress saved" : "Progress unchanged") + ": " + completed + " / "
@@ -410,31 +485,37 @@ final class ResultView extends View {
 
         // The profile after this game: what it had, with what this game added.
         final float px = ix + 1620f + 72f, pw = iw - 1620f - 72f;
-        well(c, px, TILE_Y, pw, 780f);
+        // In the short view the box takes the LAN form's closer lines (pitch 54).
+        well(c, px, TILE_Y, pw, compact ? LAN_PROFILE_H : 780f);
         if (before != null) {
             if (face == null) {
                 face = Portraits.tinted(kit, before.portrait, Profiles.COLORS[before.color]);
             }
-            kit.picture(c, face, px + 48f, TILE_Y + 36f, 217.9f, 180f);
-            kit.textTop(c, kit.fit(before.name, CAP_BODY, pw - 360f), px + 310f, TILE_Y + 60f, CAP_BODY,
+            if (compact) {
+                kit.picture(c, face, px + 48f, TILE_Y + 24f, 203.4f, 168f);
+            } else {
+                kit.picture(c, face, px + 48f, TILE_Y + 36f, 217.9f, 180f);
+            }
+            final float nameY = TILE_Y + (compact ? 48f : 60f);
+            kit.textTop(c, kit.fit(before.name, CAP_BODY, pw - 360f), px + 310f, nameY, CAP_BODY,
                         GOLD, true);
-            kit.textTop(c, kit.own("Profile after this game"), px + 310f, TILE_Y + 60f + LINE_PITCH, CAP_SMALL,
+            kit.textTop(c, kit.own("Profile after this game"), px + 310f, nameY + LINE_PITCH, CAP_SMALL,
                         INK_MUTED, true);
             final long u = own.optLong("units", 0L), b = own.optLong("buildings", 0L);
             final long k = own.optLong("kills", 0L), z = own.optLong("razings", 0L);
-            delta(c, px, pw, 0, kit.own("Games played"), before.games + 1, 1);
+            boxLine(c, compact, px, pw, 0, kit.own("Games played"), before.games + 1, 1);
             if (victory) {
-                delta(c, px, pw, 1, kit.own("Victories"), before.victories + 1, 1);
+                boxLine(c, compact, px, pw, 1, kit.own("Victories"), before.victories + 1, 1);
             } else {
-                delta(c, px, pw, 1, kit.own("Defeats"), before.defeats + 1, 1);
+                boxLine(c, compact, px, pw, 1, kit.own("Defeats"), before.defeats + 1, 1);
             }
-            delta(c, px, pw, 2, kit.string("victorydefeat_units", "Units"), before.units + u, u);
-            delta(c, px, pw, 3, kit.string("victorydefeat_buildings", "Buildings"), before.buildings + b, b);
-            delta(c, px, pw, 4, kit.string("victorydefeat_kills", "Kills"), before.kills + k, k);
-            delta(c, px, pw, 5, kit.string("victorydefeat_razings", "Razings"), before.razings + z, z);
-            delta(c, px, pw, 6, kit.string("victorydefeat_score", "Score"), before.score + score, score);
+            boxLine(c, compact, px, pw, 2, kit.string("victorydefeat_units", "Units"), before.units + u, u);
+            boxLine(c, compact, px, pw, 3, kit.string("victorydefeat_buildings", "Buildings"), before.buildings + b, b);
+            boxLine(c, compact, px, pw, 4, kit.string("victorydefeat_kills", "Kills"), before.kills + k, k);
+            boxLine(c, compact, px, pw, 5, kit.string("victorydefeat_razings", "Razings"), before.razings + z, z);
+            boxLine(c, compact, px, pw, 6, kit.string("victorydefeat_score", "Score"), before.score + score, score);
             // The best rank so far; marked when this game raised it.
-            final float y = TILE_Y + 252f + 62f * 7;
+            final float y = compact ? LAN_DELTA_Y + LAN_DELTA_PITCH * 7 : TILE_Y + 252f + 62f * 7;
             final boolean raised = rank > before.bestRank;
             final int best = raised ? rank : before.bestRank;
             final boolean bestOrc = raised ? orc : before.bestRankOrc;
@@ -442,14 +523,16 @@ final class ResultView extends View {
             kit.textTopRight(c, best > 0 ? kit.string(Profiles.rankKey(best, bestOrc), "-") : "-",
                              px + 900f, y, CAP_MID, GOLD, true);
             if (raised) {
-                kit.textTopRight(c, "new", px + pw - 48f, y, CAP_MID, ADDED, true);
+                kit.textTopRight(c, kit.own("new"), px + pw - 48f, y, CAP_MID, ADDED, true);
             }
         }
 
         // Every player of the game.
-        well(c, ix, TABLE_Y, iw, tableH());
-        final float nx = ix + 24f + 860f;
-        final float cw = (ix + iw - 24f - 36f - nx) / COLUMNS.length;
+        // In the short view the table is as wide as the tiles above it, the profile box beside it.
+        final float ty = tableY(), tw = tableW();
+        well(c, ix, ty, tw, tableH());
+        final float nx = ix + 24f + (compact ? COMPACT_NAME_AREA : 860f);
+        final float cw = (ix + tw - 24f - 36f - nx) / COLUMNS.length;
         for (int k = 0; k < COLUMNS.length; ++k) {
             // The game's texts for some columns end in a colon (they are labels there); a
             // heading too wide for its column is made smaller.
@@ -457,48 +540,57 @@ final class ResultView extends View {
             if (head.endsWith(":") || head.endsWith("：")) {
                 head = head.substring(0, head.length() - 1).trim();
             }
-            kit.textTopRight(c, kit.fitHeading(head, CAP_SMALL, cw - 36f), nx + cw * k + cw - 24f, TABLE_Y + 36f,
+            kit.textTopRight(c, kit.fitHeading(head, CAP_SMALL, cw - 36f), nx + cw * k + cw - 24f, ty + 36f,
                              CAP_SMALL, INK_MUTED, true);
         }
         // The table reaches down to the buttons (four rows on a tablet); with more players the
         // rows are dragged inside it, and then a count "shown / all" stands in the heading and
         // the lower edge fades while rows wait below (owner's rule).
-        final int whole = Math.max(1, (int) ((rowsBottom() - rowsTop() + 6f) / ROW_PITCH));
+        final float pitch = rowPitch(), rowH = rowH();
+        final int whole = Math.max(1, (int) ((rowsBottom() - rowsTop() + 6f) / pitch));
         if (rows.size() > whole) {
-            kit.textTopRight(c, whole + " / " + rows.size(), ix + 24f + 600f, TABLE_Y + 36f,
-                             CAP_SMALL, INK_MUTED, true);
+            if (compact) {
+                kit.textTop(c, whole + " / " + rows.size(), ix + 48f, ty + 36f, CAP_SMALL, INK_MUTED, true);
+            } else {
+                kit.textTopRight(c, whole + " / " + rows.size(), ix + 24f + 600f, ty + 36f,
+                                 CAP_SMALL, INK_MUTED, true);
+            }
         }
         c.save();
-        c.clipRect(kit.rect(ix + 24f, rowsTop(), iw - 48f, rowsBottom() - rowsTop()));
+        c.clipRect(kit.rect(ix + 24f, rowsTop(), tw - 48f, rowsBottom() - rowsTop()));
         for (int i = 0; i < rows.size(); ++i) {
             final JSONObject p = rows.get(i);
             final boolean me = p.optBoolean("me", false);
-            final float rx = ix + 24f, ry = rowsTop() + ROW_PITCH * i - scroll, rw = iw - 48f;
-            if (ry + ROW_H < rowsTop() || ry > rowsBottom() || clock < COUNT_FROM + ROW_STEP * i) {
+            final float rx = ix + 24f, ry = rowsTop() + pitch * i - scroll, rw = tw - 48f;
+            if (ry + rowH < rowsTop() || ry > rowsBottom() || clock < COUNT_FROM + ROW_STEP * i) {
                 continue;
             }
-            kit.fill(c, rx, ry, rw, ROW_H, me ? ROW_OWN : ROW_FAINT, 10f);
+            kit.fill(c, rx, ry, rw, rowH, me ? ROW_OWN : ROW_FAINT, 10f);
             final int color = p.optInt("color", -1);
             if (color >= 0 && color < Profiles.COLORS.length) {
-                kit.fill(c, rx + 24f, ry + 30f, 72f, 72f, Profiles.COLORS[color], 12f);
-                kit.outline(c, rx + 24f, ry + 30f, 72f, 72f, SWATCH_LINE, 12f);
+                // 72 square in a full row (30 above and below); smaller in a closer-set row
+                final float sw = Math.min(72f, rowH - 24f), sy = ry + (rowH - sw) / 2f;
+                kit.fill(c, rx + 24f, sy, sw, sw, Profiles.COLORS[color], 12f);
+                kit.outline(c, rx + 24f, sy, sw, sw, SWATCH_LINE, 12f);
             }
-            kit.textMiddle(c, kit.fit(p.optString("name", ""), CAP_BODY, NAME_FIT), rx + 120f, ry, ROW_H,
+            kit.textMiddle(c, kit.fit(p.optString("name", ""), CAP_BODY,
+                                      compact ? COMPACT_NAME_AREA - 120f - 24f : NAME_FIT), rx + 120f, ry, rowH,
                            CAP_BODY, me ? GOLD : INK, true);
-            // The relation in the game's own words; it has none for a neutral player.
+            // The relation in the game's own words; it has none for a neutral player. The short
+            // view has no room for it (the own row is marked by its fill and gold name).
             final String relation = p.optString("relation", me ? "you" : "");
-            if (relation.equals("you") || relation.equals("enemy") || relation.equals("ally")) {
-                kit.textMiddle(c, kit.string("clan_relation_" + relation, ""), rx + 600f, ry, ROW_H,
+            if (!compact && (relation.equals("you") || relation.equals("enemy") || relation.equals("ally"))) {
+                kit.textMiddle(c, kit.string("clan_relation_" + relation, ""), rx + 600f, ry, rowH,
                                CAP_SMALL, me ? INK : INK_MUTED, true);
             }
             for (int k = 0; k < FIELDS.length; ++k) {
                 kit.textMiddleRight(c, grouped(counted(p.optLong(FIELDS[k], 0L))), nx + cw * k + cw - 24f, ry,
-                                    ROW_H, CAP_MID, INK, true);
+                                    rowH, CAP_MID, INK, true);
             }
         }
         c.restore();
         if (scroll < maxScroll() - 1f) {
-            final RectF edge = kit.rect(ix + 24f, rowsBottom() - 84f, iw - 48f, 84f);
+            final RectF edge = kit.rect(ix + 24f, rowsBottom() - 84f, tw - 48f, 84f);
             final Paint shade = new Paint();
             shade.setShader(new LinearGradient(0f, edge.top, 0f, edge.bottom, 0x00100C08, 0xF0100C08,
                                                Shader.TileMode.CLAMP));
@@ -743,7 +835,7 @@ final class ResultView extends View {
         };
         final String[] values = {
             kit.string(victory ? "rank_txt_41" : "rank_txt_40", victory ? "Won" : "Lost"),
-            (rank > 0) ? kit.string(Profiles.rankKey(rank, orc), "-") : "-",
+            rankText(),
             grouped(counted(score)),
         };
         for (int i = 0; i < 3; ++i) {
@@ -817,7 +909,7 @@ final class ResultView extends View {
             kit.textTopRight(c, best > 0 ? kit.string(Profiles.rankKey(best, bestOrc), "-") : "-",
                              px + 900f, y, CAP_MID, GOLD, true);
             if (raised) {
-                kit.textTopRight(c, "new", px + pw - 48f, y, CAP_MID, ADDED, true);
+                kit.textTopRight(c, kit.own("new"), px + pw - 48f, y, CAP_MID, ADDED, true);
             }
         }
 

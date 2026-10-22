@@ -1,12 +1,12 @@
 <h1 align="center">WargusHD</h1>
 
 <p align="center">
-  <b>Warcraft II: Remastered on Android tablets — an engine and a launcher that play from your own copy of the game.</b>
+  <b>Warcraft II: Remastered on Android tablets and phones — an engine and a launcher that play from your own copy of the game.</b>
 </p>
 
 <p align="center">
   <img alt="Platform: Android" src="https://img.shields.io/badge/platform-Android%207.0%2B%20(arm64)-3DDC84?logo=android&logoColor=white">
-  <img alt="Version 3.4.0" src="https://img.shields.io/badge/version-3.4.0-blue">
+  <img alt="Version 3.4.89" src="https://img.shields.io/badge/version-3.4.89-blue">
   <img alt="Licence: GPL-2.0" src="https://img.shields.io/badge/licence-GPL--2.0-orange">
   <img alt="Engine: Stratagus" src="https://img.shields.io/badge/engine-Stratagus-8a2be2">
   <img alt="Languages: C++17 and Java" src="https://img.shields.io/badge/code-C%2B%2B17%20%7C%20Java%20%7C%20Lua-lightgrey">
@@ -39,7 +39,7 @@
 
 ## What it is
 
-WargusHD is a port of *Warcraft II: Remastered* to Android tablets. It has two parts:
+WargusHD is a port of *Warcraft II: Remastered* to Android tablets and phones. It has two parts:
 
 - **The engine** — a fork of [Stratagus](https://github.com/Wargus/stratagus), the free real-time
   strategy engine (C++17, SDL2, Lua). The fork adds loaders for the Remastered data formats
@@ -88,30 +88,30 @@ Legend: **Working** — used in the regular regression run or seen on real table
 | Launcher | Campaign pages and mission lists, progress per profile | Working | Four campaigns, 52 missions listed |
 | Launcher | Custom Game Setup, map preview, map import | Working | Maps from the game folder and imported `.pud` files |
 | Launcher | Load Game, Options, About / Licences | Working | |
-| Launcher | Interface languages | Working | Follows the game's string tables; the launcher's own words are translated drafts |
+| Launcher | Interface languages | Working | Follows the game's string tables (11 languages); the launcher's own words are translated drafts |
 | Game | Campaign missions: briefing, mission, victory / defeat, chain to the next | Working | Not every mission has been played through |
 | Game | Custom scenarios against computer players | Working | |
 | Game | Remastered HD art: terrain, units, buildings, missiles, fog of war, HUD | Working | Forest, winter, wasteland and swamp; fidelity polish continues |
 | Game | Save / load, in-game Game Menu, objectives, pause | Working | |
-| Game | Touch controls: tap, drag-select, control groups, placement with confirm | Working | Verified mostly through scripted input; finger checks on tablets are ongoing |
+| Game | Touch controls: tap, drag-select, control groups, placement with confirm | Working | Played on tablets and a phone |
 | Game | Result window with score, rank and profile statistics | Working | |
 | Multiplayer | LAN room: discovery on the local network, join by address, seats, teams, colours, chat | In progress | Works on two real tablets; hidden behind a developer preview switch in current builds |
 | Multiplayer | LAN game: lockstep "mesh" mode for 2–8 players, simultaneous start, waiting / return rules | In progress | Whole games played on two tablets; three or more devices not yet tested |
 | Multiplayer | Pause for everyone, watching after defeat, cut-off handling | In progress | Decided; partly built, not verified |
 | Multiplayer | Online play | Not planned | Local network only |
-| Graphics | Classic view (the original's F5 switch) | In progress | Classic terrain and fog are drawn behind a debug call; units, HUD and the switch itself are not done |
-| Performance | 60 fps cap, performance pass | Planned | |
-| Tools | Map editor | Planned | Launcher entry exists; nothing behind it yet |
-| Tools | Mods | Planned | Launcher entry exists; nothing behind it yet |
-| Release | Signed release APK | Planned | Only debug builds have been produced and tested |
+| Graphics | Classic view (the original's F5 switch) | Working | Switches Remastered / classic graphics in game; terrain, units, fog, minimap and build preview |
+| Performance | Loading and frame pacing | Working | A map loads in about 4-5 s on the test tablets |
+| Tools | Map editor | Working | On-device editor for `.pud` maps: terrain, units, players, resources |
+| Tools | Mods | Working | In-app Mods page (install, switch on / off); e.g. a Lithuanian language and voices mod |
+| Release | Signed release APK | Working | 3.4.89 on the Releases page: non-debuggable, no debug bridge |
 
 ## Requirements
 
 **To play**
 
-- An Android tablet, Android 7.0 (API 24) or later, 64-bit ARM (`arm64-v8a`). The layout is made for
-  large landscape screens; development devices are two Samsung Galaxy Tab models and the Android
-  emulator. Phones are not tested.
+- An Android tablet or phone, Android 7.0 (API 24) or later, 64-bit ARM (`arm64-v8a`). The layout is made for
+  large landscape screens; development devices are two Samsung Galaxy Tab models, a Galaxy S20+ phone
+  and the Android emulator.
 - Your own installed copy of *Warcraft II: Remastered* (the game's folder with its `Data` directory),
   copied to the tablet's storage. About 2 GB.
 - For LAN play: all devices on the same Wi-Fi network, running the same build.
@@ -124,9 +124,9 @@ Legend: **Working** — used in the regular regression run or seen on real table
 
 ## Installing and supplying the game files
 
-There is no published APK yet; build one as described [below](#building), then:
+Download `WargusHD-<version>.apk` from the [Releases](../../releases) page (or build one as described [below](#building)), then:
 
-1. Install it: `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`.
+1. Install it: open the APK on the device and allow installs from that source (or `adb install -r <file>.apk`). If an earlier test build is installed, uninstall it first (different signature).
 2. Copy your *Warcraft II: Remastered* installation folder (the one that contains `Data`) from your
    PC to the tablet, for example to `Download/WC2` on internal storage or an SD card.
 3. Start **WargusHD**. On first start it asks for file access and for the game folder. Select the
@@ -179,7 +179,7 @@ The Android build has three stages: a **host** build of the `tolua++` code gener
 | Windows host, MSYS2 UCRT64, NDK 26.3, debug APK | Tested — this is how every development build is made |
 | Linux host, native library only (`.github/workflows/android.yml`) | Workflow present; mirrors the same steps, does not package an APK |
 | Linux / macOS host, full APK | Not tested |
-| Release (signed, non-debuggable) APK | Not tested |
+| Release (non-debuggable, no debug bridge) APK | Tested — `-DWARGUSHD_DEBUG_COMMANDS=OFF` for the engine, Gradle `assembleReleaseCheck`, then signed with your own key (`zipalign` + `apksigner`) |
 
 > [!NOTE]
 > **What a public build contains.** The Lua scripts and data tables that drive the game on top of
@@ -349,7 +349,7 @@ cmake --build build-host --target stratagus_tests -j 8
 ./build-host/stratagus_tests
 ```
 
-About 218 test cases at the time of writing: network messages, the LAN mesh, path finding,
+Over 450 test cases at the time of writing: network messages, the LAN mesh, path finding, movement and group behaviour calibrated against the original,
 triggers, HD atlas loading, UI scaling and anchoring, content rules.
 
 On-device behaviour (scenario start, pause, game menu, save / load round trip, victory and result
@@ -379,21 +379,14 @@ docs/screenshots/       images used in this file
 
 ## Status and roadmap
 
-Version **3.4.0**. Single-player — campaigns and custom scenarios with the Remastered art, profiles,
-save / load — is playable on tablets and covered by the regression run. Work in hand, in order:
+Version **3.4.89** — the first public release. Single-player (campaigns and custom scenarios with
+the Remastered art, profiles, save / load, statistics and ranks), the classic view, the map editor
+and mods are in the release. Unit behaviour, combat, spells, AI and timings were calibrated against
+measurements of the original.
 
-1. **LAN multiplayer hardening** — the remaining two-tablet checks (cut-off handling, pause for
-   everyone, background / screen-off, repeated starts), then three and more devices, then removal
-   of the preview switch.
-2. **Classic view** — the original's switch between Remastered and classic graphics: units, HUD,
-   picture scaling and the switch itself.
-3. **In-game polish** — remaining differences from the original in HUD, effects and unit behaviour.
-4. **Performance** — frame pacing and loading times.
-5. **Map editor** and **mods**.
-6. **Release build** — a signed, non-debuggable APK.
-
-Known limits today: debug builds only; `arm64-v8a` only; LAN needs a developer switch; classic view
-is not selectable by the player; no phone layout.
+Known limits: `arm64-v8a` only; LAN multiplayer is built and was played on two tablets, but the
+Multiplayer section stays hidden in the release until three-device tests are done; edge scrolling
+in the classic view needs a mouse.
 
 ## Credits
 

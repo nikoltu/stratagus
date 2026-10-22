@@ -11,7 +11,10 @@ import net.wargushd.game.editor.MapRules;
  * back and OK - no Android keyboard, so it works the same on every device and needs no change
  * of the shell. Tapping the amount of chosen mines or patches opens it; OK rounds to the
  * nearest 2 500 (MapRules.typedAmount) and every chosen unit of the kind takes it as one undo
- * step. A tap beside the sheet, or Android Back, closes it with nothing changed.
+ * step. Cancel, a tap beside the sheet, or Android Back closes it with nothing changed.
+ *
+ * Owner decision 95 (E6 = option C): the keys stay 1-9, back and a wide 0; under them a row
+ * Cancel | OK as the address and gallery sheets have it (GallerySheet's buttons and places).
  *
  * The field starts with the amount the units share (none when they differ); the first digit
  * typed replaces it, back takes the last digit away.
@@ -22,15 +25,17 @@ final class NumberSheet {
     // Layout, logical units; y from the sheet's top. NameSheet's width and padding.
     private static final float W = 1800f, PAD = 96f, TITLE_Y = 96f, FIELD_Y = 204f, FIELD_H = 120f;
     private static final float KEY_Y = 372f, KEY_W = 520f, KEY_H = 120f, KEY_PITCH_X = 544f, KEY_PITCH_Y = 144f;
-    private static final float H = KEY_Y + 3f * KEY_PITCH_Y + KEY_H + PAD;
+    private static final float BUTTON_W = 720f, BUTTON_H = 120f, GAP = 48f;
+    private static final float BUTTON_Y = KEY_Y + 3f * KEY_PITCH_Y + KEY_H + GAP;
+    private static final float H = BUTTON_Y + BUTTON_H + PAD;
     private static final float CAP_BODY = 44f;
 
     private static final int SHADE = 0xAA000000, PANEL_FILL = 0xF2140F0A, LINE = 0xFF92743E;
     private static final int FIELD = 0xA0000000, INK = 0xFFE8E2D4, GOLD = 0xFFF0D250;
 
-    /** The keys by row: 1 2 3 / 4 5 6 / 7 8 9 / back 0 OK. */
-    private static final String[] KEYS = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "<", "0", "OK" };
-    private static final int BACK = 9, OK_KEY = 11;
+    /** The keys by row: 1 2 3 / 4 5 6 / 7 8 9 / back, 0 over two keys' width. */
+    private static final String[] KEYS = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "<", "0" };
+    private static final int BACK = 9, ZERO = 10;
 
     private final String title;
     private final StringBuilder digits = new StringBuilder();
@@ -54,6 +59,10 @@ final class NumberSheet {
     private float y(SkinKit kit) { return kit.height / 2f - H / 2f; }
     private float keyX(int i) { return x() + PAD + (i % 3) * KEY_PITCH_X; }
     private float keyY(SkinKit kit, int i) { return y(kit) + KEY_Y + (i / 3) * KEY_PITCH_Y; }
+    private float keyW(int i) { return (i == ZERO) ? KEY_PITCH_X + KEY_W : KEY_W; }
+    private float buttonY(SkinKit kit) { return y(kit) + BUTTON_Y; }
+    private float okX() { return x() + W - PAD - BUTTON_W; }
+    private float cancelX() { return okX() - GAP - BUTTON_W; }
 
     void draw(Canvas c, SkinKit kit) {
         if (buttonPlain == null) {
@@ -72,12 +81,21 @@ final class NumberSheet {
         final float caret = px + 36f + (shown.isEmpty() ? 0f : kit.width(shown, CAP_BODY) + 8f);
         kit.fill(c, caret, y + FIELD_Y + FIELD_H / 4f, 4f, FIELD_H / 2f, GOLD, 0f);
         for (int i = 0; i < KEYS.length; ++i) {
-            final float kx = keyX(i), ky = keyY(kit, i);
-            kit.nine(c, (i == OK_KEY) ? buttonMarked : buttonPlain, kx, ky, KEY_W, KEY_H, 14);
-            final String word = (i == OK_KEY) ? kit.string("common_ok", "OK") : KEYS[i];
-            kit.textCentre(c, kit.fit(word, CAP_BODY, KEY_W - 48f), kx, ky, KEY_W, KEY_H, CAP_BODY,
-                           (i == OK_KEY) ? GOLD : INK, true);
+            final float kx = keyX(i), ky = keyY(kit, i), kw = keyW(i);
+            kit.nine(c, buttonPlain, kx, ky, kw, KEY_H, 14);
+            kit.textCentre(c, KEYS[i], kx, ky, kw, KEY_H, CAP_BODY, INK, true);
         }
+        final float by = buttonY(kit);
+        kit.nine(c, buttonPlain, cancelX(), by, BUTTON_W, BUTTON_H, 14);
+        kit.textCentre(c, kit.fit(kit.string("common_cancel", "Cancel"), CAP_BODY, BUTTON_W - 48f), cancelX(), by,
+                       BUTTON_W, BUTTON_H, CAP_BODY, INK, true);
+        kit.nine(c, buttonMarked, okX(), by, BUTTON_W, BUTTON_H, 14);
+        kit.textCentre(c, kit.fit(kit.string("common_ok", "OK"), CAP_BODY, BUTTON_W - 48f), okX(), by, BUTTON_W,
+                       BUTTON_H, CAP_BODY, GOLD, true);
+    }
+
+    private static boolean in(float x, float y, float rx, float ry, float rw, float rh) {
+        return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
     }
 
     /** A finger was lifted at (px, py), in logical units of the screen. */
@@ -86,13 +104,15 @@ final class NumberSheet {
         if (px < x || px >= x + W || py < y || py >= y + H) {
             return CANCEL;
         }
+        if (in(px, py, cancelX(), buttonY(kit), BUTTON_W, BUTTON_H)) {
+            return CANCEL;
+        }
+        if (in(px, py, okX(), buttonY(kit), BUTTON_W, BUTTON_H)) {
+            return OK;
+        }
         for (int i = 0; i < KEYS.length; ++i) {
-            final float kx = keyX(i), ky = keyY(kit, i);
-            if (px < kx || px >= kx + KEY_W || py < ky || py >= ky + KEY_H) {
+            if (!in(px, py, keyX(i), keyY(kit, i), keyW(i), KEY_H)) {
                 continue;
-            }
-            if (i == OK_KEY) {
-                return OK;
             }
             if (i == BACK) {
                 if (digits.length() > 0) {

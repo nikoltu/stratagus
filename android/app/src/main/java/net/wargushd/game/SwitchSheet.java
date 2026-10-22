@@ -30,6 +30,8 @@ final class SwitchSheet {
     /** The rows' portraits in each profile's colour, made when first drawn. */
     private final java.util.Map<String, Bitmap> faces = new java.util.HashMap<String, Bitmap>();
     private float scroll;
+    /** Set on open: the first draw scrolls the profile in use into view (as the Load list does). */
+    private boolean reveal;
     private Bitmap buttonPlain, buttonMarked;
 
     // List dragging.
@@ -44,6 +46,7 @@ final class SwitchSheet {
                 selected = i;
             }
         }
+        reveal = selected > 0;
     }
 
     Profiles.Profile chosen() {
@@ -84,6 +87,11 @@ final class SwitchSheet {
         if (buttonPlain == null) {
             buttonPlain = kit.atlasFrame("Modern_Widgets_Orc", "large", 1008, 126);
             buttonMarked = kit.atlasFrame("Modern_Widgets_Orc", "large_active", 1008, 126);
+        }
+        if (reveal) {
+            reveal = false;
+            scroll = ListScroll.reveal(selected * ROW_PITCH, selected * ROW_PITCH + ROW_H, scroll,
+                                       listBottom(kit) - listTop(kit), maxScroll(kit));
         }
         kit.fill(c, 0f, 0f, Screen.CANVAS_W, kit.height, SHADE, 0f);
         kit.fill(c, x(), y(kit), W, H, PANEL_FILL, 18f);

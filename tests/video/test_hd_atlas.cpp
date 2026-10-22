@@ -3738,3 +3738,98 @@ TEST_CASE("hd_atlas preload decode workers: three only on a big device")
 	CHECK(hdatlas::preloadDecodeWorkers(12 * 1024, 4) == 2);
 	CHECK(hdatlas::preloadDecodeWorkers(0, 0) == 2);         // unknown
 }
+
+// Live run 80 A2 (CALIB_RUN80.md): the classic placement preview. One-pixel checker in classic
+// pixels; the odd pixels (column + row inside the tile) are the solid colour, 512 per tile.
+TEST_CASE("classic ghost checker: 512 solid pixels per tile, odd parity, at step 1 and 3")
+{
+	hdatlas::ClassicRect r[512];
+	const int n1 = hdatlas::classicGhostCheckerRects(347, 16, 32, 32, r);
+	CHECK(n1 == 512);
+	for (int i = 0; i < n1; ++i) {
+		CHECK(r[i].w == 1);
+		CHECK(r[i].h == 1);
+		CHECK(hdatlas::classicGhostSolid(r[i].x - 347, r[i].y - 16));
+	}
+	CHECK(r[0].x == 348); // row 0: column 1 is the first solid pixel
+	CHECK(r[0].y == 16);
+	CHECK(r[16].x == 347); // row 1: column 0
+	CHECK(r[16].y == 17);
+	const int n3 = hdatlas::classicGhostCheckerRects(0, 0, 96, 96, r);
+	CHECK(n3 == 512);
+	CHECK(r[0].x == 3);
+	CHECK(r[0].w == 3);
+	CHECK(r[0].h == 3);
+	CHECK_FALSE(hdatlas::classicGhostSolid(0, 0));
+	CHECK(hdatlas::classicGhostSolid(1, 0));
+}
+
+TEST_CASE("classic ghost colour: free green, blocked red per ground (run 80 A2 values)")
+{
+	using G = hdatlas::ClassicGhostGround;
+	auto eq = [](hdatlas::ClassicGhostRgb c, int r, int g, int b) {
+		return c.r == r && c.g == g && c.b == b;
+	};
+	CHECK(eq(hdatlas::classicGhostColour(true, G::Land), 60, 128, 8));
+	CHECK(eq(hdatlas::classicGhostColour(true, G::Water), 60, 128, 8));
+	CHECK(eq(hdatlas::classicGhostColour(false, G::Land), 158, 65, 65));
+	CHECK(eq(hdatlas::classicGhostColour(false, G::ForestEdge), 109, 69, 69));
+	CHECK(eq(hdatlas::classicGhostColour(false, G::ForestInner), 77, 60, 60));
+	CHECK(eq(hdatlas::classicGhostColour(false, G::Coast), 219, 28, 28));
+	CHECK(eq(hdatlas::classicGhostColour(false, G::Water), 243, 8, 8));
+	// explored, forest, forest all round, coast, water
+	CHECK(hdatlas::classicGhostGround(true, true, true, false, false) == G::ForestInner);
+	CHECK(hdatlas::classicGhostGround(true, true, false, false, false) == G::ForestEdge);
+	CHECK(hdatlas::classicGhostGround(true, false, false, true, true) == G::Coast);
+	CHECK(hdatlas::classicGhostGround(true, false, false, false, true) == G::Water);
+	CHECK(hdatlas::classicGhostGround(true, false, false, false, false) == G::Land);
+	CHECK(hdatlas::classicGhostGround(false, true, true, false, false) == G::Land);
+}
+
+// Live run 80 A3 (+ run 70 C7): 1366 x 768, s 1, box x 171..1194, logical 1024 x 768.
+TEST_CASE("classic scroll band: 6 px in at left / top, 10 at right / bottom, the bars")
+{
+	const hdatlas::ClassicScreen c = hdatlas::classicScreen(1366, 768);
+	REQUIRE(c.box.x == 171);
+	REQUIRE(c.s == 1);
+	REQUIRE(c.lw == 1024);
+	int dx;
+	int dy;
+	auto at = [&](int x, int y) { hdatlas::classicScrollEdges(c, x, y, dx, dy); };
+	at(176, 384); CHECK(dx == -1); CHECK(dy == 0);
+	at(177, 384); CHECK(dx == 0);
+	at(171, 384); CHECK(dx == -1);
+	at(168, 384); CHECK(dx == -1); // left bar next to the box (run 80)
+	at(0, 384);   CHECK(dx == 0);  CHECK(dy == 0); // far left bar: gauntlet (run 70)
+	at(1184, 384); CHECK(dx == 0);
+	at(1179, 384); CHECK(dx == 0); // run 70 gauntlet
+	at(1185, 384); CHECK(dx == 1);
+	at(1194, 384); CHECK(dx == 1);
+	at(1200, 384); CHECK(dx == 1); // right bar (run 80)
+	at(1365, 384); CHECK(dx == 1); // run 70
+	at(683, 5);   CHECK(dy == -1); CHECK(dx == 0);
+	at(683, 6);   CHECK(dy == 0);
+	at(683, 757); CHECK(dy == 0);
+	at(683, 758); CHECK(dy == 1);
+	at(760, 17);  CHECK(dx == 0);  CHECK(dy == 0); // map view border: run 70 gauntlet
+	at(760, 751); CHECK(dy == 0);
+	at(172, 2);   CHECK(dx == -1); CHECK(dy == -1);
+	at(1190, 765); CHECK(dx == 1); CHECK(dy == 1);
+}
+
+TEST_CASE("classic scroll band: logical pixels at step 2 (1920 x 1080)")
+{
+	const hdatlas::ClassicScreen c = hdatlas::classicScreen(1920, 1080);
+	REQUIRE(c.s == 2);
+	int dx;
+	int dy;
+	const int right = c.box.x + c.lw * c.s;
+	hdatlas::classicScrollEdges(c, c.box.x + 11, 540, dx, dy); CHECK(dx == -1);
+	hdatlas::classicScrollEdges(c, c.box.x + 12, 540, dx, dy); CHECK(dx == 0);
+	hdatlas::classicScrollEdges(c, right - 20, 540, dx, dy); CHECK(dx == 1);
+	hdatlas::classicScrollEdges(c, right - 21, 540, dx, dy); CHECK(dx == 0);
+	hdatlas::classicScrollEdges(c, c.box.x - 12, 540, dx, dy); CHECK(dx == -1);
+	hdatlas::classicScrollEdges(c, c.box.x - 13, 540, dx, dy); CHECK(dx == 0);
+	hdatlas::classicScrollEdges(c, 960, 11, dx, dy); CHECK(dy == -1);
+	hdatlas::classicScrollEdges(c, 960, 12, dx, dy); CHECK(dy == 0);
+}

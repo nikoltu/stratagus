@@ -142,21 +142,41 @@ inline void AndroidLogLine(int prio, std::string_view s)
 }
 #endif
 
+#ifdef __ANDROID__
+// FIX-ROUND 3.4.89 (big test 3.5.0 finding 3): main.cpp pipes stdout / stderr into logcat at
+// INFO, so writing a line to the stream AND to logcat printed it twice. On Android these lines
+// now go to logcat once, at a level read from the line itself: an error at ERROR, a warning at
+// WARN, everything else (ATLAS, LONG frame, preload ...) at INFO.
+inline int AndroidLogLevelOf(std::string_view s)
+{
+	if (s.find("rror") != std::string_view::npos || s.find("FATAL") != std::string_view::npos
+	    || s.find("ailed") != std::string_view::npos) {
+		return ANDROID_LOG_ERROR;
+	}
+	if (s.find("arning") != std::string_view::npos) {
+		return ANDROID_LOG_WARN;
+	}
+	return ANDROID_LOG_INFO;
+}
+#endif
+
 inline void PrintOnStderr(std::string_view s)
 {
+#ifdef __ANDROID__
+	AndroidLogLine(AndroidLogLevelOf(s), s);
+#else
 	fwrite(s.data(), 1, s.size(), stderr);
 	fflush(stderr);
-#ifdef __ANDROID__
-	AndroidLogLine(ANDROID_LOG_ERROR, s);
 #endif
 }
 
 inline void PrintOnStdOut(std::string_view s)
 {
-	fwrite(s.data(), 1, s.size(), stdout);
-	fflush(stdout);
 #ifdef __ANDROID__
 	AndroidLogLine(ANDROID_LOG_INFO, s);
+#else
+	fwrite(s.data(), 1, s.size(), stdout);
+	fflush(stdout);
 #endif
 }
 
@@ -182,11 +202,19 @@ inline void PrintOnStdOut(std::string_view s)
  } while (0)
 
 
+#ifdef __ANDROID__
+// One logcat line: the place and the message together (the prefix no longer goes to the stream).
+#define ErrorPrint(format, ...) \
+	do { \
+		PrintOnStderr(Format("%s:%d: %s: ", __FILE__, __LINE__, __func__) + Format(format, ##__VA_ARGS__)); \
+	} while (0)
+#else
 #define ErrorPrint(format, ...) \
 	do { \
 		fprintf(stderr, "%s:%d: %s: ", __FILE__, __LINE__, __func__); \
 		PrintOnStderr(Format(format, ##__VA_ARGS__)); \
 	} while (0)
+#endif
 
 /*============================================================================
 ==  Definitions

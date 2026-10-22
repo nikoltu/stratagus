@@ -467,6 +467,44 @@ TEST_CASE("area damage of a finished number")
 	}
 }
 
+TEST_CASE("area damage: Death and Decay and Blizzard on a Lumber Mill as live run 80 A9")
+{
+	// Live run 80 A9 dd3: two Death and Decay casts on an own Lumber Mill (3 x 3, armour 20); each
+	// cast's hits come on its own 24-frame comb. Cast 1 took 3 2 3 3 3 4 2 3 3 4, cast 2 took
+	// 1 2 2 1 1 2 1 1 1 1 (hp 349 -> 306). The port's finished 10 meets no armour: a spot whose
+	// impact lies one tile off the Mill's centre (the outer zone) takes 1 .. 2, two such spots of
+	// one cast 2 .. 4; a spot on the centre tile would take 5 .. 10 (none in the live casts).
+	const PixelSize tile(64, 64);
+	const PixelPos centre(5 * 64 + 32, 5 * 64 + 32); // the centre of a 3 x 3 building's middle tile
+	CHECK(SplashZone(centre, centre, tile) == 0);
+	CHECK(SplashZone(centre + PixelDiff(64, 0), centre, tile) == 2);
+	CHECK(SplashZone(centre + PixelDiff(64, 64), centre, tile) == 2);
+	CHECK(SplashZone(centre + PixelDiff(128, 0), centre, tile) == -1);
+
+	const std::set<int> one = keys(splashValues(10, 2, 0));
+	CHECK(one == span(1, 2));
+	std::set<int> two;
+	for (int a : one) {
+		for (int b : one) {
+			two.insert(a + b);
+		}
+	}
+	CHECK(two == span(2, 4));
+	for (int hit : {3, 2, 3, 3, 3, 4, 2, 3, 3, 4}) {
+		CHECK(two.count(hit) == 1);
+	}
+	for (int hit : {1, 2, 2, 1, 1, 2, 1, 1, 1, 1}) {
+		CHECK(one.count(hit) == 1);
+	}
+	// Blizzard bz1: 1 .. 3 a sampled hit (two spots' 1 .. 2 when they fall in one sample)
+	CHECK(keys(splashValues(10, 2, 0)) == span(1, 2));
+
+	// Blizzard bz1: one spot's 11 hits from frame 312 to 574 (10 x 26.2); a cast 269 frames
+	CHECK(BlizzardShardPeriod == 26);
+	CHECK(10 * BlizzardShardPeriod >= 255);
+	CHECK(10 * BlizzardShardPeriod <= 269);
+}
+
 TEST_CASE("wall steps")
 {
 	// a wall stands 20 steps; a hit takes a quarter of its damage, at least one

@@ -108,11 +108,14 @@ int Spell_AreaBombardment::Cast(CUnit &caster,
 		for (int i = 0; i < shards; ++i) {
 			::Missile *mis = MakeMissile(*missile, start, dest);
 			if (mis->Type->Class == MissileClass::DeathAndDecay) {
-				// one round of the original's missile after the other
-				mis->Delay = i * DeathAndDecayPeriod;
+				// one round of the original's missile after the other, all held back
+				// DeathAndDecayReleaseDelay (live run 80 A9: first hit 48 cycles after the order)
+				mis->Delay = DeathAndDecayReleaseDelay + i * DeathAndDecayPeriod;
 				mis->AnimWait = i != 0;
 			} else if (mis->Type->BlizzardSpeed) {
-				mis->Delay = i * mis->Type->Sleep * 2 * PixelTileSize.x / mis->Type->BlizzardSpeed;
+				// the Blizzard's shards of one spot, one every BlizzardShardPeriod cycles (live run 80
+				// A9: 11 hits in 262 frames; the tile-size rule gave 32 cycles at the 64-pixel tile)
+				mis->Delay = i * BlizzardShardPeriod;
 			} else if (mis->Type->Speed) {
 				mis->Delay = i * mis->Type->Sleep * 2 * PixelTileSize.x / mis->Type->Speed;
 			} else {

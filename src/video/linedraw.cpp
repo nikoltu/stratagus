@@ -1253,6 +1253,21 @@ void CVideo::FillRectangleClip(Uint32 color, int x, int y, int w, int h)
 	}
 	linedraw_sdl::FillRectangleClip(color, x, y, w, h);
 }
+void CVideo::FillRectanglesClip(Uint32 color, const SDL_Rect *rects, int count)
+{
+	if (count <= 0) {
+		return;
+	}
+	if (GpuPrimitivesActive()) {
+		GpuBeginPrimitive(color, 255);
+		SDL_RenderFillRects(TheRenderer, rects, count);
+		GpuEndPrimitive();
+		return;
+	}
+	for (int i = 0; i < count; ++i) {
+		linedraw_sdl::FillRectangleClip(color, rects[i].x, rects[i].y, rects[i].w, rects[i].h);
+	}
+}
 void CVideo::FillTransRectangleClip(Uint32 color, int x, int y, int w, int h, unsigned char alpha)
 {
 	if (GpuPrimitivesActive()) {

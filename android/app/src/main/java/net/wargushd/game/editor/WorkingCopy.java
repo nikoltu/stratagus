@@ -38,6 +38,12 @@ public final class WorkingCopy implements java.io.Closeable {
     private RandomAccessFile out;
     private boolean unsaved;
     private boolean resumed;
+    /**
+     * The map file's bytes as last read or written (FIX-ROUND 3.4.89, big test 3.5.0 finding 8):
+     * a change taken back by Undo leaves the map as saved, and "Save changes?" is not asked.
+     * Null while the map has no file (a new map never saved).
+     */
+    private byte[] savedBytes;
 
     private WorkingCopy(File mapFile, File journal) {
         this.mapFile = mapFile;
@@ -80,7 +86,37 @@ public final class WorkingCopy implements java.io.Closeable {
         }
         w.out = new RandomAccessFile(journal, "rw");
         w.out.seek(w.out.length());
+        w.savedBytes = readSaved(mapFile);
+        if (w.unsaved) {
+            w.compareWithSaved();
+        }
         return w;
+    }
+
+    /** The map file's bytes, or null when there is none or it cannot be read. */
+    private static byte[] readSaved(File mapFile) {
+        if (!mapFile.isFile()) {
+            return null;
+        }
+        try {
+            return java.nio.file.Files.readAllBytes(mapFile.toPath());
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether the map now differs from its file: unsaved only when it does. When it is the saved
+     * map again the journal says so, so that a later opening agrees.
+     */
+    private void compareWithSaved() throws IOException {
+        if (savedBytes == null || !java.util.Arrays.equals(pud.bytes(), savedBytes)) {
+            return;
+        }
+        unsaved = false;
+        if (out != null) {
+            append(out, SAVED, new byte[0]);
+        }
     }
 
     /**
@@ -151,6 +187,7 @@ public final class WorkingCopy implements java.io.Closeable {
         pud.model().apply(s);
         unsaved = true;
         append(out, STEP, bytes);
+        compareWithSaved();
     }
 
     public boolean undo() throws IOException {
@@ -159,6 +196,7 @@ public final class WorkingCopy implements java.io.Closeable {
         }
         unsaved = true;
         append(out, UNDO, new byte[0]);
+        compareWithSaved();
         return true;
     }
 
@@ -168,12 +206,15 @@ public final class WorkingCopy implements java.io.Closeable {
         }
         unsaved = true;
         append(out, REDO, new byte[0]);
+        compareWithSaved();
         return true;
     }
 
     /** Write the map file from the working copy. The undo list stays. */
     public void save() throws IOException {
-        pud.write(mapFile);
+        final byte[] data = pud.bytes();
+        PudFile.writeBytes(mapFile, data);
+        savedBytes = data;
         unsaved = false;
         append(out, SAVED, new byte[0]);
     }

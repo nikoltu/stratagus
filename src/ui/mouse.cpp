@@ -838,6 +838,9 @@ static void HandleMouseOn(const PixelPos screenPos)
 			return;
 		}
 		CViewport *vp = UI.MapArea.Contains(screenPos) ? GetViewport(screenPos) : nullptr;
+#ifdef __ANDROID__
+		// Touch keeps its classic behaviour (the window-edge margins over the map view only):
+		// the box band below is the original's mouse edge scroll.
 		if (vp == nullptr) {
 			CursorOn = ECursorOn::Unknown;
 			return;
@@ -845,6 +848,17 @@ static void HandleMouseOn(const PixelPos screenPos)
 		UI.MouseViewport = vp;
 		CursorOn = ECursorOn::Map;
 		HandleMouseScrollArea(screenPos);
+#else
+		// Live run 80 A3: the band follows the 4:3 box's border (6 / 10 logical pixels in) and
+		// the black bars beside it, over the map view and the HUD parts left above alike.
+		if (vp == nullptr) {
+			CursorOn = ECursorOn::Unknown;
+		} else {
+			UI.MouseViewport = vp;
+			CursorOn = ECursorOn::Map;
+		}
+		HandleClassicMouseScrollArea(screenPos);
+#endif
 		return;
 	}
 

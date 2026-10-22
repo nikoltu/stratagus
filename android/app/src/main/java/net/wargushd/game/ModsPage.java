@@ -398,7 +398,11 @@ final class ModsPage {
         final float sy = segY();
         kit.fill(c, rowX(), sy, rowW(), SEG_H, WELL, BOX_RADIUS);
         kit.outline(c, rowX(), sy, rowW(), SEG_H, LINE, BOX_RADIUS);
-        final String[] filters = { kit.own("All"), kit.own("Installed"), kit.own("Updates") };
+        // "Installed (tab)": the filter's own key, for languages whose word for the tab (a plural)
+        // differs from a mod's state "Installed"; untranslated, the state's word is used.
+        final String tab = kit.own("Installed (tab)");
+        final String[] filters = { kit.own("All"), tab.equals("Installed (tab)") ? kit.own("Installed") : tab,
+                                   kit.own("Updates") };
         final float segW = rowW() / filters.length;
         for (int i = 0; i < filters.length; ++i) {
             final float x = rowX() + segW * i + 6f;
@@ -498,7 +502,8 @@ final class ModsPage {
         if (e != null) {
             final StringBuilder kinds = new StringBuilder();
             for (String k : e.categories) {
-                kinds.append(kinds.length() == 0 ? "" : ", ").append(k);
+                // The index's category ids, in the launcher's words where a language has them.
+                kinds.append(kinds.length() == 0 ? "" : ", ").append(kit.own(k));
             }
             final String facts = kinds.length() == 0 ? kit.own("{0} MB", megabytes(e.size))
                                                      : kit.own("{0} MB", megabytes(e.size)) + " - " + kinds;

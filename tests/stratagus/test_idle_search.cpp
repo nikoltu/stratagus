@@ -166,6 +166,35 @@ TEST_CASE("MissileCadence: the rounds of a Death and Decay missile follow each o
 	CHECK(DeathAndDecayPictureOn(23, false) == 0);
 }
 
+TEST_CASE("MissileCadence: Death and Decay first hit 48 cycles after the cast order as live run 80 A9")
+{
+	// cycles counted from the cast order: the swing casts on cycle DeathKnightCastSwing, the spell
+	// gives round i the missile Delay DeathAndDecayReleaseDelay + i * DeathAndDecayPeriod
+	const auto hitsAfterOrder = [](int cycle, int castCycle) {
+		const int life = cycle - castCycle - DeathAndDecayReleaseDelay;
+		return life >= 0 && DeathAndDecayHitsOn(life);
+	};
+	CHECK(DeathKnightCastSwing == 10);
+	CHECK(DeathAndDecayReleaseDelay == 20);
+	CHECK(DeathAndDecayFirstHitAfterOrder == 48);
+	int first = -1;
+	int last = -1;
+	int hits = 0;
+	for (int cycle = 0; cycle < 1000; ++cycle) {
+		if (hitsAfterOrder(cycle, DeathKnightCastSwing)) {
+			first = first < 0 ? cycle : first;
+			last = cycle;
+			++hits;
+		}
+	}
+	CHECK(first == 48);  // live: 48 frames after the order
+	CHECK(hits == 10);  // live: 10 hits a cloud
+	CHECK(last == 48 + 9 * 24);  // live: every 24 frames
+	// dd3: the second cloud of the 40-cycle recast hits 40 cycles after the first
+	CHECK(hitsAfterOrder(88, DeathKnightCastSwing + 40));
+	CHECK_FALSE(hitsAfterOrder(87, DeathKnightCastSwing + 40));
+}
+
 // Speed bytes of the original's missile types: lightning, torpedo and the small cannon ball 16,
 // rock and bolt 8, the others 12 pixels of the 32 pixel tile a cycle.
 TEST_CASE("MissileFlight: a tile takes the original's cycles on any tile size")

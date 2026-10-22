@@ -726,6 +726,149 @@ inline ClassicRect classicView(const ClassicScreen &c)
 	return {ClassicViewX, ClassicViewY, w > 0 ? w : 0, h > 0 ? h : 0};
 }
 
+/// Classic view, mouse edge scroll (live run 80, A3, CALIB_RUN80.md; 1366 x 768, s 1, box x
+/// 171..1194; real cursor walked 1 px at a time). Scrolling starts 6 logical pixels inside the
+/// box at the left / top (x <= 176, y <= 5) and 10 inside at the right / bottom (x >= 1185,
+/// y >= 758), whatever HUD part lies there; the map view's own borders do not scroll (run 70:
+/// 1179,384 / 760,17 / 760,751 gauntlet). The black bar right of the box scrolls right (run 80
+/// x 1200, run 70 x 1365); the bar left of the box scrolls left next to the box (run 80 x 168)
+/// but not at its far end (run 70 x 0: gauntlet). Taken in logical pixels (s 1 does not tell
+/// logical from screen pixels). Not measured, so set by symmetry: the width of the scrolling
+/// part of the left bar (here the near band, 6 logical pixels: 165..170 at s 1), the top bar
+/// as the left one and the bottom bar as the right one (bars above / below a box only on
+/// windows narrower than 4:3).
+constexpr int ClassicScrollBandNear = 6;  // left / top, logical pixels inside the box
+constexpr int ClassicScrollBandFar = 10;  // right / bottom, logical pixels inside the box
+
+/// One axis of the classic edge scroll: -1 / +1 toward the low / high edge, 0 none; `dead` set
+/// where the pointer is in the far part of the low-side bar (no scroll on either axis there).
+inline int classicScrollAxis(int screenPos, int boxPos, int logical, int s, bool &dead)
+{
+	if (screenPos < boxPos) {
+		if (boxPos - screenPos <= ClassicScrollBandNear * s) {
+			return -1;
+		}
+		dead = true;
+		return 0;
+	}
+	if (screenPos >= boxPos + logical * s) {
+		return 1;  // the box's black remainder (fewer than s pixels) and the high-side bar
+	}
+	const int l = (screenPos - boxPos) / s;
+	if (l < ClassicScrollBandNear) {
+		return -1;
+	}
+	if (l >= logical - ClassicScrollBandFar) {
+		return 1;
+	}
+	return 0;
+}
+
+/// Classic view: the edge-scroll direction of a screen pixel (dx, dy each -1, 0 or +1).
+inline void classicScrollEdges(const ClassicScreen &c, int sx, int sy, int &dx, int &dy)
+{
+	dx = dy = 0;
+	if (c.s <= 0 || c.lw <= 0 || c.lh <= 0) {
+		return;
+	}
+	bool dead = false;
+	const int x = classicScrollAxis(sx, c.box.x, c.lw, c.s, dead);
+	const int y = classicScrollAxis(sy, c.box.y, c.lh, c.s, dead);
+	if (!dead) {
+		dx = x;
+		dy = y;
+	}
+}
+
+/// Classic view, building placement preview (live run 80, A2, CALIB_RUN80.md: Farm / Town Hall
+/// with a Peasant selected, full-client captures a2_*). Every tile of the footprint is a
+/// one-pixel checker in classic pixels: the pixels whose column + row inside the tile is odd are
+/// one solid colour (512 of 512 per tile), the even ones show the building art over the terrain
+/// on every tile, the blocked ones too.
+inline bool classicGhostSolid(int cx, int cy)
+{
+	return ((cx + cy) & 1) == 1;
+}
+
+/// What lies under a tile of the preview, for the colour of a blocked tile.
+enum class ClassicGhostGround : uint8_t {
+	Land,         // grass and any other land (run 80: a Peasant on grass)
+	Coast,        // shore
+	Water,        // open water
+	ForestEdge,   // a forest tile next to a tile that is not forest
+	ForestInner,  // a forest tile with forest all round
+};
+
+struct ClassicGhostRgb {
+	uint8_t r;
+	uint8_t g;
+	uint8_t b;
+};
+
+/// The ground of a tile from its terrain (unexplored: Land, nothing is told).
+inline ClassicGhostGround classicGhostGround(bool explored, bool forest, bool forestAllRound,
+                                             bool coast, bool water)
+{
+	if (!explored) {
+		return ClassicGhostGround::Land;
+	}
+	if (forest) {
+		return forestAllRound ? ClassicGhostGround::ForestInner : ClassicGhostGround::ForestEdge;
+	}
+	if (coast) {
+		return ClassicGhostGround::Coast;
+	}
+	if (water) {
+		return ClassicGhostGround::Water;
+	}
+	return ClassicGhostGround::Land;
+}
+
+/// The solid colour of a preview tile, read from the run 80 captures (the solid pixels of each
+/// tile, exact RGB): free 60,128,8 (a2_farm_free); blocked: Peasant on grass 158,65,65
+/// (a2_farm_unit), forest edge 109,69,69 (a2_farm_tree1, column 12 of the band), forest inside
+/// 77,60,60 (a2_farm_tree2, columns 13, 14), shore 219,28,28 (a2_farm_shore), open water 243,8,8
+/// (a2_farm_water). Six values; the rule behind them (a blend with the tile's colour or a palette
+/// lookup) is not proven, so they stand as a table. Not measured: free on other ground than
+/// grass, blocked rock / wall / building / unexplored (Land is used), run 70's 89,65,65.
+inline ClassicGhostRgb classicGhostColour(bool canBuild, ClassicGhostGround ground)
+{
+	if (canBuild) {
+		return {60, 128, 8};
+	}
+	switch (ground) {
+		case ClassicGhostGround::Coast: return {219, 28, 28};
+		case ClassicGhostGround::Water: return {243, 8, 8};
+		case ClassicGhostGround::ForestEdge: return {109, 69, 69};
+		case ClassicGhostGround::ForestInner: return {77, 60, 60};
+		case ClassicGhostGround::Land: break;
+	}
+	return {158, 65, 65};
+}
+
+/// The solid pixels of one preview tile as screen rects: a tile `tileW` x `tileH` screen pixels
+/// from x0, y0 is 32 x 32 classic pixels; classic pixel i spans [i * tileW / 32, (i + 1) * tileW
+/// / 32). Writes at most 512 rects (none of zero size) and returns their number.
+inline int classicGhostCheckerRects(int x0, int y0, int tileW, int tileH, ClassicRect *out)
+{
+	int n = 0;
+	for (int cy = 0; cy < ClassicTilePx; ++cy) {
+		const int ya = y0 + cy * tileH / ClassicTilePx;
+		const int yb = y0 + (cy + 1) * tileH / ClassicTilePx;
+		if (yb <= ya) {
+			continue;
+		}
+		for (int cx = (cy & 1) ? 0 : 1; cx < ClassicTilePx; cx += 2) {
+			const int xa = x0 + cx * tileW / ClassicTilePx;
+			const int xb = x0 + (cx + 1) * tileW / ClassicTilePx;
+			if (xb > xa) {
+				out[n++] = {xa, ya, xb - xa, yb - ya};
+			}
+		}
+	}
+	return n;
+}
+
 /// Classic view: the side of the minimap's view rectangle, logical pixels, for a view `viewLogical`
 /// logical pixels long on a map whose longer side is `mapTiles` tiles. The whole tiles of the view
 /// times the minimap's pixels a tile, rounded down; one more where a tile is not a whole number

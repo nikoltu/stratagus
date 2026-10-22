@@ -32,8 +32,8 @@ android {
         applicationId 'net.wargushd.game'
         minSdk 24
         targetSdk 34
-        versionCode 340086
-        versionName '3.4.86'
+        versionCode 340089
+        versionName '3.4.89'
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -73,8 +73,13 @@ android {
         }
     }
 
-    // libmain.so is a Release build with debug info; keep it as-is (do not strip
-    // during packaging, and do not fail on the large payload).
+    // libmain.so is a Release build with debug info; debug APKs keep it as-is (AGP finds no NDK, so
+    // stripDebugSymbols copies it unchanged). RELEASE-STRIP (3.5.0, owner option B): for a
+    // release / releaseCheck build give AGP the NDK so it strips the library at packaging (~80 MB ->
+    // ~9 MB raw); the unstripped copy is kept beside the release for reading crash backtraces.
+    if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }) {
+        ndkVersion '26.3.11579264'
+    }
     packagingOptions {
         jniLibs {
             useLegacyPackaging true
@@ -230,5 +235,36 @@ tasks.configureEach { task ->
             || (task.name.startsWith('lint') && task.name.contains('Vital'))) {
         task.dependsOn 'stageWargushdContent'
         task.dependsOn 'stageWargushdLicences'
+    }
+}
+
+// BRIDGE-RELEASE (owner 2026-10-07): the debug bridge's command channel exists in debug builds only.
+// libmain.so is built outside Gradle (CMake option WARGUSHD_DEBUG_COMMANDS; build-android-local.ps1
+// passes OFF for -ReleaseCheck), so a release-type APK could package a library built with the channel
+// ON. Refuse that here: the format string "debug bridge commands %s" is compiled only with the channel
+// (src/debug/debug_bridge.cpp, DebugBridge_Init); without it the library holds "... not built".
+// Debug builds (the gated test APKs, which the device rounds drive through the bridge) are not checked.
+tasks.register('checkNoDebugBridgeInRelease') {
+    doLast {
+        def lib = new File("${nativeLibsDir}/arm64-v8a/libmain.so")
+        if (!lib.isFile()) {
+            throw new GradleException("release build: ${lib} not found")
+        }
+        def text = new String(lib.bytes, 'ISO-8859-1')
+        if (text.contains('debug bridge commands %s')) {
+            throw new GradleException("release build: ${lib} was built with WARGUSHD_DEBUG_COMMANDS=ON "
+                + "(the debug bridge command channel). Rebuild it with -DWARGUSHD_DEBUG_COMMANDS=OFF "
+                + "(build-android-local.ps1 -ReleaseCheck).")
+        }
+        if (!text.contains('debug bridge commands not built')) {
+            throw new GradleException("release build: ${lib} has neither bridge marker string; "
+                + "cannot tell whether the command channel is compiled in")
+        }
+        logger.lifecycle("libmain.so: debug bridge command channel not built (release OK)")
+    }
+}
+tasks.configureEach { task ->
+    if (task.name == 'mergeReleaseNativeLibs' || task.name == 'mergeReleaseCheckNativeLibs') {
+        task.dependsOn 'checkNoDebugBridgeInRelease'
     }
 }

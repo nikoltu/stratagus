@@ -677,6 +677,9 @@ public:
 	void FillTransRectangle(Uint32 color, int x, int y, int w, int h, unsigned char alpha);
 	void FillRectangleClip(Uint32 color, int x, int y, int w, int h);
 	void FillTransRectangleClip(Uint32 color, int x, int y, int w, int h, unsigned char alpha);
+	/// Many opaque rects of one colour (one renderer call on the GPU path): the classic
+	/// placement checker (cursor.cpp, run 80 A2).
+	void FillRectanglesClip(Uint32 color, const SDL_Rect *rects, int count);
 
 	void DrawCircle(Uint32 color, int x, int y, int r);
 	void DrawTransCircle(Uint32 color, int x, int y, int r, unsigned char alpha);

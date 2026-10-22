@@ -468,6 +468,8 @@ extern void DrawPopup(const ButtonAction &button, const CUIButton &uibutton, int
 
 /// Handle the mouse in scroll area
 extern bool HandleMouseScrollArea(const PixelPos &mousePos);
+/// Classic view: the mouse edge scroll at the 4:3 box's border (run 80 A3)
+extern bool HandleClassicMouseScrollArea(const PixelPos &mousePos);
 
 //
 // in button_checks.cpp
