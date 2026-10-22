@@ -39,17 +39,47 @@
 
 #include "unit.h"
 
+#include <algorithm>
+
+/**
+**  Haste / Slow per wait kind, as the original's script interpreter does it: Haste halves
+**  (at least 1), Slow doubles; opcode 7 both, 8 Haste only, 9 Slow only, 1 never; opcode 12
+**  adds 1 while a load is carried, then works as 7.
+*/
+int ScaleAnimationWait(EAnimWaitKind kind, int wait, int speedSign, bool carriesLoad)
+{
+	if (kind == EAnimWaitKind::Loaded && carriesLoad) {
+		++wait;
+	}
+	const bool byHaste = kind == EAnimWaitKind::HasteSlow || kind == EAnimWaitKind::Haste
+	                     || kind == EAnimWaitKind::Loaded;
+	const bool bySlow = kind == EAnimWaitKind::HasteSlow || kind == EAnimWaitKind::Slow
+	                    || kind == EAnimWaitKind::Loaded;
+	if (speedSign > 0 && byHaste) {
+		wait = std::max(wait >> 1, 1);
+	} else if (speedSign < 0 && bySlow) {
+		wait <<= 1;
+	}
+	return wait;
+}
+
+/**
+**  The original keeps Haste and Slow in one signed timer, so a unit is never both; the port
+**  keeps two variables (the spells clear the other one), and both at once cancel out.
+*/
+int AnimationWaitSpeedSign(const CUnit &unit)
+{
+	const bool hasted = unit.Variable[HASTE_INDEX].Value > 0;
+	const bool slowed = unit.Variable[SLOW_INDEX].Value > 0;
+	return hasted == slowed ? 0 : (hasted ? 1 : -1);
+}
+
 void CAnimation_Wait::Action(CUnit &unit, int & /*move*/, int scale) const /* override */
 {
 	Assert(unit.Anim.CurrAnim);
 	Assert((*unit.Anim.CurrAnim)[unit.Anim.Anim].get() == this);
-	unit.Anim.Wait = ParseAnimInt(unit, this->wait) << scale >> 8;
-	if (unit.Variable[SLOW_INDEX].Value) { // unit is slowed down
-		unit.Anim.Wait <<= 1;
-	}
-	if (unit.Variable[HASTE_INDEX].Value && unit.Anim.Wait > 1) { // unit is accelerated
-		unit.Anim.Wait >>= 1;
-	}
+	unit.Anim.Wait = ScaleAnimationWait(this->kind, ParseAnimInt(unit, this->wait) << scale >> 8,
+	                                    AnimationWaitSpeedSign(unit), unit.ResourcesHeld > 0);
 	if (unit.Anim.Wait <= 0) {
 		unit.Anim.Wait = 1;
 	}

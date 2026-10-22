@@ -92,6 +92,8 @@ final class ChatView extends View {
     private boolean pressed;
     /** True once the system keyboard was seen up for the line being typed. */
     private boolean keysSeen;
+    /** The characters at the end of the message that are the keyboard's composing text. */
+    private int composing;
     /** The keyboard's height in canvas units. */
     private float keyboard;
     /** Lines this device has just sent: their arrival is no news. */
@@ -150,6 +152,7 @@ final class ChatView extends View {
         keysSeen = false;
         keyboard = (android.os.Build.VERSION.SDK_INT >= 30) ? 0f : KEYBOARD_ASSUMED;
         message.setLength(0);
+        composing = 0;
         setFocusable(true);
         setFocusableInTouchMode(true);
         requestFocus();
@@ -194,6 +197,12 @@ final class ChatView extends View {
     private void sendTyped() {
         final String text = message.toString();
         message.setLength(0);
+        if (composing > 0) {
+            // The word the keyboard was still composing went out with the line: the keyboard
+            // is told to forget it, or it would type it again into the next one.
+            composing = 0;
+            ((InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE)).restartInput(this);
+        }
         send(text);
     }
 
@@ -213,20 +222,58 @@ final class ChatView extends View {
             | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
         out.imeOptions = EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI
             | EditorInfo.IME_FLAG_NO_FULLSCREEN;
-        // Text is taken as it is committed; nothing is kept for the keyboard to edit.
+        // The line is the keyboard's text, the cursor at its end. A keyboard that composes
+        // (swipe, a non-Latin script, one that ignores the no-suggestions hint) gets its
+        // composing word shown at the end of the line and replaced as it changes; without
+        // this the base connection kept that word to itself and sent it on as one key event
+        // the view does not take, so it was lost.
         return new BaseInputConnection(this, false) {
+            private void replaceComposing(CharSequence text) {
+                message.setLength(Math.max(0, message.length() - composing));
+                final int had = message.length();
+                type(text);
+                composing = message.length() - had;
+            }
+
             @Override
             public boolean commitText(CharSequence text, int newCursorPosition) {
                 if (open) {
-                    type(text);
+                    replaceComposing(text);
+                    composing = 0;
                 }
                 return true;
+            }
+
+            @Override
+            public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                if (open) {
+                    replaceComposing(text);
+                }
+                return true;
+            }
+
+            @Override
+            public boolean finishComposingText() {
+                composing = 0;
+                return true;
+            }
+
+            @Override
+            public CharSequence getTextBeforeCursor(int n, int flags) {
+                final String line = open ? message.toString() : "";
+                return line.substring(Math.max(0, line.length() - Math.max(0, n)));
+            }
+
+            @Override
+            public CharSequence getTextAfterCursor(int n, int flags) {
+                return "";
             }
 
             @Override
             public boolean deleteSurroundingText(int before, int after) {
                 if (open) {
                     erase(before);
+                    composing = Math.max(0, composing - Math.max(0, before));
                 }
                 return true;
             }

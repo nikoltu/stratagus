@@ -125,4 +125,56 @@ void ComputeNineSlice(int srcW, int srcH,
 	}
 }
 
+void ComputeNineSliceScaled(int srcW, int srcH,
+							int left, int top, int right, int bottom, double scale,
+							const SDL_Rect &dest,
+							NineSlicePatch patches[9])
+{
+	srcW = srcW < 0 ? 0 : srcW;
+	srcH = srcH < 0 ? 0 : srcH;
+	const int dw = dest.w < 0 ? 0 : dest.w;
+	const int dh = dest.h < 0 ? 0 : dest.h;
+	scale = scale > 0 ? scale : 0;
+
+	int sLeft = clampInt(left, 0, srcW);
+	int sRight = clampInt(right, 0, srcW);
+	if (sLeft + sRight > srcW) {
+		splitInsets(srcW, sLeft, sRight, sLeft, sRight);
+	}
+	int sTop = clampInt(top, 0, srcH);
+	int sBottom = clampInt(bottom, 0, srcH);
+	if (sTop + sBottom > srcH) {
+		splitInsets(srcH, sTop, sBottom, sTop, sBottom);
+	}
+
+	// The border at the drawing's scale, rounded; shrunk to fit as in ComputeNineSlice.
+	const auto scaled = [scale](int v) { return static_cast<int>(v * scale + 0.5); };
+	int dLeft;
+	int dRight;
+	splitInsets(dw, scaled(sLeft), scaled(sRight), dLeft, dRight);
+	int dTop;
+	int dBottom;
+	splitInsets(dh, scaled(sTop), scaled(sBottom), dTop, dBottom);
+
+	const int sx[4] = { 0, sLeft, srcW - sRight, srcW };
+	const int sy[4] = { 0, sTop, srcH - sBottom, srcH };
+	const int dx[4] = { dest.x, dest.x + dLeft, dest.x + dw - dRight, dest.x + dw };
+	const int dy[4] = { dest.y, dest.y + dTop, dest.y + dh - dBottom, dest.y + dh };
+
+	int n = 0;
+	for (int row = 0; row < 3; ++row) {
+		for (int col = 0; col < 3; ++col) {
+			NineSlicePatch &p = patches[n++];
+			p.src.x = sx[col];
+			p.src.y = sy[row];
+			p.src.w = sx[col + 1] - sx[col];
+			p.src.h = sy[row + 1] - sy[row];
+			p.dst.x = dx[col];
+			p.dst.y = dy[row];
+			p.dst.w = dx[col + 1] - dx[col];
+			p.dst.h = dy[row + 1] - dy[row];
+		}
+	}
+}
+
 //@}

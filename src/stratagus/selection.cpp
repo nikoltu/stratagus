@@ -98,6 +98,8 @@ void RestoreSelection()
 	for (CUnit *unit : Selected) {
 		unit->Selected = 1;
 	}
+	// a unit destroyed since SaveSelection is not brought back
+	DropUnreadableSelectedUnits();
 }
 
 /**
@@ -261,13 +263,14 @@ void UnSelectUnit(CUnit &unit)
 		for (int i = 0; i < PlayerMax; ++i) {
 			if (unit.TeamSelected & (1 << i)) {
 				size_t j;
-				for (j = 0; TeamSelected[i][j] != &unit; ++i) {
+				for (j = 0; j < TeamSelected[i].size() && TeamSelected[i][j] != &unit; ++j) {
 					// Empty
 				}
 				Assert(j < TeamSelected[i].size());
-
-				std::swap(TeamSelected[i][j], TeamSelected[i].back());
-				TeamSelected[i].pop_back();
+				if (j < TeamSelected[i].size()) {
+					std::swap(TeamSelected[i][j], TeamSelected[i].back());
+					TeamSelected[i].pop_back();
+				}
 				unit.TeamSelected &= ~(1 << i);
 			}
 		}
@@ -291,7 +294,9 @@ void UnSelectUnit(CUnit &unit)
 	unit.Selected = 0;
 
 	//Turn track unit mode off
-	UI.SelectedViewport->Unit = nullptr;
+	if (UI.SelectedViewport) {
+		UI.SelectedViewport->Unit = nullptr;
+	}
 }
 
 /**
@@ -1058,7 +1063,16 @@ static int CclSetGroupId(lua_State *l)
 }
 
 /**
-**  Define the current selection.
+**  Define the current selection (a save game's selection, or a script's).
+**
+**  The listed units replace the selection and are marked selected the way SelectUnit marks them:
+**  LetUnitDie, CUnit::Remove and CUnit::Release take a unit out of `Selected` only when its
+**  Selected flag is set, so a unit pushed without the flag stayed in `Selected` after its death
+**  and the button panel read its released orders (SIGSEGV in CUnit::CurrentAction, S20+ 3.4.83).
+**  A save's Unit() line may already have set the flag ("selected"); such a unit is listed once.
+**  The group id is not advanced: the save's SetGroupId comes just before this call.
+**  An unknown, free or destroyed slot, a dying unit and a unit listed twice are skipped
+**  (a skipped unit that exists loses the flag, so flag and list agree).
 **
 **  @param l  Lua state.
 */
@@ -1069,12 +1083,64 @@ static int CclSelection(lua_State *l)
 		LuaError(l, "incorrect argument");
 	}
 	//NumSelected = LuaToNumber(l, 1);
+	for (CUnit *unit : Selected) {
+		unit->Selected = 0;
+	}
+	Selected.clear();
 	const int args = lua_rawlen(l, 2);
 	for (int j = 0; j < args; ++j) {
 		const std::string_view str = LuaToString(l, 2, j + 1);
-		Selected.push_back(&UnitManager->GetSlotUnit(to_number(str.substr(1), 16)));
+		if (str.size() < 2 || UnitManager == nullptr) {
+			continue;
+		}
+		CUnit *unit = UnitManager->FindSlotUnit(to_number(str.substr(1), 16));
+		if (unit == nullptr) {
+			continue;
+		}
+		if (ranges::find(Selected, unit) != Selected.end()) {
+			continue;
+		}
+		if (unit->Type == nullptr || unit->Destroyed || unit->Orders.empty() || !unit->IsAlive()
+		    || (MaxSelectable != 0 && Selected.size() >= MaxSelectable)) {
+			unit->Selected = 0;
+			continue;
+		}
+		Selected.push_back(unit);
+		unit->Selected = 1;
 	}
 	return 0;
+}
+
+/**
+**  Take out of the selection every unit a draw can no longer read: a destroyed (released) unit,
+**  or one without orders. The order of the others is kept. Every path that fills `Selected` sets
+**  the Selected flag that the death / removal / release paths look at; this is the guard of the
+**  panels that read Selected[i]->CurrentAction() each frame, so a missed path costs a dropped
+**  portrait, not a SIGSEGV.
+**
+**  @return  the number of units taken out.
+*/
+int DropUnreadableSelectedUnits()
+{
+	int dropped = 0;
+	for (auto it = Selected.begin(); it != Selected.end();) {
+		CUnit *unit = *it;
+		if (unit != nullptr && unit->Type != nullptr && !unit->Destroyed && !unit->Orders.empty()) {
+			++it;
+			continue;
+		}
+		if (unit != nullptr) {
+			unit->Selected = 0;
+			ErrorPrint("Warning: the selection held an unreadable unit %d (destroyed %d, orders %d); dropped\n",
+			           UnitNumber(*unit), int(unit->Destroyed), int(unit->Orders.size()));
+		}
+		it = Selected.erase(it);
+		++dropped;
+	}
+	if (dropped && UI.SelectedViewport) {
+		UI.SelectedViewport->Unit = nullptr;
+	}
+	return dropped;
 }
 
 /**

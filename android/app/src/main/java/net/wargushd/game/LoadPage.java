@@ -30,6 +30,8 @@ final class LoadPage {
     static final class Save {
         /** Name inside the save directory, as the game is asked to load it. */
         String file;
+        /** The file itself: what the page selects and what Load resolves (LOAD-WRONG-SAVE-ONCE). */
+        File path;
         /** The name shown: the file name without its extensions. */
         String name;
         long modified;
@@ -56,6 +58,10 @@ final class LoadPage {
     private final List<Save> saves = new ArrayList<>();
     private int selected;
     private float scroll;
+    /** The selected row is to be scrolled into view at the next draw. */
+    private boolean reveal;
+    /** Launcher preference: the path of the save last started from this page. */
+    private static final String PREFS = "launcher", PREF_LOADED = "loadedSave";
     private Bitmap buttonPlain, buttonPrimary;
     private final SimpleDateFormat stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
 
@@ -63,17 +69,28 @@ final class LoadPage {
     private float downY, downScroll;
     private boolean inList, dragging;
 
-    /** Read the profile's save directory again. The newest save is selected. */
-    void refresh(Context c, Profiles.Profile profile) {
+    /**
+     * Read the profile's save directory again. The save selected before stays selected while it
+     * is there (by its file, not by its place in the list); when it is gone nothing is selected
+     * and its name is returned, so the shell can say so. With nothing selected before, the save
+     * last started from this page is selected when it is still there, else the newest.
+     *
+     * @return the name of the selected save that has gone, else null
+     */
+    String refresh(Context c, Profiles.Profile profile) {
+        final Save before = selectedSave();
+        final String kept = (before != null && before.path != null) ? before.path.getPath() : null;
         saves.clear();
-        selected = 0;
+        selected = SaveChoice.NONE;
         scroll = 0f;
+        reveal = false;
         if (profile == null) {
-            return;
+            return null;
         }
-        final File[] files = new File(Profiles.directory(c, profile), "wc2/save").listFiles();
+        final File dir = new File(Profiles.directory(c, profile), "wc2/save");
+        File[] files = dir.listFiles();
         if (files == null) {
-            return;
+            files = new File[0];
         }
         for (File f : files) {
             final String n = f.getName();
@@ -82,6 +99,7 @@ final class LoadPage {
             }
             final Save s = new Save();
             s.file = n;
+            s.path = f;
             s.name = n.substring(0, n.lastIndexOf(".sav"));
             s.modified = f.lastModified();
             s.map = savedMap(f);
@@ -93,6 +111,39 @@ final class LoadPage {
                 return Long.compare(b.modified, a.modified);
             }
         });
+        final String last = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PREF_LOADED, null);
+        final List<String> names = new ArrayList<>();
+        for (Save s : saves) {
+            names.add(s.file);
+        }
+        final SaveChoice.Pick pick = SaveChoice.select(dir, names, kept, last);
+        selected = pick.index;
+        reveal = selected > 0;
+        if (pick.vanished != null) {
+            android.util.Log.i("WargusHD", "LAUNCHER load: selected save gone " + pick.vanished);
+        }
+        return pick.vanished;
+    }
+
+    /**
+     * The selected save's file as Load is to start it: only while it is still a file of the
+     * profile's save directory; else null.
+     */
+    File resolveSelected(Context c, Profiles.Profile profile) {
+        final Save s = selectedSave();
+        if (s == null || s.path == null || profile == null) {
+            return null;
+        }
+        return SaveChoice.resolve(new File(Profiles.directory(c, profile), "wc2/save"), s.path.getPath());
+    }
+
+    /** The selected save is being started: it stays the selected one when the page is read again. */
+    void started(Context c, Profiles.Profile profile) {
+        final Save s = selectedSave();
+        if (s != null && profile != null) {
+            c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(PREF_LOADED,
+                new File(new File(Profiles.directory(c, profile), "wc2/save"), s.file).getPath()).apply();
+        }
     }
 
     /** The map a save was made on: the SaveFile entry in the head the game writes. */
@@ -122,12 +173,14 @@ final class LoadPage {
         }
         final File f = new File(new File(Profiles.directory(c, profile), "wc2/save"), s.file);
         final boolean gone = f.delete() || !f.exists();
+        // The deleted save is not a vanished selection: the page starts over on its default.
+        selected = SaveChoice.NONE;
         refresh(c, profile);
         return gone;
     }
 
     Save selectedSave() {
-        return (selected < saves.size()) ? saves.get(selected) : null;
+        return (selected >= 0 && selected < saves.size()) ? saves.get(selected) : null;
     }
 
     /** The two detail lines under the name: what kind of game it is, and which. */
@@ -191,6 +244,13 @@ final class LoadPage {
         }
         kit.textTop(c, kit.string("load_game", "Load Game"), X0, 84f, CAP_TITLE, INK_TITLE, false);
 
+        if (reveal) {
+            reveal = false;
+            // Only as far as needed: putting the selected row at the top hid every newer save
+            // above it (LOAD_LIST_3476).
+            scroll = ListScroll.reveal(selected * ROW_PITCH, selected * ROW_PITCH + ROW_H, scroll,
+                                       listBottom(kit) - listTop(), maxScroll(kit));
+        }
         final float b = bottom(kit);
         panel(c, kit, X0, TOP, LIST_W, b - TOP);
         c.save();

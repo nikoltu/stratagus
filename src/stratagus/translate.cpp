@@ -38,6 +38,7 @@
 #include "translate.h"
 
 #include "iolib.h"
+#include "wc2strings.h"
 
 #include <fstream>
 #include <spiritless_po.h>
@@ -57,6 +58,10 @@ static spiritless_po::Catalog catalog;
 */
 const std::string &Translate(const std::string &str)
 {
+	// An enabled language mod's text for a literal the game's string table has no key for (M3).
+	if (const std::string *extra = GetExtraString(str)) {
+		return *extra;
+	}
 	return catalog.gettext(str);
 }
 

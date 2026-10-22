@@ -59,8 +59,17 @@ final class SkinKit {
      * it, else English.
      */
     static String language(Context c) {
+        return language(c, ModStore.languageMod(c));
+    }
+
+    /** As language(c), with the language mod that is switched on (null when none is). */
+    private static String language(Context c, ModStore.Mod mod) {
         final String chosen = c.getSharedPreferences(LANGUAGE_STORE, Context.MODE_PRIVATE)
             .getString(LANGUAGE_KEY, null);
+        // A mod's language counts only while that mod is switched on (M2_LANGUAGE_MOD_SPEC).
+        if (chosen != null && mod != null && chosen.equals(mod.language)) {
+            return chosen;
+        }
         if (chosen != null) {
             for (String[] l : LANGUAGES) {
                 if (l[0].equals(chosen)) {
@@ -87,8 +96,91 @@ final class SkinKit {
             .putString(LANGUAGE_KEY, code).apply();
     }
 
+    /**
+     * The rows of the Languages list: the game's languages, then the language of the mod that is
+     * switched on as { code, "", its own name }.
+     */
+    static String[][] languages(Context c) {
+        final ModStore.Mod mod = ModStore.languageMod(c);
+        if (mod == null) {
+            return LANGUAGES;
+        }
+        final String[][] all = java.util.Arrays.copyOf(LANGUAGES, LANGUAGES.length + 1);
+        all[LANGUAGES.length] = new String[] { mod.language, "", mod.languageName };
+        return all;
+    }
+
+    /** The language chosen before a language mod took its place ("" = none was chosen). */
+    private static final String LANGUAGE_BEFORE_MOD = "languageBeforeMod";
+    /** The language mod whose language was already selected once (round 3.4.66 F2). */
+    private static final String LANGUAGE_MOD_FOLLOWED = "languageModFollowed";
+
+    /**
+     * Follow the mods after one was switched, installed or removed: a language mod switched on
+     * selects its language and keeps the one in use - once, when it comes on; a language the
+     * player picks afterwards stays through switches of other mods. With none on, a mod's
+     * language gives way to the one kept. @return true when the stored language changed (the
+     * shell starts over).
+     */
+    static boolean followMods(Context c) {
+        final android.content.SharedPreferences store =
+            c.getSharedPreferences(LANGUAGE_STORE, Context.MODE_PRIVATE);
+        final String chosen = store.getString(LANGUAGE_KEY, null);
+        final ModStore.Mod mod = ModStore.languageMod(c);
+        if (mod != null) {
+            // Already followed: this mod's id is kept, or (stores from before the key) the
+            // language before the mod is.
+            final String followed = store.getString(LANGUAGE_MOD_FOLLOWED, null);
+            if (mod.id.equals(followed) || (followed == null && store.contains(LANGUAGE_BEFORE_MOD))) {
+                if (followed == null) {
+                    store.edit().putString(LANGUAGE_MOD_FOLLOWED, mod.id).apply();
+                }
+                return false;
+            }
+            final android.content.SharedPreferences.Editor e = store.edit();
+            e.putString(LANGUAGE_MOD_FOLLOWED, mod.id);
+            if (mod.language.equals(chosen)) {
+                e.apply();
+                return false;
+            }
+            if (!store.contains(LANGUAGE_BEFORE_MOD)) {
+                e.putString(LANGUAGE_BEFORE_MOD, isGameLanguage(chosen) ? chosen : "");
+            }
+            e.putString(LANGUAGE_KEY, mod.language).apply();
+            return true;
+        }
+        if (store.contains(LANGUAGE_MOD_FOLLOWED)) {
+            store.edit().remove(LANGUAGE_MOD_FOLLOWED).apply();
+        }
+        if (!store.contains(LANGUAGE_BEFORE_MOD) && (chosen == null || isGameLanguage(chosen))) {
+            return false;
+        }
+        final String before = store.getString(LANGUAGE_BEFORE_MOD, "");
+        final android.content.SharedPreferences.Editor e = store.edit().remove(LANGUAGE_BEFORE_MOD);
+        if (chosen != null && !isGameLanguage(chosen)) {
+            if (isGameLanguage(before)) {
+                e.putString(LANGUAGE_KEY, before);
+            } else {
+                e.remove(LANGUAGE_KEY);
+            }
+            e.apply();
+            return true;
+        }
+        e.apply();   // a game language was chosen while the mod was on: it stays
+        return false;
+    }
+
+    private static boolean isGameLanguage(String code) {
+        for (String[] l : LANGUAGES) {
+            if (l[0].equals(code)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The face that has the language's letters: the game's own, or the game folder's Noto face. */
-    private static String fontOf(String language) {
+    static String fontOf(String language) {
         if (language.equals("jaJP")) {
             return "Data/Font/NotoSansJP-Regular.ttf";
         } else if (language.equals("koKR")) {
@@ -102,12 +194,19 @@ final class SkinKit {
     }
 
     private final String language;
+    /** The package of the language in use when that is a mod's language, else null. */
+    private final File modFolder;
 
     SkinKit(Context c) {
         final String path = GateActivity.rememberedFolder(c);
         folder = (path == null) ? null : new File(path);
-        language = language(c);
-        ownWords = readOwn(c, language);
+        final ModStore.Mod mod = ModStore.languageMod(c);
+        language = language(c, mod);
+        modFolder = (mod != null && language.equals(mod.language))
+            ? new File(ModStore.directory(c), mod.id) : null;
+        ownWords = (modFolder != null)
+            ? readJson(new File(modFolder, "strings/launcher_" + language + ".json"))
+            : readOwn(c, language);
         Typeface face = Typeface.DEFAULT;
         if (folder != null) {
             try {
@@ -287,6 +386,8 @@ final class SkinKit {
 
     /** A text too long for its place is drawn no smaller than this part of its capital height. */
     private static final float FIT_FLOOR = 0.70f;
+    /** A heading may be made smaller still before it is cut (owner's decision 84, CAPTION-FIT-B). */
+    private static final float HEADING_FLOOR = 0.50f;
     /** The capital height fit() chose for the text drawn next, and the height it was asked at. */
     private float fitted, fittedFor;
 
@@ -298,6 +399,15 @@ final class SkinKit {
      * centred on the line the full height would have had.
      */
     String fit(String s, float cap, float width) {
+        return fit(s, cap, width, FIT_FLOOR);
+    }
+
+    /** As fit, for a heading: its letters may shrink down to HEADING_FLOOR of the height. */
+    String fitHeading(String s, float cap, float width) {
+        return fit(s, cap, width, HEADING_FLOOR);
+    }
+
+    private String fit(String s, float cap, float width, float floor) {
         fitted = 0f;
         if (s == null) {
             return "";
@@ -308,9 +418,19 @@ final class SkinKit {
         if (full <= max) {
             return s;
         }
-        fitted = cap * Math.max(FIT_FLOOR, max / full);
+        fitted = cap * Math.max(floor, max / full);
         fittedFor = cap;
         prepare(fitted);
+        // The width does not fall exactly with the size (round 3.4.66 F1: "Getötete Gegner"
+        // needs 90 % and was cut by a hair): narrow again on what was measured, to the floor.
+        for (int i = 0; i < 4 && fitted > cap * floor; ++i) {
+            final float now = text.measureText(s);
+            if (now <= max) {
+                return s;
+            }
+            fitted = Math.max(cap * floor, fitted * (max / now) * 0.995f);
+            prepare(fitted);
+        }
         if (text.measureText(s) <= max + 0.5f) {
             return s;
         }
@@ -543,13 +663,28 @@ final class SkinKit {
         if (strings == null) {
             strings = new JSONObject();
             if (folder != null) {
-                final String json = GameLaunch.readText(
-                    new File(folder, "Data/Strings/" + language + ".json"));
+                // A mod's language: the game's English table, the mod's texts laid over it.
+                final String json = GameLaunch.readText(new File(folder,
+                    "Data/Strings/" + (modFolder != null ? "enUS" : language) + ".json"));
                 if (json != null) {
                     try {
                         strings = new JSONObject(strip(json));
                     } catch (Exception e) {
                         strings = new JSONObject();
+                    }
+                }
+            }
+            if (modFolder != null) {
+                final JSONObject own = readJson(new File(modFolder, "strings/" + language + ".json"));
+                for (java.util.Iterator<String> keys = own.keys(); keys.hasNext();) {
+                    final String name = keys.next();
+                    final String text = own.optString(name, "");
+                    if (!text.isEmpty()) {
+                        try {
+                            strings.put(name, text);
+                        } catch (Exception e) {
+                            // not taken: the English text stays
+                        }
                     }
                 }
             }
@@ -596,6 +731,19 @@ final class SkinKit {
             s = s.replace("{" + i + "}", String.valueOf(values[i]));
         }
         return s;
+    }
+
+    /** A JSON object from a file; an empty one when it cannot be read. */
+    private static JSONObject readJson(File f) {
+        final String json = GameLaunch.readText(f);
+        if (json != null) {
+            try {
+                return new JSONObject(strip(json));
+            } catch (Exception e) {
+                // not JSON: as absent
+            }
+        }
+        return new JSONObject();
     }
 
     /** A JSON text without a leading byte-order mark. */

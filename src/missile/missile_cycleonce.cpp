@@ -37,6 +37,8 @@
 
 #include "missile.h"
 
+#include "missile_cadence.h"
+
 /**
 **  Missile doesn't move, it will just cycle once and vanish.
 **  Used for ui missiles (cross shown when you give and order)
@@ -61,6 +63,22 @@ void MissileCycleOnce::Action() /* override */
 			}
 			break;
 	}
+}
+
+/**
+**  The cross shown where an order is given: it stays, shows the pictures of the original's
+**  script, a tick a cycle, and vanishes after the last one.
+*/
+void MissileClickCross::Action() /* override */
+{
+	const int picture = ClickCrossPictureOn(this->State++);
+
+	this->Wait = 1;
+	if (picture < 0) {
+		this->TTL = 0;
+		return;
+	}
+	this->SpriteFrame = std::min(picture, this->Type->SpriteFrames - 1);
 }
 
 //@}

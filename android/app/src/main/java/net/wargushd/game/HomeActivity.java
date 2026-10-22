@@ -52,6 +52,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private static final float LIST_ROWS_DY = 156f, INFO_X = 2304f, INFO_W = 1440f, INFO_H = 300f;
     private static final float SET_Y = 612f, SET_ROW_DY = 48f, SET_PITCH = 150f, SET_H = 108f;
     private static final float VALUE_W = 720f, LINE_PITCH = 82.5f;
+    // A setting's open list: LobbyPage's rows 96 at pitch 108 (owner decision 90 1A).
+    private static final float POP_ROW = 96f, POP_PITCH = 108f;
 
     private static final int RAIL_FILL = 0xEC0E0B08, LINE = 0xFF92743E, PANEL_FILL = 0xDE140F0A;
     private static final int INK = 0xFFE8E2D4, INK_MUTED = 0xFFCEC6B6, GOLD = 0xFFF0D250;
@@ -75,6 +77,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private static final String PREF_PENDING = "pendingToken";
     /** Set for one start: the shell was started over for a new language. */
     private static final String PREF_REOPEN_LANGUAGES = "reopenLanguages";
+    /** Set for one start: the shell was started over because a language mod came or went. */
+    private static final String PREF_REOPEN_MODS = "reopenMods";
     /** Where the pending game was started from: the rail entry and, on Missions, the campaign. */
     private static final String PREF_ORIGIN = "originPage";
     private static final String PREF_ORIGIN_CAMPAIGN = "originCampaign";
@@ -84,6 +88,12 @@ public class HomeActivity extends Activity implements LanPage.Starter {
      * of it is counted, and the shell comes back to the editor's map view.
      */
     private static final String PREF_TEST = "pendingTestMap";
+    /**
+     * Set while the pending start is one of the engine's runs for the Map Editor (export or
+     * validate, Session 2026-10-19 e): the mode, a line end and the path of the map being edited
+     * (empty for none). Nothing of it is counted; its files go to the editor.
+     */
+    private static final String PREF_EDITOR_RUN = "pendingEditorRun";
 
     private SkinKit kit;
     private HomeView view;
@@ -106,6 +116,17 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private float listScroll;        // logical units
     private int race, opponents, resources, units;   // 0 = map default
     private int tileset;   // 0 = map default, 1 forest, 2 winter, 3 wasteland, 4 orc swamp
+    /**
+     * The computer player of every opponent (bots mod, S-A, owner decision 80): 0 the original's
+     * (the default, D5), i the i-th of botChoices. The row shows only while a mod offers one.
+     */
+    private int bot;
+    private ModStore.BotChoices botChoices = new ModStore.BotChoices();
+    // The setting rows of the Custom Scenario page, by what they set.
+    private static final int ROW_RACE = 0, ROW_OPPONENTS = 1, ROW_TILESET = 2, ROW_RESOURCES = 3, ROW_UNITS = 4;
+    private static final int ROW_COMPUTER = 5;
+    /** The setting row whose list is open under its "v" (owner decision 90 1A), or -1. */
+    private int setPop = -1;
     /** The list is to be moved so that the selected map is in view (done at the next draw). */
     private boolean revealMap;
     private final CampaignPage campaign = new CampaignPage();
@@ -145,8 +166,15 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private CampaignPage.Campaign savedCampaign;
     /** The last mission won in the session that has just been collected. */
     private int wonMission;
+    /**
+     * The campaign a session started from the Load page turned into (the result window's
+     * Continue, decision 83): back on its Missions page, not on Load (round 3.4.66 M1). Or null.
+     */
+    private CampaignPage.Campaign ranCampaign;
     /** The name being typed over the profile sheet, or null. */
     private NameSheet nameSheet;
+    /** The first start's one sheet (name, portrait, colour; board 2B), or null. */
+    private FirstProfileSheet firstSheet;
     /** The sheet of one of the player's own maps (long press on its row), and that map. */
     private MapSheet mapSheet;
     private File sheetMap;
@@ -210,7 +238,33 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             testMap = null;
             return started;
         }
+
+        @Override
+        public boolean engineRun(String mode, File pud, File map) {
+            if (profile == null || !GateActivity.isSatisfied(HomeActivity.this)) {
+                return false;
+            }
+            // launch.lua's editor modes: "export" writes the tables, "validate" checks the map.
+            final StringBuilder r = new StringBuilder();
+            r.append("  mode = ").append(luaString(mode)).append(",\n");
+            if (pud != null) {
+                r.append("  map = ").append(luaString(MapList.path(HomeActivity.this, pud))).append(",\n");
+            }
+            editorRun = mode + "\n" + ((map != null) ? map.getPath() : "");
+            final boolean started = launch(r.toString(), profile.name);
+            editorRun = null;
+            return started;
+        }
+
+        @Override
+        public String engineKey() {
+            // The mods a scenario game takes are the ones the export runs with (ModStore.requestBlock).
+            return "v" + ModCatalog.versionCode(HomeActivity.this) + "\n"
+                + ModStore.requestBlock(HomeActivity.this, "  mode = \"export\",\n");
+        }
     };
+    /** The engine's run for the Map Editor being started (PREF_EDITOR_RUN); null for every other start. */
+    private String editorRun;
     /** The map a test game is being started for; null for every other start. */
     private String testMap;
     /** True when the typed name is for a new profile, false when it renames the active one. */
@@ -230,6 +284,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         createdAt = android.os.SystemClock.uptimeMillis();
         warmMapFacts();
         kit = new SkinKit(this);
+        // HOME-SLOW-FIRST-FRAME: the parts of onCreate, each logged below.
+        final long kitAt = android.os.SystemClock.uptimeMillis();
         entries = new String[] {
             kit.string("campaign", "Campaign"),
             kit.string("customscenario", "Custom Scenario"),
@@ -250,10 +306,11 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         menuMusic.setEnabled(music);
         menuAudio = new MenuAudio(this);
         menuAudio.setEnabled(music);
+        final long audioAt = android.os.SystemClock.uptimeMillis();
         profile = Profiles.active(this);
         if (profile == null) {
-            // The first profile starts with these and the player is asked at once: the name
-            // first, then the profile sheet for the portrait and the colour.
+            // The first profile starts with these and the player is asked at once, on one sheet:
+            // the name, the portrait and the colour (board 2B).
             profile = Profiles.create(this, "Player", 8, 1);
             firstProfile = (profile != null);
         }
@@ -262,8 +319,16 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             page = ENTRY_OPTIONS;
             options.showTab(4);
         }
+        final long profileAt = android.os.SystemClock.uptimeMillis();
         view = new HomeView(this);
         setContentView(view);
+        final long viewAt = android.os.SystemClock.uptimeMillis();
+        ModCatalog.listener = modDownloads;
+        if (prefs().getBoolean(PREF_REOPEN_MODS, false)) {
+            prefs().edit().remove(PREF_REOPEN_MODS).apply();
+            page = ENTRY_MODS;
+            modsPage.open(this, view);
+        }
         final Runnable pagePictures = new Runnable() {
             @Override
             public void run() {
@@ -272,9 +337,15 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         };
         campaign.redraw = pagePictures;
         missions.redraw = pagePictures;
+        options.redraw = pagePictures;
         Screen.useWhole(this);
+        // FONTBAKER-LANG: the shell starts over on a language change; the engine's font sheets
+        // follow the language in use (made again in the background when they are not of it).
+        FontBaker.refreshIfStale(this);
         android.util.Log.i("WargusHD", "LAUNCHER home create in "
-            + (android.os.SystemClock.uptimeMillis() - createdAt) + " ms");
+            + (android.os.SystemClock.uptimeMillis() - createdAt) + " ms (kit " + (kitAt - createdAt)
+            + ", music and sounds " + (audioAt - kitAt) + ", profile " + (profileAt - audioAt)
+            + ", view " + (viewAt - profileAt) + ", rest " + (android.os.SystemClock.uptimeMillis() - viewAt) + ")");
     }
 
     @Override
@@ -300,10 +371,16 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
         savedCampaign = null;
         wonMission = 0;
+        ranCampaign = null;
         final boolean unexpected = restoreOrigin();
         cameBack = false;
         collectResult();
         campaign.readProgress(this, profile);
+        if (ranCampaign != null && page == ENTRY_LOAD) {
+            page = ENTRY_CAMPAIGN;
+            missions.open(ranCampaign);
+            inMissions = true;
+        }
         if (inMissions && missions.campaign() != null) {
             // Back from a game: show the campaign as it stands now.
             missions.open(missions.campaign());
@@ -323,7 +400,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 savedCampaign.code.endsWith("orc"),
                 MissionsPage.listed(kit, savedCampaign, savedCampaign.missions));
         }
-        load.refresh(this, profile);
+        // The selected save is kept by its file; one that went while the shell was away is told.
+        final String goneSave = load.refresh(this, profile);
         options.read(this, profile);
         if (page == ENTRY_MULTIPLAYER) {
             lan.open(this, view, menuAudio, profile);
@@ -339,6 +417,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         } else if ("net_no_result".equals(netReason)) {
             tell(kit.own("The game ended"),
                  kit.own("No other team started. The game has no result and is not counted."));
+        } else if (goneSave != null && page == ENTRY_LOAD) {
+            tellSaveGone(goneSave);
         }
         errorReason = null;
         netReason = null;
@@ -364,6 +444,15 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         super.onStop();
     }
 
+    @Override
+    protected void onDestroy() {
+        // A download goes on; the shell that takes this one's place hears of it.
+        if (ModCatalog.listener == modDownloads) {
+            ModCatalog.listener = null;
+        }
+        super.onDestroy();
+    }
+
     /** What a failed start is told as: a sentence for the network reasons, the code otherwise. */
     private String startFailure(String reason) {
         final String words;
@@ -383,9 +472,17 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             words = "The network port is in use on this device.";
         } else if ("net_stranger".equals(reason)) {
             words = "A device that is not in the room tried to join.";
+        } else if ("net_seats".equals(reason)) {
+            words = "This map does not have a place for every player.";
+        } else if ("net_bad_request".equals(reason)) {
+            words = "The game settings could not be read.";
         } else if ("bad-save".equals(reason)) {
             // The game's own line for a saved game that cannot be read.
             return kit.string("save_error_cant_load", kit.own("The saved game could not be loaded."));
+        } else if ("bot-refusal".equals(reason)) {
+            // The engine refused the save for its computer players (bots mod): its reason, in the
+            // mod's words where the mod is installed.
+            return ModStore.botRefusalText(this, kit, errorDetail);
         } else {
             return kit.own("Reason: {0}", reason);
         }
@@ -399,8 +496,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             Screen.useWhole(this);
             if (firstProfile) {
                 firstProfile = false;
-                firstStep = true;
-                openNameSheet(false);
+                openFirstSheet();
             }
         }
     }
@@ -417,7 +513,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         } else if (completeSheet != null) {
             completeSheet = null;
             view.invalidate();
-        } else if (nameSheet != null) {
+        } else if (nameSheet != null && !(nameSheet.inPlace && galleryOpen)) {
             closeNameSheet(false);
         } else if (mapSheet != null) {
             mapSheet = null;
@@ -427,6 +523,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             view.invalidate();
         } else if (galleryOpen) {
             galleryOpen = false;
+            if (firstSheet != null && nameSheet != null) {
+                showKeys();   // back to the first start's sheet, as the gallery's own OK / Cancel
+            }
             view.invalidate();
         } else if (profileOpen) {
             profileOpen = false;
@@ -437,6 +536,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         } else if (page == ENTRY_MULTIPLAYER && lan.back()) {
             view.invalidate();
         } else if (page == ENTRY_EDITOR && editor.back()) {
+            view.invalidate();
+        } else if (page == ENTRY_SCENARIO && setPop >= 0) {
+            setPop = -1;
             view.invalidate();
         } else if (page != PAGE_NONE) {
             page = PAGE_NONE;
@@ -458,28 +560,34 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     // ----- maps -----
 
     /**
-     * Read the facts of every map the Custom Scenario list can show, off the main thread, so
-     * that the list finds them known when it is opened. The same folders and depth as loadMaps.
+     * Read the facts and the picture of every map the Custom Scenario list can show, off the
+     * main thread, so that the list finds them known when it is opened. The same folders and
+     * depth as loadMaps.
      */
     private void warmMapFacts() {
         final String folder = GateActivity.rememberedFolder(this);
         final File own = MapStore.directory(this);
+        final File game = (folder != null) ? new File(folder) : null;
+        final File data = Provision.dataDir(this);
         new Thread(new Runnable() {
             @Override
             public void run() {
                 final long began = android.os.SystemClock.uptimeMillis();
                 int n = 0;
                 if (folder != null) {
-                    n += warmMapFacts(new File(folder, "Data/Maps"), 0);
+                    n += warmMapFacts(new File(folder, "Data/Maps"), 0, game, data);
                 }
-                n += warmMapFacts(own, 0);
+                n += warmMapFacts(own, 0, game, data);
                 android.util.Log.i("WargusHD", "LAUNCHER maps " + n + " read ahead in "
                     + (android.os.SystemClock.uptimeMillis() - began) + " ms");
+                if (view != null) {
+                    view.postInvalidate();
+                }
             }
         }, "map-facts").start();
     }
 
-    private static int warmMapFacts(File dir, int depth) {
+    private static int warmMapFacts(File dir, int depth, File game, File data) {
         final File[] files = dir.listFiles();
         if (files == null || depth > 3) {
             return 0;
@@ -488,12 +596,53 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         for (File f : files) {
             if (f.isFile() && f.getName().toLowerCase().endsWith(".pud")) {
                 PudInfo.of(f);
+                MapPreview.of(game, data, f);
                 ++n;
             } else if (f.isDirectory()) {
-                n += warmMapFacts(f, depth + 1);
+                n += warmMapFacts(f, depth + 1, game, data);
             }
         }
         return n;
+    }
+
+    /** The map whose picture is being read for the list because the read-ahead has not reached it. */
+    private File previewPending;
+
+    /**
+     * The picture of a listed map if it is known; else null, and it is read off the main thread
+     * and the list drawn again when it is there.
+     */
+    private Bitmap listedPreview(final File pud) {
+        if (MapPreview.isKnown(pud)) {
+            return MapPreview.known(pud);
+        }
+        final String folder = GateActivity.rememberedFolder(this);
+        if (folder == null) {
+            return null;
+        }
+        if (!pud.equals(previewPending)) {
+            previewPending = pud;
+            final File game = new File(folder);
+            final File data = Provision.dataDir(this);
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    MapPreview.of(game, data, pud);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (pud.equals(previewPending)) {
+                                previewPending = null;
+                            }
+                            if (view != null) {
+                                view.invalidate();
+                            }
+                        }
+                    });
+                }
+            }, "map-preview").start();
+        }
+        return null;
     }
 
     private void loadMaps() {
@@ -573,8 +722,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         return kit.string("customscenario_mapdefault", "Map Default");
     }
 
-    private String raceText() {
-        switch (race) {
+    private String raceText() { return raceText(race); }
+
+    private String raceText(int v) {
+        switch (v) {
             case 1: return kit.string("customscenario_race_human", "Human");
             case 2: return kit.string("customscenario_race_orc", "Orc");
             // The original's list is Random, Human, Orc; it has no "Map Default".
@@ -582,16 +733,34 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
     }
 
-    private String opponentsText() {
-        if (opponents == 0) {
+    private String opponentsText() { return opponentsText(opponents); }
+
+    private String opponentsText(int v) {
+        if (v == 0) {
             return mapDefault();
         }
-        return kit.string("customscenario_opponents_" + opponents,
-                          kit.own(opponents == 1 ? "{0} Opponent" : "{0} Opponents", opponents));
+        return kit.string("customscenario_opponents_" + v,
+                          kit.own(v == 1 ? "{0} Opponent" : "{0} Opponents", v));
     }
 
-    private String resourcesText() {
-        switch (resources) {
+    /** The rows in their order: the Computer row under Opponents, only while a mod offers players. */
+    private int[] scenarioRows() {
+        return botChoices.any()
+            ? new int[] { ROW_RACE, ROW_OPPONENTS, ROW_COMPUTER, ROW_TILESET, ROW_RESOURCES, ROW_UNITS }
+            : new int[] { ROW_RACE, ROW_OPPONENTS, ROW_TILESET, ROW_RESOURCES, ROW_UNITS };
+    }
+
+    private String computerText() { return computerText(bot); }
+
+    private String computerText(int v) {
+        return (v > 0 && v <= botChoices.bots.size()) ? botChoices.names.get(v - 1)
+            : (botChoices.original != null ? botChoices.original : kit.own("Original"));
+    }
+
+    private String resourcesText() { return resourcesText(resources); }
+
+    private String resourcesText(int v) {
+        switch (v) {
             case 1: return kit.string("customscenario_resources_low", "Low");
             case 2: return kit.string("customscenario_resources_medium", "Medium");
             case 3: return kit.string("customscenario_resources_high", "High");
@@ -602,15 +771,19 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     }
 
     /** The original's list: Map Default, Forest, Winter, Wasteland, Orc Swamp. */
-    private String tilesetText() {
+    private String tilesetText() { return tilesetText(tileset); }
+
+    private String tilesetText(int v) {
         final String[] keys = { "customscenario_tileset_forest", "customscenario_tileset_winter",
                                 "customscenario_tileset_wasteland", "customscenario_tileset_orcswamp" };
         final String[] plain = { "Forest", "Winter", "Wasteland", "Orc Swamp" };
-        return (tileset >= 1 && tileset <= 4) ? kit.string(keys[tileset - 1], plain[tileset - 1]) : mapDefault();
+        return (v >= 1 && v <= 4) ? kit.string(keys[v - 1], plain[v - 1]) : mapDefault();
     }
 
-    private String unitsText() {
-        return (units == 1) ? kit.string("customscenario_units_peasant", "One Peasant Only")
+    private String unitsText() { return unitsText(units); }
+
+    private String unitsText(int v) {
+        return (v == 1) ? kit.string("customscenario_units_peasant", "One Peasant Only")
                             : mapDefault();
     }
 
@@ -620,6 +793,56 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             return 0;
         }
         return Math.max(0, Math.min(7, mapInfo.get(selectedMap).players - 1));
+    }
+
+    /** How many values a setting row offers (its open list's rows). */
+    private int settingCount(int row) {
+        switch (row) {
+            case ROW_RACE: return 3;
+            case ROW_OPPONENTS: return maxOpponents() + 1;
+            case ROW_TILESET: return 5;
+            case ROW_RESOURCES: return 4;
+            case ROW_UNITS: return 2;
+            // Original, then the mods' players (S-A).
+            case ROW_COMPUTER: return botChoices.bots.size() + 1;
+            default: return 0;
+        }
+    }
+
+    private int settingValue(int row) {
+        switch (row) {
+            case ROW_RACE: return race;
+            case ROW_OPPONENTS: return opponents;
+            case ROW_TILESET: return tileset;
+            case ROW_RESOURCES: return resources;
+            case ROW_UNITS: return units;
+            case ROW_COMPUTER: return bot;
+            default: return -1;
+        }
+    }
+
+    private String settingText(int row, int v) {
+        switch (row) {
+            case ROW_RACE: return raceText(v);
+            case ROW_OPPONENTS: return opponentsText(v);
+            case ROW_TILESET: return tilesetText(v);
+            case ROW_RESOURCES: return resourcesText(v);
+            case ROW_UNITS: return unitsText(v);
+            case ROW_COMPUTER: return computerText(v);
+            default: return "";
+        }
+    }
+
+    private void chooseSetting(int row, int v) {
+        switch (row) {
+            case ROW_RACE: race = v; break;
+            case ROW_OPPONENTS: opponents = v; break;
+            case ROW_TILESET: tileset = v; break;
+            case ROW_RESOURCES: resources = v; break;
+            case ROW_UNITS: units = v; break;
+            case ROW_COMPUTER: bot = v; break;
+            default: break;
+        }
     }
 
     // ----- start and return -----
@@ -724,33 +947,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         if (read.fault != ModPackage.OK) {
             modsPage.setWaiting(ModsPage.IDLE);
             android.util.Log.i("WargusHD", "LAUNCHER mod refused " + read.fault + " " + read.detail);
-            final String notMod = kit.own("That file is not a mod"), notIn = kit.own("The mod was not imported");
-            switch (read.fault) {
-                case ModPackage.NOT_PACKAGE:
-                    tell(notMod, kit.own("{0} was not imported.", file));
-                    break;
-                case ModPackage.NO_MANIFEST:
-                    tell(notMod, kit.own("{0} has no mod.json.", file));
-                    break;
-                case ModPackage.BAD_MANIFEST:
-                    tell(notMod, kit.own("The mod.json of {0} cannot be used.", file));
-                    break;
-                case ModPackage.BAD_PATH:
-                    tell(notIn, kit.own("It holds a file path that is not allowed: {0}", read.detail));
-                    break;
-                case ModPackage.UNKNOWN_NAME:
-                    tell(notIn, kit.own("It holds a name that no mod has: {0}", read.detail));
-                    break;
-                case ModPackage.TOO_LARGE:
-                    tell(notIn, kit.own("It is larger than {0} MB.", ModPackage.MAX_BYTES / (1024L * 1024L)));
-                    break;
-                case ModPackage.TOO_MANY:
-                    tell(notIn, kit.own("It holds more than {0} files.", ModPackage.MAX_ENTRIES));
-                    break;
-                default:
-                    tell(notIn, kit.own("{0} could not be read, or the storage is full.", file));
-                    break;
-            }
+            final String[] why = refusal(read, file);
+            tell(why[0], why[1]);
             return;
         }
         if (read.installed == null) {
@@ -803,16 +1001,59 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         view.invalidate();
     }
 
+    /** Why a package was refused: the sheet's title and text. */
+    private String[] refusal(ModStore.Import read, String file) {
+        final String notMod = kit.own("That file is not a mod"), notIn = kit.own("The mod was not imported");
+        switch (read.fault) {
+            case ModPackage.NOT_PACKAGE:
+                return new String[] { notMod, kit.own("{0} was not imported.", file) };
+            case ModPackage.NO_MANIFEST:
+                return new String[] { notMod, kit.own("{0} has no mod.json.", file) };
+            case ModPackage.BAD_MANIFEST:
+                return new String[] { notMod, kit.own("The mod.json of {0} cannot be used.", file) };
+            case ModPackage.BAD_PATH:
+                return new String[] { notIn, kit.own("It holds a file path that is not allowed: {0}", read.detail) };
+            case ModPackage.UNKNOWN_NAME:
+                return new String[] { notIn, kit.own("It holds a name that no mod has: {0}", read.detail) };
+            case ModPackage.TOO_LARGE:
+                return new String[] { notIn, kit.own("It is larger than {0} MB.", ModPackage.MAX_BYTES / (1024L * 1024L)) };
+            case ModPackage.TOO_MANY:
+                return new String[] { notIn, kit.own("It holds more than {0} files.", ModPackage.MAX_ENTRIES) };
+            default:
+                return new String[] { notIn, kit.own("{0} could not be read, or the storage is full.", file) };
+        }
+    }
+
     /** The end of an import: the list is read again and shows the package, selected. */
     private void modInstalled(ModStore.Import read, boolean done) {
         modsPage.setWaiting(ModsPage.IDLE);
         if (done) {
-            android.util.Log.i("WargusHD", "LAUNCHER mod imported " + read.mod.id + " " + read.mod.version);
+            android.util.Log.i("WargusHD", "LAUNCHER mod " + (read.fromList ? "downloaded " : "imported ")
+                + read.mod.id + " " + read.mod.version);
+            ModCatalog.setFromList(this, read.mod.id, read.fromList);
         } else {
             tell(kit.own("The mod was not imported"), kit.own("{0} could not be put in place.", read.mod.name));
         }
         modsPage.open(this, view, read.mod.id);
         view.invalidate();
+        if (done) {
+            followModLanguage();   // a switched-on package replaced by one with another language
+        }
+    }
+
+    /**
+     * After a mod was switched, replaced or removed: a language mod brings its language, or
+     * gives the one before it back (M2_LANGUAGE_MOD_SPEC). Every text comes with the language,
+     * so the shell starts over and comes back on the Mods page. @return true when it does.
+     */
+    private boolean followModLanguage() {
+        if (!SkinKit.followMods(this)) {
+            return false;
+        }
+        android.util.Log.i("WargusHD", "LAUNCHER language follows the mods: " + SkinKit.language(this));
+        prefs().edit().putBoolean(PREF_REOPEN_MODS, true).apply();
+        recreate();
+        return true;
     }
 
     private void askRemoveMod() {
@@ -833,6 +1074,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     public void run() {
                         if (ModStore.remove(app, mod.id)) {
                             android.util.Log.i("WargusHD", "LAUNCHER mod removed " + mod.id);
+                            ModCatalog.setFromList(app, mod.id, false);
                         }
                         runOnUiThread(new Runnable() {
                             @Override
@@ -840,6 +1082,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                                 modsPage.setWaiting(ModsPage.IDLE);
                                 modsPage.open(HomeActivity.this, view);
                                 view.invalidate();
+                                followModLanguage();
                             }
                         });
                     }
@@ -848,8 +1091,80 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         };
     }
 
+    // ----- mods: the list's downloads -----
+
+    /** The download under way is shown and ends here, whichever shell is in front. */
+    private final ModCatalog.Listener modDownloads = new ModCatalog.Listener() {
+        @Override
+        public void downloadMoved() {
+            if (page == ENTRY_MODS) {
+                view.invalidate();
+            }
+        }
+
+        @Override
+        public void downloadEnded(ModCatalog.Download d) {
+            modDownloaded(d);
+        }
+    };
+
+    /** Fetch the selected mod of the list; it is installed as a picked file is. */
+    private void downloadMod() {
+        final ModsPage.Row row = modsPage.selectedRow();
+        final String base = ModCatalog.base(this);
+        if (row == null || base == null || !modsPage.canDownload(row)) {
+            return;
+        }
+        modsPage.clearFailed(row.id);
+        android.util.Log.i("WargusHD", "LAUNCHER mod download " + row.entry.id + " " + row.entry.version);
+        ModCatalog.start(getApplicationContext(), base, row.entry);
+        view.invalidate();
+    }
+
+    /** A download ended: failed (the row says why), cancelled, or read and on its way in as an import. */
+    private void modDownloaded(ModCatalog.Download d) {
+        final String id = d.entry.id;
+        android.util.Log.i("WargusHD", "LAUNCHER mod download ended " + id + " " + d.fault
+            + (d.read != null ? " " + d.read.fault : ""));
+        if (d.fault == ModCatalog.CANCELLED) {
+            view.invalidate();
+            return;
+        }
+        String reason = null;
+        switch (d.fault) {
+            case ModCatalog.OK:
+                if (d.read.fault != ModPackage.OK) {
+                    reason = refusal(d.read, d.entry.asset)[1];
+                }
+                break;
+            case ModCatalog.NO_SPACE:
+                reason = kit.own("Not enough space: {0} MB needed.", d.detail);
+                break;
+            case ModCatalog.DAMAGED:
+                reason = kit.own("The download was damaged and was deleted.");
+                break;
+            case ModCatalog.SOURCE_REFUSED:
+                reason = kit.own("The source refused the download ({0}).", d.detail);
+                break;
+            case ModCatalog.MISMATCH:
+                reason = kit.own("The package is not the one the list names.");
+                break;
+            default:
+                reason = kit.own("No connection.");
+                break;
+        }
+        if (reason != null) {
+            modsPage.failed(id, reason);
+            menuAudio.play(MenuAudio.ERROR);
+            view.invalidate();
+            return;
+        }
+        modRead(d.read, d.entry.asset, d.installed);
+    }
+
     /** Open the Custom Scenario page with the settings of the last scenario started. */
     private void openScenario() {
+        setPop = -1;
         final SharedPreferences p = prefs();
         source = Math.max(0, Math.min(2, p.getInt("scenarioSourceTab", source)));
         loadMaps();
@@ -867,6 +1182,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         units = Math.max(0, Math.min(1, p.getInt("scenarioUnits", 0)));
         tileset = Math.max(0, Math.min(4, p.getInt("scenarioTileset", 0)));
         opponents = Math.max(0, Math.min(maxOpponents(), p.getInt("scenarioOpponents", 0)));
+        // The computer player of the last game, while its mod still offers it; else the original's.
+        botChoices = ModStore.botChoices(this);
+        bot = botChoices.indexOf(p.getString("scenarioBot", "")) + 1;
         revealMap = true;
     }
 
@@ -879,7 +1197,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         prefs().edit().putInt("scenarioSourceTab", source).putString("scenarioMap", map.getPath())
             .putInt("scenarioRace", race).putInt("scenarioOpponents", opponents)
             .putInt("scenarioResources", resources).putInt("scenarioUnits", units)
-            .putInt("scenarioTileset", tileset).apply();
+            .putInt("scenarioTileset", tileset)
+            .putString("scenarioBot", (bot > 0 && bot <= botChoices.bots.size())
+                ? botChoices.bots.get(bot - 1).key() : "").apply();
         final String folder = GateActivity.rememberedFolder(this);
         // The engine resolves maps of the game folder by their path inside it.
         final String path;
@@ -910,6 +1230,17 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             r.append("  tileset = \"").append(names[tileset - 1]).append("\",\n");
         }
         r.append("  color = ").append(profile.color).append(",\n");
+        if (bot > 0 && bot <= botChoices.bots.size()) {
+            // Every opponent plays the chosen computer player (S-A): one entry per opponent seat,
+            // as many as the map can hold when the count is the map's own (launch.lua: bots).
+            final String key = luaString(botChoices.bots.get(bot - 1).key());
+            final int count = Math.max(1, (opponents > 0) ? opponents : maxOpponents());
+            r.append("  bots = {");
+            for (int i = 0; i < count; ++i) {
+                r.append(i == 0 ? " " : ", ").append(key);
+            }
+            r.append(" },\n");
+        }
         // The result window after the game is shown above the game by its own activity.
         r.append("  window = true,\n");
         launch(r.toString());
@@ -950,6 +1281,34 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         };
     }
 
+    /** The keyboard for the view, which takes the typing (onCreateInputConnection). */
+    private void showKeys() {
+        view.requestFocus();
+        final InputMethodManager keys = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        keys.restartInput(view);
+        keys.showSoftInput(view, 0);
+    }
+
+    /** The first start in one step (board 2B): the name typed into the sheet, portrait and colour beside it. */
+    private void openFirstSheet() {
+        firstStep = true;
+        nameIsNew = false;
+        nameSheet = new NameSheet(kit.own("Your profile"), profile.name, true);
+        firstSheet = new FirstProfileSheet();
+        firstSheet.editor = nameSheet;
+        showKeys();
+        view.invalidate();
+    }
+
+    /** The profile's name edited in place on the profile sheet (board 2B; no Rename sheet). */
+    private void openNameInPlace() {
+        nameIsNew = false;
+        nameSheet = new NameSheet(kit.own("Rename profile"), profile.name, true);
+        profileSheet.editor = nameSheet;
+        showKeys();
+        view.invalidate();
+    }
+
     private void openNameSheet(boolean forNew) {
         nameIsNew = forNew;
         nameSheet = new NameSheet(firstStep ? kit.own("Your name") : forNew ? kit.own("New profile") : kit.own("Rename profile"),
@@ -965,6 +1324,43 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private boolean isOwnMap(File map) {
         return map != null && map.getParentFile() != null
             && map.getParentFile().equals(MapStore.directory(this));
+    }
+
+    /** The mods source's own address, typed in the top sheet (owner decision 90 2A). */
+    private boolean editingAddress;
+
+    private void openAddressSheet() {
+        editingAddress = true;
+        nameSheet = new NameSheet(kit.own("Mods source address"), options.sourceAddress(), false,
+                                  OptionsPage.ADDRESS_MAX);
+        view.requestFocus();
+        final InputMethodManager keys = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        keys.restartInput(view);
+        keys.showSoftInput(view, 0);
+        view.invalidate();
+    }
+
+    /**
+     * A tap on Game art (owner decision 90 2A): asked first, then the preparing screen reads the
+     * art again from the game folder; it comes back here through the entry.
+     */
+    private void askPrepareArt() {
+        final String folder = options.folderShown();
+        if (folder == null) {
+            return;
+        }
+        sheet = ConfirmSheet.marked(kit.own("Prepare the game art again?"),
+                                    kit.own("The art is read again from {0}.", folder),
+                                    kit.own("This takes a few minutes; installed mods stay."),
+                                    kit.string("common_cancel", "Cancel"), kit.own("Prepare"));
+        sheetAction = new Runnable() {
+            @Override
+            public void run() {
+                android.util.Log.i("WargusHD", "LAUNCHER art prepared again on request");
+                startActivity(new android.content.Intent(HomeActivity.this, PrepActivity.class));
+                finish();
+            }
+        };
     }
 
     private void openMapNameSheet(File map) {
@@ -1024,6 +1420,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private void closeNameSheet(boolean use) {
         final NameSheet done = nameSheet;
         nameSheet = null;
+        profileSheet.editor = null;
+        if (firstSheet != null) {
+            firstSheet.editor = null;
+        }
         ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
             .hideSoftInputFromWindow(view.getWindowToken(), 0);
         if (nameThen != null) {
@@ -1031,6 +1431,15 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             nameThen = null;
             if (use && done != null) {
                 then.named(done.name());
+            }
+            Screen.useWhole(this);
+            view.invalidate();
+            return;
+        }
+        if (editingAddress) {
+            editingAddress = false;
+            if (use && done != null) {
+                options.keepSourceAddress(done.name());
             }
             Screen.useWhole(this);
             view.invalidate();
@@ -1061,9 +1470,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             }
         }
         if (firstStep) {
-            // Whatever was done with the name, the portrait and the colour come next.
+            // The first start is one step: portrait and colour were chosen on the same sheet.
             firstStep = false;
-            profileOpen = true;
+            firstSheet = null;
         }
         Screen.useWhole(this);
         view.invalidate();
@@ -1096,18 +1505,37 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         };
     }
 
+    /** The notice for a selected save that is no longer there (the name is the file's). */
+    private void tellSaveGone(String file) {
+        final int ext = file.lastIndexOf(".sav");
+        tell(kit.own("The saved game is gone"),
+             kit.own("{0} is no longer on this device.", ext > 0 ? file.substring(0, ext) : file));
+    }
+
     private void startSave() {
         final LoadPage.Save save = load.selectedSave();
         if (profile == null || save == null) {
             return;
         }
-        // A save that has gone since the list was read is not started: the list is read again.
-        if (!new File(new File(Profiles.directory(this, profile), "wc2/save"), save.file).isFile()) {
+        // Load starts the selected file itself (LOAD-WRONG-SAVE-ONCE): a save that has gone since
+        // the list was read is refused with the notice, and nothing is selected after the list is
+        // read again, so no other save can take its place.
+        if (load.resolveSelected(this, profile) == null) {
             android.util.Log.i("WargusHD", "LAUNCH save gone " + save.file);
             load.refresh(this, profile);
-            tell(kit.own("The saved game is gone"), kit.own("{0} is no longer on this device.", save.name));
+            tellSaveGone(save.file);
             return;
         }
+        // A save that needs a mod's computer player that is not on, or is another version, is
+        // refused here with the reason; the engine refuses it too (Wc2BotRefusal), as a second line.
+        final String refusal = ModStore.saveRefusal(this,
+            new File(new File(Profiles.directory(this, profile), "wc2/save"), save.file), kit);
+        if (refusal != null) {
+            android.util.Log.i("WargusHD", "LAUNCH save refused for its computer players " + save.file);
+            tell(kit.own("The saved game cannot be loaded"), refusal);
+            return;
+        }
+        load.started(this, profile);
         launch("  mode = \"load\",\n  file = \"" + save.file + "\",\n  window = true,\n");
     }
 
@@ -1139,6 +1567,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             tell(kit.own("The game files are missing"), kit.own("Choose the game folder in Options, Game Files."));
             return false;
         }
+        // The engine reads the font sheets as it starts: a making still running ends first.
+        FontBaker.awaitRefresh();
         menuAudio.play(MenuAudio.BUTTON);
         final String token = GameLaunch.newToken();
         final StringBuilder r = new StringBuilder("LaunchRequest = {\n");
@@ -1170,6 +1600,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
         prefs().edit().putString(PREF_PENDING, token)
             .putString(PREF_TEST, testMap)
+            .putString(PREF_EDITOR_RUN, editorRun)
             .putInt(PREF_ORIGIN, page)
             .putString(PREF_ORIGIN_CAMPAIGN,
                        (inMissions && missions.campaign() != null) ? missions.campaign().key : null)
@@ -1185,7 +1616,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             menuMusic.fadeOutForGame();
             return true;
         }
-        prefs().edit().remove(PREF_PENDING).apply();
+        prefs().edit().remove(PREF_PENDING).remove(PREF_EDITOR_RUN).apply();
         ((android.view.ViewGroup) loading.getParent()).removeView(loading);
         loading = null;
         return false;
@@ -1226,6 +1657,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         if (!f.exists() && !GameLaunch.gameRunning(this)) {
             prefs().edit().remove(PREF_PENDING).apply();
             android.util.Log.i("WargusHD", "LAUNCH pending game left no record");
+            if (endEditorRun(null, pending)) {
+                return false;
+            }
             // A test game's end is told by the editor, over its map view.
             return !endTest("closed");
         }
@@ -1236,9 +1670,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
     private String stateStamp() {
         final LoadPage.Save save = load.selectedSave();
         return page + "/" + inMissions + "/" + profileOpen + "/" + galleryOpen + "/" + (sheet != null)
-            + "/" + (nameSheet != null) + "/" + (mapSheet != null) + "/" + (switchSheet != null) + "/" + (completeSheet != null)
+            + "/" + (nameSheet != null) + "/" + (firstSheet != null) + "/" + (mapSheet != null) + "/" + (switchSheet != null) + "/" + (completeSheet != null)
             + "/" + (licences != null) + "/" + source + "/" + selectedMap + "/" + race + "/" + opponents
-            + "/" + resources + "/" + units + "/" + tileset + "/" + missions.mission()
+            + "/" + resources + "/" + units + "/" + tileset + "/" + bot + "/" + setPop + "/" + missions.mission()
             + "/" + (missions.campaign() != null ? missions.campaign().key : "")
             + "/" + (save != null ? save.file : "")
             + "/" + (profile != null ? profile.color + "." + profile.portrait + "." + profile.name : "");
@@ -1246,6 +1680,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
 
     /** The machine reason of a record that ended in an error; told once. */
     private String errorReason;
+    /** The engine's own sentence that came with that error (the record's "detail"), or "". */
+    private String errorDetail = "";
     /** How a network game ended when it had no outcome of its own (the record's "net"). */
     private String netReason;
 
@@ -1294,6 +1730,32 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         return true;
     }
 
+    /**
+     * The pending start was one of the engine's runs for the Map Editor and is over: hand its
+     * record (null when it left none) and its file (export.json / validate.json) to the editor.
+     *
+     * @return true when the start was such a run
+     */
+    private boolean endEditorRun(String record, String token) {
+        final String run = prefs().getString(PREF_EDITOR_RUN, null);
+        if (run == null) {
+            return false;
+        }
+        prefs().edit().remove(PREF_EDITOR_RUN).apply();
+        final int cut = run.indexOf('\n');
+        final String mode = (cut < 0) ? run : run.substring(0, cut);
+        final String map = (cut < 0) ? "" : run.substring(cut + 1);
+        final File part = new File(GameLaunch.resultFile(this, Profiles.directory(this, profile)).getParentFile(),
+                                   mode + ".json");
+        final String text = GameLaunch.readText(part);
+        part.delete();
+        android.util.Log.i("WargusHD", "LAUNCHER editor run over: " + mode);
+        if (page == ENTRY_EDITOR) {
+            editor.afterEngineRun(mode, map.isEmpty() ? null : new File(map), record, text, token);
+        }
+        return true;
+    }
+
     private void collectResult() {
         final String pending = prefs().getString(PREF_PENDING, null);
         if (pending == null || profile == null) {
@@ -1311,6 +1773,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         }
         f.delete();
         prefs().edit().remove(PREF_PENDING).apply();
+        if (endEditorRun(text, pending)) {
+            return;
+        }
         if (prefs().getString(PREF_TEST, null) != null) {
             // Of a test game only a failed start is told; nothing is counted and the profile
             // is not written.
@@ -1334,9 +1799,22 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             }
             if ("error".equals(record.optString("exit"))) {
                 errorReason = record.optString("error", "unknown");
+                errorDetail = record.optString("detail", "");
             }
             netReason = record.has("net") ? record.optString("net") : null;
             final JSONArray games = record.optJSONArray("games");
+            if ("campaign".equals(record.optString("mode")) && games != null) {
+                // The record of a loaded save ends in mode "campaign" only when its Continue
+                // went on with the campaign; the save's own game names the campaign.
+                for (int i = 0; i < games.length(); ++i) {
+                    final String key = games.getJSONObject(i).optString("campaign", "");
+                    for (CampaignPage.Campaign k : campaign.campaigns) {
+                        if (k.key.equals(key)) {
+                            ranCampaign = k;
+                        }
+                    }
+                }
+            }
             for (int i = 0; games != null && i < games.length(); ++i) {
                 final JSONObject game = games.getJSONObject(i);
                 // A network game no other team started is not counted at all. One the player
@@ -1369,8 +1847,9 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                             }
                         }
                     }
-                } else if ("defeat".equals(outcome) || "draw".equals(outcome)) {
-                    // A draw (a surrender ends as one) is shown and counted as a defeat (design 29.4).
+                } else if ("defeat".equals(outcome) || "draw".equals(outcome) || "quit".equals(outcome)) {
+                    // A draw (a surrender ends as one) is shown and counted as a defeat (design 29.4); a game
+                    // left by Quit / Exit counts as one too (owner decision 81).
                     ++profile.defeats;
                 }
                 // The profile's own line among the game's players.
@@ -1410,6 +1889,12 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         private android.graphics.Bitmap plainButton;
         // List dragging.
         private float downX, downY, downScroll;
+        /**
+         * A press is open: set by ACTION_DOWN, taken by the first ACTION_UP. A second lift without
+         * a press in between does not act again (RACE-FIELD-DOUBLE-STEP: one tap moved the race
+         * field two steps once).
+         */
+        private boolean pressOpen;
         /** True from the moment a held row opened its sheet until that finger is lifted. */
         private boolean heldOpened;
         /** A row of the player's own maps held down for half a second opens the map's sheet. */
@@ -1465,7 +1950,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
          * Owner's rule: the map's picture has a panel of its own under the facts; the settings
          * stand at the foot of the page.
          */
-        private float setTop() { return contentBottom() - (SET_ROW_DY + SET_PITCH * 5f); }
+        private float setTop() { return contentBottom() - (SET_ROW_DY + SET_PITCH * scenarioRows().length); }
         private float setRowY(int i) { return setTop() + SET_ROW_DY + SET_PITCH * i; }
 
         private float maxScroll() {
@@ -1494,21 +1979,63 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
             out.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI
                 | EditorInfo.IME_FLAG_NO_FULLSCREEN;
-            // Text is taken as it is committed; nothing is kept for the keyboard to edit.
+            // The name is the keyboard's text, the cursor at its end. A keyboard that composes
+            // (swipe, a non-Latin script, one that ignores the no-suggestions hint) gets its
+            // composing word shown at the end of the name and replaced as it changes; without
+            // this the base connection kept that word to itself and sent it on as one key event
+            // the view does not take, so it was lost.
             return new BaseInputConnection(this, false) {
+                /** The characters at the end of the name that are the keyboard's composing text. */
+                private int composing;
+
+                private void replaceComposing(CharSequence text) {
+                    nameSheet.erase(composing);
+                    final int had = nameSheet.name().length();
+                    nameSheet.type(text);
+                    composing = nameSheet.name().length() - had;
+                }
+
                 @Override
                 public boolean commitText(CharSequence text, int newCursorPosition) {
                     if (nameSheet != null) {
-                        nameSheet.type(text);
+                        replaceComposing(text);
+                        composing = 0;
                         invalidate();
                     }
                     return true;
                 }
 
                 @Override
+                public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                    if (nameSheet != null) {
+                        replaceComposing(text);
+                        invalidate();
+                    }
+                    return true;
+                }
+
+                @Override
+                public boolean finishComposingText() {
+                    composing = 0;
+                    return true;
+                }
+
+                @Override
+                public CharSequence getTextBeforeCursor(int n, int flags) {
+                    final String name = (nameSheet != null) ? nameSheet.name() : "";
+                    return name.substring(Math.max(0, name.length() - Math.max(0, n)));
+                }
+
+                @Override
+                public CharSequence getTextAfterCursor(int n, int flags) {
+                    return "";
+                }
+
+                @Override
                 public boolean deleteSurroundingText(int before, int after) {
                     if (nameSheet != null) {
                         nameSheet.erase(before);
+                        composing = Math.max(0, composing - Math.max(0, before));
                         invalidate();
                     }
                     return true;
@@ -1670,6 +2197,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             }
             if (galleryOpen) {
                 gallery.draw(c, kit);
+            } else if (firstSheet != null && profile != null) {
+                firstSheet.draw(c, kit, profile);
             } else if (profileOpen && profile != null) {
                 profileSheet.draw(c, kit, profile, campaign.campaigns);
             }
@@ -1682,7 +2211,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             if (mapSheet != null) {
                 mapSheet.draw(c, kit);
             }
-            if (nameSheet != null) {
+            if (nameSheet != null && !nameSheet.inPlace) {
                 nameSheet.draw(c, kit);
             }
             if (licences != null) {
@@ -1826,9 +2355,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 panel(c, INFO_X, SET_Y, INFO_W, picH);
             }
             if (selectedMap < maps.size()) {
-                final String folder = GateActivity.rememberedFolder(HomeActivity.this);
-                final Bitmap preview = MapPreview.of(folder != null ? new File(folder) : null,
-                    Provision.dataDir(HomeActivity.this), maps.get(selectedMap));
+                final Bitmap preview = listedPreview(maps.get(selectedMap));
                 if (preview != null) {
                     // The whole map, its sides kept, centred in the panel with 48 units around.
                     final float room = picInside ? insideSide : picH - 96f;
@@ -1849,14 +2376,20 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 kit.string("customscenario_tileset", "Map Tileset:"),
                 kit.string("customscenario_resources", "Resources:"),
                 kit.string("customscenario_units", "Units:"),
+                // The mod's own word; the launcher's while it has none.
+                botChoices.label != null ? botChoices.label : kit.own("Computer:"),
             };
             final String[] values = { raceText(), opponentsText(), tilesetText(), resourcesText(),
-                                      unitsText() };
-            for (int i = 0; i < labels.length; ++i) {
+                                      unitsText(), computerText() };
+            final int[] rows = scenarioRows();
+            for (int i = 0; i < rows.length; ++i) {
                 final float y = setRowY(i);
-                kit.textMiddle(c, labels[i], INFO_X + 60f, y, SET_H, CAP_BODY, INK, true);
+                kit.textMiddle(c, labels[rows[i]], INFO_X + 60f, y, SET_H, CAP_BODY, INK, true);
                 well(c, valueX(), y, VALUE_W, SET_H);
-                kit.textMiddle(c, values[i], valueX() + 36f, y, SET_H, CAP_BODY, INK, true);
+                // Each value box opens a list under its "v" (owner decision 90 1A).
+                kit.textMiddle(c, kit.fit(values[rows[i]], CAP_BODY, VALUE_W - 150f), valueX() + 36f, y, SET_H,
+                               CAP_BODY, INK, true);
+                kit.textCentre(c, "v", valueX() + VALUE_W - 96f, y, 60f, SET_H, CAP_SMALL, GOLD, true);
             }
 
             if (plainButton == null) {
@@ -1874,6 +2407,62 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             kit.textCentre(c, kit.string("customscenario_start", "Start Game"),
                            actionX(), actionY(), ACTION_W, ACTION_H, CAP_BODY,
                            canStart ? GOLD : 0xFF9C9486, canStart);
+            if (setPop >= 0) {
+                drawSetPop(c);
+            }
+        }
+
+        // ----- a setting's open list (owner decision 90 1A: the lobby's pop look) -----
+
+        /** The index of the open row in scenarioRows(), or -1 when it is no longer shown. */
+        private int setPopIndex() {
+            final int[] rows = scenarioRows();
+            for (int i = 0; i < rows.length; ++i) {
+                if (rows[i] == setPop) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private float setPopH() { return settingCount(setPop) * POP_PITCH + 24f; }
+
+        /** Under the value box, or above it where it would run off the page, as LobbyPage opens. */
+        private float setPopY() {
+            final float rowY = setRowY(setPopIndex());
+            final float below = rowY + SET_H + 12f;
+            return (below + setPopH() > contentBottom() - 12f)
+                ? Math.max(CONTENT_TOP + 12f, rowY + 42f - setPopH()) : below;
+        }
+
+        private void drawSetPop(Canvas c) {
+            if (setPopIndex() < 0) {
+                setPop = -1;
+                return;
+            }
+            final float x = valueX(), y0 = setPopY(), w = VALUE_W;
+            kit.fill(c, x, y0, w, setPopH(), LanKit.POP_FILL, 14f);
+            kit.outline(c, x, y0, w, setPopH(), LINE, 14f);
+            final int now = settingValue(setPop);
+            for (int r = 0; r < settingCount(setPop); ++r) {
+                final float y = y0 + 12f + POP_PITCH * r;
+                kit.fill(c, x + 12f, y, w - 24f, POP_ROW, r == now ? ROW_SELECTED : ROW_FAINT, ROW_RADIUS);
+                kit.textMiddle(c, kit.fit(settingText(setPop, r), CAP_MID, w - 96f), x + 48f, y, POP_ROW, CAP_MID,
+                               r == now ? GOLD : INK, true);
+            }
+        }
+
+        /** A tap while a list is open: a row chooses and closes; anywhere else only closes. */
+        private void tapSetPop(float x, float y) {
+            if (setPopIndex() >= 0) {
+                final float y0 = setPopY();
+                for (int r = 0; r < settingCount(setPop); ++r) {
+                    if (in(x, y, valueX() + 12f, y0 + 12f + POP_PITCH * r, VALUE_W - 24f, POP_ROW)) {
+                        chooseSetting(setPop, r);
+                    }
+                }
+            }
+            setPop = -1;
         }
 
         private int entryAt(float x, float y) {
@@ -1914,16 +2503,11 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 menuAudio.play(MenuAudio.BUTTON);
                 pickMap();
             } else {
-                for (int i = 0; i < 5; ++i) {
+                final int[] rows = scenarioRows();
+                for (int i = 0; i < rows.length; ++i) {
                     if (in(x, y, valueX(), setRowY(i), VALUE_W, SET_H)) {
-                        switch (i) {
-                            case 0: race = (race + 1) % 3; break;
-                            case 1: opponents = (opponents + 1) % (maxOpponents() + 1); break;
-                            case 2: tileset = (tileset + 1) % 5; break;
-                            case 3: resources = (resources + 1) % 4; break;
-                            case 4: units = (units + 1) % 2; break;
-                            default: break;
-                        }
+                        // Owner decision 90 1A: the list opens with the current value lit.
+                        setPop = rows[i];
                     }
                 }
             }
@@ -1978,7 +2562,38 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 }
                 return true;
             }
-            if (nameSheet != null) {
+            if (nameSheet != null && nameSheet.inPlace && !galleryOpen) {
+                // A name typed into the first start's sheet or the profile sheet (board 2B).
+                if (e.getAction() == MotionEvent.ACTION_UP) {
+                    if (firstSheet != null && profile != null) {
+                        final int answer = firstSheet.up(x, y);
+                        if (answer == FirstProfileSheet.START) {
+                            closeNameSheet(true);
+                        } else if (answer == FirstProfileSheet.COLOR && profile.color != firstSheet.pickedColor) {
+                            profile.color = firstSheet.pickedColor;
+                            Profiles.update(HomeActivity.this, profile);
+                            portrait = Portraits.tinted(kit, profile.portrait, Profiles.COLORS[profile.color]);
+                        } else if (answer == FirstProfileSheet.PORTRAIT) {
+                            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                                .hideSoftInputFromWindow(getWindowToken(), 0);
+                            galleryOpen = true;
+                            gallery.open(kit, profile.color, profile.portrait, profile.portraitRandom,
+                                         Provision.dataDir(HomeActivity.this), new Runnable() {
+                                @Override
+                                public void run() {
+                                    postInvalidate();
+                                }
+                            });
+                        }
+                    } else if (profileSheet.up(x, y, kit) != ProfileSheet.RENAME) {
+                        // A tap beside the name ends its editing and keeps what was typed.
+                        closeNameSheet(true);
+                    }
+                    invalidate();
+                }
+                return true;
+            }
+            if (nameSheet != null && !nameSheet.inPlace) {
                 if (e.getAction() == MotionEvent.ACTION_UP) {
                     final int answer = nameSheet.up(x, y);
                     if (answer != NameSheet.NONE) {
@@ -2033,7 +2648,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     }
                 } else if (e.getAction() == MotionEvent.ACTION_UP) {
                     final int answer = switchSheet.up(x, y, kit);
-                    if (answer == SwitchSheet.DELETE) {
+                    if (answer == SwitchSheet.NEW) {
+                        switchSheet = null;
+                        openNameSheet(true);
+                    } else if (answer == SwitchSheet.DELETE) {
                         askDeleteProfile();
                     } else if (answer == SwitchSheet.SWITCH) {
                         final Profiles.Profile to = switchSheet.chosen();
@@ -2055,9 +2673,13 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     final int answer = gallery.up(x, y, kit);
                     if (answer != GallerySheet.NONE) {
                         galleryOpen = false;
+                        if (firstSheet != null && nameSheet != null) {
+                            showKeys();   // back to the first start's sheet: the name is typed on
+                        }
                     }
-                    if (answer == GallerySheet.OK && profile != null && profile.portrait != gallery.slot()) {
-                        profile.portrait = gallery.slot();
+                    if (answer == GallerySheet.OK && profile != null
+                        && (profile.portrait != gallery.slot() || profile.portraitRandom != gallery.random())) {
+                        Profiles.chose(profile, gallery.slot(), gallery.random());
                         Profiles.update(HomeActivity.this, profile);
                         portrait = Portraits.tinted(kit, profile.portrait, Profiles.COLORS[profile.color]);
                     }
@@ -2070,7 +2692,8 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     final int answer = profileSheet.up(x, y, kit);
                     if (answer == ProfileSheet.PORTRAIT && profile != null) {
                         galleryOpen = true;
-                        gallery.open(kit, profile.color, profile.portrait, new Runnable() {
+                        gallery.open(kit, profile.color, profile.portrait, profile.portraitRandom,
+                                         Provision.dataDir(HomeActivity.this), new Runnable() {
                             @Override
                             public void run() {
                                 postInvalidate();
@@ -2078,8 +2701,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         });
                     } else if (answer == ProfileSheet.SWITCH) {
                         openSwitchSheet();
-                    } else if (answer == ProfileSheet.NEW || answer == ProfileSheet.RENAME) {
-                        openNameSheet(answer == ProfileSheet.NEW);
+                    } else if (answer == ProfileSheet.NEW) {
+                        openNameSheet(true);
+                    } else if (answer == ProfileSheet.RENAME && profile != null) {
+                        openNameInPlace();
                     } else if (answer == ProfileSheet.CLOSE) {
                         profileOpen = false;
                     } else if (answer == ProfileSheet.COLOR && profile != null
@@ -2101,7 +2726,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                 invalidate();
                 return true;
             }
-            if (e.getAction() == MotionEvent.ACTION_UP && profile != null
+            if (e.getAction() == MotionEvent.ACTION_UP && profile != null && setPop < 0
                 && in(x, y, Screen.CANVAS_W - CHIP_RIGHT - CHIP_W, CHIP_Y, CHIP_W, CHIP_H)
                 && in(downX, downY, Screen.CANVAS_W - CHIP_RIGHT - CHIP_W, CHIP_Y, CHIP_W, CHIP_H)) {
                 profileOpen = true;
@@ -2110,11 +2735,12 @@ public class HomeActivity extends Activity implements LanPage.Starter {
             }
             switch (e.getAction()) {
                 case MotionEvent.ACTION_DOWN:
+                    pressOpen = true;
                     downX = x;
                     downY = y;
                     downScroll = listScroll;
                     dragging = false;
-                    inList = page == ENTRY_SCENARIO
+                    inList = page == ENTRY_SCENARIO && setPop < 0
                         && in(x, y, CONTENT_X + 24f, listTop(), LIST_ROW_W, listBottom() - listTop());
                     removeCallbacks(held);
                     if (inList) {
@@ -2168,7 +2794,16 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     break;
                 case MotionEvent.ACTION_UP:
                     removeCallbacks(held);
-                    if (x < RAIL_W) {
+                    final boolean pressTaken = pressOpen;
+                    pressOpen = false;
+                    if (page == ENTRY_SCENARIO && !pressTaken && x >= RAIL_W) {
+                        // A lift without its own press: the same tap seen twice; it changes nothing.
+                        android.util.Log.i("WargusHD", "LAUNCHER touch: a lift without a press ignored");
+                        pressed = -1;
+                    } else if (page == ENTRY_SCENARIO && setPop >= 0) {
+                        tapSetPop(x, y);
+                        pressed = -1;
+                    } else if (x < RAIL_W) {
                         // The game-files row is a line of text only (owner's rule): the folder
                         // is reached through Options, Game Files.
                         if (in(x, y, ROW_X, musicY(), ROW_W, FOOT_H)) {
@@ -2208,7 +2843,10 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         } else if (pressed == ENTRY_LOAD && entryAt(x, y) == ENTRY_LOAD) {
                             menuAudio.play(MenuAudio.BUTTON);
                             page = ENTRY_LOAD;
-                            load.refresh(HomeActivity.this, profile);
+                            final String gone = load.refresh(HomeActivity.this, profile);
+                            if (gone != null) {
+                                tellSaveGone(gone);
+                            }
                         } else if (pressed == ENTRY_MODS && entryAt(x, y) == ENTRY_MODS) {
                             menuAudio.play(MenuAudio.BUTTON);
                             page = ENTRY_MODS;
@@ -2233,6 +2871,12 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                             recreate();
                             return true;
                         }
+                        if (options.takeAddressAsked()) {
+                            openAddressSheet();
+                        }
+                        if (options.takeArtAsked()) {
+                            askPrepareArt();
+                        }
                         if (options.takeFolderAsked()) {
                             folderVisit = true;
                             folderBefore = GateActivity.rememberedFolder(HomeActivity.this);
@@ -2244,11 +2888,21 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                         if (action != ModsPage.ACTION_NONE) {
                             menuAudio.play(MenuAudio.BUTTON);
                         }
+                        if (action == ModsPage.ACTION_SWITCH && followModLanguage()) {
+                            return true;
+                        }
                         if (action == ModsPage.ACTION_IMPORT) {
                             pickMod();
                         } else if (action == ModsPage.ACTION_REMOVE) {
                             askRemoveMod();
+                        } else if (action == ModsPage.ACTION_DOWNLOAD) {
+                            downloadMod();
+                        } else if (action == ModsPage.ACTION_CANCEL) {
+                            ModCatalog.cancel();
+                        } else if (action == ModsPage.ACTION_REFRESH) {
+                            modsPage.refresh(HomeActivity.this, HomeView.this);
                         }
+                        invalidate();
                     } else if (page == ENTRY_LOAD) {
                         final int action = load.up(x, y, kit);
                         if (action == LoadPage.ACTION_LOAD) {
@@ -2276,6 +2930,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                     invalidate();
                     break;
                 case MotionEvent.ACTION_CANCEL:
+                    pressOpen = false;
                     pressed = -1;
                     inList = false;
                     dragging = false;

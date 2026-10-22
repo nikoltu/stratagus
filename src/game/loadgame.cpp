@@ -41,6 +41,7 @@
 #include "construct.h"
 #include "depend.h"
 #include "font.h"
+#include "game.h"
 #include "map.h"
 #include "minimap.h"
 #include "missile.h"
@@ -58,6 +59,7 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "video.h"
+#include "wc2bot.h"
 
 /*----------------------------------------------------------------------------
 --  Variables
@@ -175,9 +177,15 @@ void LoadModules()
 	SetDefaultTextColors(UI.NormalFontColor, UI.ReverseFontColor);
 }
 
-static void PlaceUnits()
+/// Places every unit read from a saved game (game.h; host-tested in test_saveload.cpp).
+void PlaceLoadedUnits()
 {
 	std::vector<CUnit *> offGrid;
+
+	// FOW-SAVE (work/FOW_BUG.md, LOAD_CRASH_3473.md): units inside a container ("host-info" in the
+	// file) are not marked here. Place() of the container marks its passengers through
+	// MapMarkUnitSightRec, with the container's tiles, range and shape - exactly what leaving takes
+	// away. A second mark here (3.4.73) counted every passenger twice: a stray +1 that never fogs.
 
 	for (CUnit *unit : UnitManager->GetUnits()) {
 		if (!unit->Removed) {
@@ -210,6 +218,11 @@ static void PlaceUnits()
 		ErrorPrint("Saved game: %d unit(s) stood off their movement grid and were moved to the nearest free grid tile\n",
 		           static_cast<int>(offGrid.size()));
 	}
+	// LOAD-CRASH-3473 (work/LOAD_CRASH_3473.md): every unit stands and every sight is marked; a
+	// unit known under fog without a remembered look gets one, or the fog draw has no type.
+	for (CUnit *unit : UnitManager->GetUnits()) {
+		UnitFillMissingSeenAfterLoad(*unit);
+	}
 }
 
 /**
@@ -223,6 +236,7 @@ bool LastLoadFailed = false;
 
 void LoadGame(const fs::path &filename)
 {
+	WaitForSaveGame(); // a save still being written is complete before any file is read
 	// log will be enabled if found in the save game
 	CommandLogDisabled = true;
 	SaveGameLoading = true;
@@ -232,6 +246,7 @@ void LoadGame(const fs::path &filename)
 
 	LuaGarbageCollect();
 	InitUnitTypes(1);
+	Wc2BotClear(); // the file brings back the computer players of mods it was saved with
 	// NG55: a save file that fails to parse must not end the process (LuaLoadFile defaults to
 	// exitOnError). Report the failure and let the caller return to the menu instead.
 	if (LuaLoadFile(filename, "", /*exitOnError=*/false) != 0) {
@@ -241,10 +256,19 @@ void LoadGame(const fs::path &filename)
 		LastLoadFailed = true;
 		return;
 	}
+	// A computer player of a mod that is missing or has changed: the game is not started (the
+	// reason stays readable through Wc2BotRefusal for the caller).
+	if (!Wc2BotRefusal().empty()) {
+		ErrorPrint("Can't load the saved game '%s' -- %s\n", filename.u8string().c_str(),
+		           Wc2BotRefusal().c_str());
+		SaveGameLoading = false;
+		LastLoadFailed = true;
+		return;
+	}
 	LastLoadFailed = false;
 	LuaGarbageCollect();
 
-	PlaceUnits();
+	PlaceLoadedUnits();
 
 	const unsigned long game_cycle = GameCycle;
 	const unsigned syncrand = SyncRandSeed;

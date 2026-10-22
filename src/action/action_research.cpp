@@ -147,12 +147,9 @@ void COrder_Research::Execute(CUnit &unit) /* override */
 	const bool firstUnit = player.UpgradeTimers.Upgrades[upgrade.ID] == 0;
 	player.UpgradeTimers.Upgrades[upgrade.ID] += std::max(1, player.SpeedResearch / SPEEDUP_FACTOR);
 	if (player.UpgradeTimers.Upgrades[upgrade.ID] >= upgrade.Costs[TimeCost]) {
-		if (upgrade.Name.empty()) {
-			player.Notify(ColorGreen, unit.tilePos, _("%s: research complete"), type.Name.c_str());
-		} else {
-			player.Notify(
-				ColorGreen, unit.tilePos, _("%s: research complete"), upgrade.Name.c_str());
-		}
+		// No text: the original prints no line when a research ends (time series of the original:
+		// a research finished, no message ink in the 33 s after it). The minimap mark stays.
+		player.Notify(ColorGreen, unit.tilePos, "%s", "");
 		if (&player == ThisPlayer) {
 			auto sound = GameSounds.ResearchComplete[player.Race].Sound;
 

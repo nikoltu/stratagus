@@ -170,3 +170,52 @@ TEST_CASE("mods: an enabled mod adds nothing a saved game would write")
 	lua_close(Lua);
 	Lua = nullptr;
 }
+
+TEST_CASE("mods: a mod's unit voice stands in for the game file of the same name")
+{
+	ModsFixture fixture;
+	// "voc" declares four names: one present, one empty, one absent, one not a plain file name;
+	// "vod" declares the present one again and one of its own.
+	fs::create_directories(fixture.root / "voc" / "defs");
+	fs::create_directories(fixture.root / "voc" / "sounds" / "units");
+	fs::create_directories(fixture.root / "vod" / "defs");
+	fs::create_directories(fixture.root / "vod" / "sounds" / "units");
+	ModsFixture::Write(fixture.root / "voc" / "defs" / "voices.json",
+	                   R"({"format": 1, "units": ["Owhat1.wav", "Owhat2.wav", "Owhat3.wav", "../x.wav", 7]})");
+	ModsFixture::Write(fixture.root / "voc" / "sounds" / "units" / "Owhat1.wav", "RIFF");
+	ModsFixture::Write(fixture.root / "voc" / "sounds" / "units" / "Owhat2.wav", "");
+	ModsFixture::Write(fixture.root / "vod" / "defs" / "voices.json",
+	                   R"({"units": ["Owhat1.wav", "Pnready.wav"]})");
+	ModsFixture::Write(fixture.root / "vod" / "sounds" / "units" / "Owhat1.wav", "RIFF");
+	ModsFixture::Write(fixture.root / "vod" / "sounds" / "units" / "Pnready.wav", "RIFF");
+	// a file that is there but not declared counts for nothing
+	ModsFixture::Write(fixture.root / "voc" / "sounds" / "units" / "Oready.wav", "RIFF");
+
+	// no mod enabled: nothing is replaced
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat1.wav").empty());
+
+	ModsSetEnabled({"voc", "vod"});
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat1.wav") == "mods/voc/sounds/units/Owhat1.wav");
+	CHECK(ModsUnitSound("Owhat1.wav") == "mods/voc/sounds/units/Owhat1.wav");
+	CHECK(ModsUnitSound("Data\\Gamesfx\\Orc\\Owhat1.wav") =="mods/voc/sounds/units/Owhat1.wav");
+	CHECK(ModsUnitSound("Data/Gamesfx/Peon/Pnready.wav") == "mods/vod/sounds/units/Pnready.wav");
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat2.wav").empty());
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat3.wav").empty());
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Oready.wav").empty());
+	// the name is matched with its own case; a mod's own path is never replaced
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/owhat1.wav").empty());
+	CHECK(ModsUnitSound("mods/vod/sounds/units/Owhat1.wav").empty());
+	// the replacement is found by the ordinary lookup
+	CHECK(fs::path(LibraryFileName(ModsUnitSound("Data/Gamesfx/Orc/Owhat1.wav")))
+	      == fixture.root / "voc" / "sounds" / "units" / "Owhat1.wav");
+
+	// load order decides between two mods that give the same name
+	ModsSetEnabled({"vod", "voc"});
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat1.wav") == "mods/vod/sounds/units/Owhat1.wav");
+
+	// a mod without unit voices, and switching all mods off, give the game's own files back
+	ModsSetEnabled({"abc"});
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat1.wav").empty());
+	ModsSetEnabled({});
+	CHECK(ModsUnitSound("Data/Gamesfx/Orc/Owhat1.wav").empty());
+}

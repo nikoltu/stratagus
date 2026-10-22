@@ -21,10 +21,12 @@ final class ConfirmSheet {
     private static final float NOTICE_H = 600f, NOTICE_BUTTON_W = 600f;
 
     private static final int SHADE = 0xAA000000, PANEL_FILL = 0xDE140F0A, LINE = 0xFF92743E;
-    private static final int INK = 0xFFE8E2D4, GOLD = 0xFFF0D250;
+    private static final int INK = 0xFFE8E2D4, GOLD = 0xFFF0D250, INK_MUTED = 0xFFCEC6B6;
 
     private final String title, body, cancel, confirm;
     private final boolean notice;
+    /** A muted line under the body, or null; with it the confirm button is the gold one. */
+    private String note;
     private Bitmap buttonPlain, buttonMarked;
 
     ConfirmSheet(String title, String body, String cancel, String confirm) {
@@ -41,6 +43,16 @@ final class ConfirmSheet {
         this.cancel = "OK";
         this.confirm = null;
         this.notice = true;
+    }
+
+    /**
+     * A question whose confirm is the gold button and whose body has a muted second line
+     * (owner decision 90 2A: Prepare the game art again?).
+     */
+    static ConfirmSheet marked(String title, String body, String note, String cancel, String confirm) {
+        final ConfirmSheet s = new ConfirmSheet(title, body, cancel, confirm);
+        s.note = note;
+        return s;
     }
 
     /** A sheet that says one thing; its OK answers as CANCEL (nothing changes). */
@@ -69,6 +81,16 @@ final class ConfirmSheet {
         final float tw = W - PAD * 2f;
         kit.textTop(c, kit.fit(title, CAP_BODY, tw), x + PAD, y + PAD, CAP_BODY, GOLD, true);
         kit.textTop(c, kit.fit(body, CAP_MID, tw), x + PAD, y + PAD + LINE_PITCH * 1.2f, CAP_MID, INK, true);
+        if (note != null) {
+            kit.textTop(c, kit.fit(note, CAP_MID, tw), x + PAD, y + PAD + LINE_PITCH * 1.2f + 60f, CAP_MID,
+                        INK_MUTED, true);
+            final float nb = buttonY(kit);
+            kit.nine(c, buttonPlain, cancelX(), nb, BUTTON_W, BUTTON_H, 14);
+            kit.textCentre(c, cancel, cancelX(), nb, BUTTON_W, BUTTON_H, CAP_BODY, INK, true);
+            kit.nine(c, buttonMarked, confirmX(), nb, BUTTON_W, BUTTON_H, 14);
+            kit.textCentre(c, confirm, confirmX(), nb, BUTTON_W, BUTTON_H, CAP_BODY, GOLD, true);
+            return;
+        }
 
         final float by = buttonY(kit);
         kit.nine(c, buttonMarked, cancelX(), by, cancelW(), BUTTON_H, 14);

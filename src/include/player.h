@@ -99,6 +99,16 @@ enum class ECheckLimit
 	Ok = 1
 };
 
+/// The original's food test (0x49907D, rules mode of every real game): the supply it compares is
+/// capped at 200, so food beyond 200 (more than 50 farms) does not let more units be made.
+constexpr int FoodSupplyCap = 200;
+
+/// True when a unit that needs `need` food cannot be made with `supply` and `demand`.
+constexpr bool FoodRefuses(int supply, int demand, int need)
+{
+	return need != 0 && demand + need > (supply < FoodSupplyCap ? supply : FoodSupplyCap);
+}
+
 
 ///  Player structure
 class CPlayer

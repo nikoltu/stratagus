@@ -55,6 +55,7 @@
         <!-- First-run gate: storage access, the game folder and its verification. -->
         <activity
             android:name=".GateActivity"
+            android:theme="@style/LauncherTheme"
             android:label="@string/app_name"
             android:screenOrientation="sensorLandscape"
             android:exported="false" />
@@ -69,6 +70,7 @@
         <!-- The launcher's shell. -->
         <activity
             android:name=".HomeActivity"
+            android:theme="@style/LauncherTheme"
             android:label="@string/app_name"
             android:windowSoftInputMode="adjustNothing"
             android:screenOrientation="sensorLandscape"
@@ -77,6 +79,7 @@
         <!-- Developer screen: starts the game from request files and shows what it returned. -->
         <activity
             android:name=".LaunchActivity"
+            android:theme="@style/LauncherTheme"
             android:label="@string/app_name"
             android:screenOrientation="sensorLandscape"
             android:launchMode="singleTop"
@@ -91,6 +94,7 @@
             android:alwaysRetainTaskState="true"
             android:launchMode="singleInstance"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:windowSoftInputMode="adjustPan"
             android:screenOrientation="sensorLandscape"
             android:preferMinimalPostProcessing="true"
             android:exported="false" />

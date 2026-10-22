@@ -21,6 +21,10 @@ tasks.register('copySdlJava', Copy) {
 }
 
 android {
+    // The release-check build is built offline; lint's own tools are not fetched for it.
+    lint {
+        checkReleaseBuilds false
+    }
     namespace 'net.wargushd.game'
     compileSdk 34
 
@@ -28,8 +32,8 @@ android {
         applicationId 'net.wargushd.game'
         minSdk 24
         targetSdk 34
-        versionCode 340056
-        versionName '3.4.56'
+        versionCode 340086
+        versionName '3.4.86'
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -145,6 +149,72 @@ tasks.register('stageWargushdContent') {
 
 android.sourceSets.main.assets.srcDirs += contentGen
 
+// LICENCES-ASSETS-STAGING: the licence texts of everything linked into the app, copied byte for byte
+// from the file each component ships into assets/licences (NN.txt + index.txt, read by
+// LicencesSheet), on every build. Replaces the hand-run tools/stage-licences.py (same list, same
+// order, same index format). The game scripts' licence (Wargus COPYING) is kept beside the scripts'
+// backup tree in the docs repo, so it is staged only when the content is (wargushdDocsRoot set).
+// A listed text that is not on disk fails the build: a release must not ship without it.
+def licencesGen = layout.buildDirectory.dir("generated/wargushd_licences").get().asFile
+tasks.register('stageWargushdLicences') {
+    outputs.dir licencesGen
+    outputs.upToDateWhen { false }
+    doLast {
+        def engine = new File("${rootDir}/..").canonicalPath.replace('\\', '/')
+        def tp = 'third-party/'
+        def parts = [
+            ['Stratagus (the engine)', 'COPYING'],
+            ['Wargus (the game scripts)', docsRoot == null ? null : 'docs:.wargushd/fulltree-backup/COPYING'],
+            ['SDL2', tp + 'SDL/LICENSE.txt'],
+            ['SDL2_image', tp + 'SDL_image/LICENSE.txt'],
+            ['SDL2_mixer', tp + 'SDL_mixer/LICENSE.txt'],
+            ['Lua 5.1', tp + 'lua-5.1.5/COPYRIGHT'],
+            ['tolua++', tp + 'lua-5.1.5/toluapp-simple/COPYRIGHT'],
+            ['guisan', tp + 'guisan/COPYING'],
+            ['libpng', tp + 'SDL_image/external/libpng/LICENSE'],
+            ['zlib (its README, which carries the licence)', tp + 'SDL_image/external/zlib/README'],
+            ['libjpeg (its README, which carries the licence)', tp + 'SDL_image/external/jpeg/README'],
+            ['libmng', tp + 'libmng/LICENSE'],
+            ['Little CMS', tp + 'lcms/COPYING'],
+            ['bzip2', tp + 'bzip2/LICENSE'],
+            ['libogg', tp + 'SDL_mixer/external/ogg/COPYING'],
+            ['libvorbis', tp + 'SDL_mixer/external/vorbis/COPYING'],
+            ['libtheora (COPYING)', tp + 'theora/COPYING'],
+            ['libtheora (LICENSE)', tp + 'theora/LICENSE'],
+            // Compiled into the engine (CMakeLists.txt: target_include_directories of stratagus_lib).
+            ['mdns', tp + 'mdns/LICENSE'],
+            ['spiritless_po', tp + 'spiritless_po/LICENSE'],
+            // Compiled into SDL2_mixer by its own defaults under the options in third-party/CMakeLists.txt
+            // (SDL2MIXER_MIDI=ON -> TiMidity; SDL2MIXER_MP3 default ON -> dr_mp3).
+            ['TiMidity (in SDL2_mixer)', tp + 'SDL_mixer/src/codecs/timidity/COPYING'],
+            ['dr_mp3 (in SDL2_mixer)', tp + 'SDL_mixer/src/codecs/dr_libs/LICENSE'],
+            // unsf is built only with DOWNLOAD_FREEPATS=ON; the Android build sets it OFF
+            // (tools/build-android-local.ps1), so it is not in the app and not listed.
+        ].findAll { it[1] != null }
+        def out = new File(licencesGen, 'licences')
+        out.deleteDir(); out.mkdirs()
+        def index = []
+        def missing = []
+        parts.eachWithIndex { part, i ->
+            def (name, rel) = part
+            def from = rel.startsWith('docs:') ? new File("${docsRoot}/${rel.substring(5)}")
+                                               : new File("${engine}/${rel}")
+            def shown = rel.startsWith('docs:') ? rel.substring(5) : rel
+            if (!from.isFile()) { missing << name; return }
+            def dst = String.format('%02d.txt', index.size() + 1)
+            new File(out, dst).bytes = from.bytes
+            index << "${dst} | ${name} | ${shown}"
+        }
+        if (!missing.isEmpty()) {
+            throw new GradleException("licence text(s) not on disk: ${missing.join(', ')}")
+        }
+        new File(out, 'index.txt').setText(index.join('\n') + '\n', 'UTF-8')
+        logger.lifecycle("staged ${index.size()} licence texts into assets/licences")
+    }
+}
+
+android.sourceSets.main.assets.srcDirs += licencesGen
+
 tasks.configureEach { task ->
     if (task.name == 'preBuild') {
         task.dependsOn 'copySdlJava'
@@ -154,7 +224,11 @@ tasks.configureEach { task ->
 // The asset merge, not preBuild, is what has to see the staged files: wiring this through preBuild
 // left the task out of the graph entirely on the first attempt.
 tasks.configureEach { task ->
-    if (task.name.startsWith('merge') && task.name.endsWith('Assets')) {
+    // Lint's model tasks of a release-type build read the merged asset folders as well.
+    if ((task.name.startsWith('merge') && task.name.endsWith('Assets'))
+            || (task.name.startsWith('generate') && task.name.contains('Lint'))
+            || (task.name.startsWith('lint') && task.name.contains('Vital'))) {
         task.dependsOn 'stageWargushdContent'
+        task.dependsOn 'stageWargushdLicences'
     }
 }

@@ -380,9 +380,13 @@ bool PlayWebMMovie(const std::string &filename)
 		return false;
 	}
 
-	// Letterbox exactly like the Theora player does.
+	// Fit the whole picture into the screen, keeping its aspect (ENDING-MOVIE-LETTERBOX). The
+	// Remastered films are 3840 x 2160 with their black bands drawn into the picture: on a 16:9
+	// screen they fill it, as on the original (run 35, f3_h14end: bands in rows 0..61 and 702..767
+	// of 768, the picture full width). The Theora rule this replaced compared with 4:3 and always
+	// fitted the width, which cut the top and bottom off on a screen wider than 16:9.
 	SDL_Rect rect;
-	if (d->w * 300 / 4 > d->h * 100) {
+	if ((long long)d->w * Video.Height >= (long long)d->h * Video.Width) {
 		rect.w = Video.Width;
 		rect.h = Video.Width * d->h / d->w;
 		rect.x = 0;

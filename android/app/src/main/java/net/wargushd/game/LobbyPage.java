@@ -5,13 +5,17 @@ import android.graphics.Canvas;
 
 import net.wargushd.game.lan.LanRoom;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.TreeSet;
 
 /**
  * The room before a network game, drawn from the room's snapshot alone: eight seat rows at the
- * left; the map with the settings and the room chat at the right; Leave Lobby, the reason the
- * game cannot start yet, and Ready (a joiner) or Start Game (the host).
+ * left, grouped under a heading per team (owner decision 91, 5B) with the open and closed seats
+ * after the teams; the map with the settings and the room chat at the right; Leave Lobby, the
+ * reason the game cannot start yet, and Ready (a joiner) or Start Game (the host). A computer
+ * seat is named after a hero of its race and shows his portrait (BotNames).
  *
  * What the player does here goes straight to the room; the owner of the page sends what the
  * room then wants sent. While a message is typed the seats stay in view above the keyboard.
@@ -37,6 +41,12 @@ final class LobbyPage {
     private static final float ACTION_W = 720f, ACTION_H = 120f, ACTION_UP = 204f, ACTION_X = 3024f;
     private static final float REASON_X = 1584f, REASON_W = 624f;
     private static final float POP_ROW = 96f, POP_PITCH = 108f, POP_SEAT_W = 760f, POP_TEAM_W = 951f;
+    // A team's heading above its rows (5B): the gold line, and the space it takes before them.
+    private static final float HEAD_PITCH = 96f, HEAD_TEXT_DY = 6f, HEAD_X = 864f;
+    // A computer seat's player (bots mod, L-B, design/bots/BOT_LEVEL_UI_OPTIONS.html): the host's
+    // badge in the line under the name, a joiner's plain text in the same place.
+    private static final float BADGE_DY = 108f, BADGE_W = 250f, BADGE_H = 72f, BADGE_CAP = 32f;
+    private static final float BOT_TEXT_DY = 122f, NAME_TOP_DY = 40f;
     // The message line above the keyboard (L13).
     private static final float LINE_X = 720f, LINE_W = 3120f, LINE_H = 168f, BOX_X = 816f, BOX_W = 2040f;
     private static final float LINE_SEND_X = 2904f, LINE_CANCEL_X = 3336f, LINE_BUTTON_W = 408f;
@@ -48,11 +58,20 @@ final class LobbyPage {
         "Red", "Blue", "Green", "Violet", "Orange", "Black", "White", "Yellow" };
 
     private final LanRoom room;
+    /** The computer players this device's mods offer, with their names. */
+    private final ModStore.BotChoices bots;
     private LanRoom.Snapshot snap;
     /** The room's map as this device has it: its picture and facts, or null. */
     private Bitmap preview;
     private PudInfo facts;
     private final HashMap<Integer, Bitmap> portraits = new HashMap<Integer, Bitmap>();
+    /** The heroes of the game's scripts, and the one each computer seat is named after (or null). */
+    private final List<BotNames.Hero> heroes;
+    private BotNames.Hero[] heroOf = new BotNames.Hero[LanRoom.SEATS];
+    /** Where each seat's row stands under the seats' top, the team headings, the rows' whole height. */
+    private final float[] seatTop = new float[LanRoom.SEATS];
+    private final List<float[]> heads = new ArrayList<float[]>();
+    private float rowsH;
 
     private float scroll;
     // Seat dragging.
@@ -69,13 +88,64 @@ final class LobbyPage {
     /** The keyboard's height in logical units, or 0 when it is not known. */
     float keyboard;
 
-    LobbyPage(LanRoom room) {
+    LobbyPage(LanRoom room, ModStore.BotChoices bots, List<BotNames.Hero> heroes) {
         this.room = room;
+        this.bots = (bots != null) ? bots : new ModStore.BotChoices();
+        this.heroes = (heroes != null) ? heroes : new ArrayList<BotNames.Hero>();
     }
 
     /** The room as it stands now. */
     void show(LanRoom.Snapshot s) {
         snap = s;
+        heroOf = heroesOf(s, heroes);
+        arrange();
+    }
+
+    /** The hero each seat of a snapshot is named after: null for a seat that is not a computer's. */
+    static BotNames.Hero[] heroesOf(LanRoom.Snapshot s, List<BotNames.Hero> heroes) {
+        final boolean[] computer = new boolean[s.seats.length];
+        final String[] race = new String[s.seats.length];
+        for (int i = 0; i < s.seats.length; ++i) {
+            computer[i] = s.seats[i].kind.equals(LanRoom.COMPUTER);
+            race[i] = s.seats[i].race;
+        }
+        return BotNames.assign(heroes, computer, race);
+    }
+
+    /**
+     * The rows under their teams: each team that has a seat, lowest first, under its heading with
+     * its seats in seat order; then the seats nobody holds, without a heading.
+     */
+    private void arrange() {
+        heads.clear();
+        final TreeSet<Integer> teams = new TreeSet<Integer>();
+        for (LanRoom.Seat s : snap.seats) {
+            if (s.occupied()) {
+                teams.add(Integer.valueOf(s.team));
+            }
+        }
+        float y = 0f;
+        for (int t : teams) {
+            int count = 0;
+            for (LanRoom.Seat s : snap.seats) {
+                count += (s.occupied() && s.team == t) ? 1 : 0;
+            }
+            heads.add(new float[] { y, t, count });
+            y += HEAD_PITCH;
+            for (int i = 0; i < LanRoom.SEATS; ++i) {
+                if (snap.seats[i].occupied() && snap.seats[i].team == t) {
+                    seatTop[i] = y;
+                    y += PITCH;
+                }
+            }
+        }
+        for (int i = 0; i < LanRoom.SEATS; ++i) {
+            if (!snap.seats[i].occupied()) {
+                seatTop[i] = y;
+                y += PITCH;
+            }
+        }
+        rowsH = y;
     }
 
     /** The host's name, for the page's title. */
@@ -102,6 +172,11 @@ final class LobbyPage {
 
     void erase(int count) {
         message.setLength(Math.max(0, message.length() - Math.max(0, count)));
+    }
+
+    /** The message as typed so far. */
+    String message() {
+        return message.toString();
     }
 
     /** The typed message; the line is empty afterwards. */
@@ -136,10 +211,58 @@ final class LobbyPage {
         return snap.host && !isMine(seat);
     }
 
+    /**
+     * A computer seat shows its player while the host offers mods' computer players (the room
+     * says so, on the host and on every joiner). With no such mod the row is as it always was.
+     */
+    private boolean showsBot(LanRoom.Seat s) {
+        return s.kind.equals(LanRoom.COMPUTER) && snap.bots;
+    }
+
+    /** The player after this one: Original, then the mods' players in their order, then Original. */
+    private String nextBot(String now) {
+        final int at = bots.indexOf(now);
+        return (at + 1 < bots.bots.size()) ? bots.bots.get(at + 1).key() : "";
+    }
+
+    /** The name of a mod and its version, for the lines about a missing mod. */
+    private String needText(SkinKit kit) {
+        if (snap.need == null || snap.need.isEmpty()) {
+            return "";
+        }
+        final LanRoom.GameplayMod g = snap.need.get(0);
+        return kit.own("{0} {1}", bots.modName(g.id), g.version);
+    }
+
     // ----- texts -----
 
     private String seatName(SkinKit kit, LanRoom.Seat s) {
-        return s.kind.equals(LanRoom.COMPUTER) ? kit.own("Computer") : s.name;
+        if (s.kind.equals(LanRoom.COMPUTER)) {
+            final BotNames.Hero h = heroOf[s.index];
+            return (h != null) ? h.botName() : kit.own("Computer");
+        }
+        return s.name;
+    }
+
+    /**
+     * A seat's name fitted to a width. A hero's name is cut before its BOT, which always stays;
+     * any other name is fitted as before.
+     */
+    private String fittedName(SkinKit kit, LanRoom.Seat s, float cap, float w) {
+        final BotNames.Hero h = s.kind.equals(LanRoom.COMPUTER) ? heroOf[s.index] : null;
+        return (h != null) ? fitBot(kit, h.botName(), cap, w) : kit.fit(seatName(kit, s), cap, w);
+    }
+
+    /** "ChogallBOT" cut to a width by the hero's part: "ChogaBOT"; at least one letter stays. */
+    static String fitBot(SkinKit kit, String botName, float cap, float w) {
+        if (!botName.endsWith(BotNames.SUFFIX)) {
+            return kit.fit(botName, cap, w);
+        }
+        String hero = botName.substring(0, botName.length() - BotNames.SUFFIX.length());
+        while (hero.length() > 1 && kit.width(hero + BotNames.SUFFIX, cap) > w) {
+            hero = hero.substring(0, hero.length() - 1);
+        }
+        return hero + BotNames.SUFFIX;
     }
 
     private static String raceText(SkinKit kit, String race) {
@@ -163,6 +286,9 @@ final class LobbyPage {
         }
         if (s.clash) {
             return kit.own("Colour taken");
+        }
+        if (!s.modsOk) {
+            return kit.own("Needs the mod");
         }
         if (s.map.equals(LanRoom.MAP_RECV)) {
             final int pct = (mine && snap.receiving >= 0) ? snap.receiving : s.pct;
@@ -197,6 +323,10 @@ final class LobbyPage {
             if (me != null && me.clash) {
                 return kit.own("Choose another colour");
             }
+            if (me != null && !me.modsOk) {
+                // LAW 18.6: the computer players' mod must be the same on every device.
+                return kit.own("Ready needs the mod {0}", needText(kit));
+            }
             int people = 0, ready = 0;
             for (LanRoom.Seat s : snap.seats) {
                 if (s.kind.equals(LanRoom.HUMAN)) {
@@ -216,6 +346,8 @@ final class LobbyPage {
             return kit.own("Two players have one colour");
         } else if (snap.gate.equals(LanRoom.GATE_TEAMS)) {
             return kit.own("All players are in one team");
+        } else if (snap.gate.equals(LanRoom.GATE_BOTS)) {
+            return kit.own("{0} needs the mod {1}", names(kit, snap.gateWho), needText(kit));
         }
         return kit.own("Waiting for {0}", names(kit, snap.gateWho));
     }
@@ -227,7 +359,7 @@ final class LobbyPage {
     /** A joiner may be Ready once the map is here and the colour is nobody else's. */
     private boolean canReady() {
         final LanRoom.Seat me = mySeat();
-        return me != null && !me.clash && me.map.equals(LanRoom.MAP_HAS);
+        return me != null && !me.clash && me.map.equals(LanRoom.MAP_HAS) && me.modsOk;
     }
 
     // ----- drawing -----
@@ -242,19 +374,22 @@ final class LobbyPage {
     }
 
     private float rowY(int seat) {
-        return TOP + 24f + seat * PITCH - scroll;
+        return TOP + 24f + seatTop[seat] - scroll;
     }
 
     private float maxScroll(SkinKit kit) {
-        return Math.max(0f, 24f + LanRoom.SEATS * PITCH - (PITCH - ROW_H) + 24f - (panelBottom(kit) - TOP));
+        return Math.max(0f, 24f + rowsH - (PITCH - ROW_H) + 24f - (panelBottom(kit) - TOP));
     }
 
     private float actionY(SkinKit kit) { return kit.height - ACTION_UP; }
 
     private Bitmap portrait(SkinKit kit, LanRoom.Seat s) {
-        final Integer key = Integer.valueOf(s.portrait * 8 + (s.colour & 7));
+        // A computer seat shows its hero (his icon's slot of the player's portrait atlas).
+        final BotNames.Hero h = s.kind.equals(LanRoom.COMPUTER) ? heroOf[s.index] : null;
+        final int slot = (h != null) ? h.slot : s.portrait;
+        final Integer key = Integer.valueOf(slot * 8 + (s.colour & 7));
         if (!portraits.containsKey(key)) {
-            portraits.put(key, Portraits.tinted(kit, s.portrait, Profiles.COLORS[s.colour & 7]));
+            portraits.put(key, Portraits.tinted(kit, slot, Profiles.COLORS[s.colour & 7]));
         }
         return portraits.get(key);
     }
@@ -268,6 +403,16 @@ final class LobbyPage {
         LanKit.panel(c, kit, X0, TOP, SLOTS_W, bottom - TOP);
         c.save();
         c.clipRect(kit.rect(X0, TOP + 12f, SLOTS_W, bottom - TOP - 24f));
+        for (float[] h : heads) {
+            final float hy = TOP + 24f + h[0] - scroll;
+            if (hy + HEAD_PITCH >= TOP && hy <= bottom) {
+                final int count = (int) h[2];
+                final String head = (count == 1) ? kit.own("Team {0} - 1 player", (int) h[1])
+                                                 : kit.own("Team {0} - {1} players", (int) h[1], count);
+                kit.textTop(c, kit.fit(head, LanKit.CAP_MID, ROW_W - 48f), HEAD_X, hy + HEAD_TEXT_DY,
+                            LanKit.CAP_MID, LanKit.GOLD, true);
+            }
+        }
         int below = 0;
         for (int i = 0; i < LanRoom.SEATS; ++i) {
             final float y = rowY(i);
@@ -313,10 +458,23 @@ final class LobbyPage {
         }
         kit.picture(c, portrait(kit, s), ROW_X + 24f, y + 24f, PORTRAIT_W, PORTRAIT_H);
         final String sub = s.host ? (mine ? kit.own("Host - you") : kit.own("Host")) : mine ? kit.own("You") : null;
-        final String name = kit.fit(seatName(kit, s), LanKit.CAP_BODY, NAME_W);
+        final String name = fittedName(kit, s, LanKit.CAP_BODY, NAME_W);
         if (sub != null) {
-            kit.textTop(c, name, NAME_X, y + 40f, LanKit.CAP_BODY, LanKit.INK, true);
+            kit.textTop(c, name, NAME_X, y + NAME_TOP_DY, LanKit.CAP_BODY, LanKit.INK, true);
             kit.textTop(c, sub, NAME_X, y + 122f, LanKit.CAP_SMALL, LanKit.INK_MUTED, true);
+        } else if (showsBot(s)) {
+            kit.textTop(c, name, NAME_X, y + NAME_TOP_DY, LanKit.CAP_BODY, LanKit.INK, true);
+            final String player = bots.nameOf(s.bot, kit.own("Original"));
+            if (snap.host) {
+                // The host's badge: a tap goes to the next player (owner decision 80).
+                kit.fill(c, NAME_X, y + BADGE_DY, BADGE_W, BADGE_H, LanKit.WELL, BADGE_H / 2f);
+                kit.outline(c, NAME_X, y + BADGE_DY, BADGE_W, BADGE_H, LanKit.GOLD, BADGE_H / 2f);
+                kit.textCentre(c, kit.fit(player, BADGE_CAP, BADGE_W - 36f), NAME_X, y + BADGE_DY, BADGE_W,
+                               BADGE_H, BADGE_CAP, LanKit.GOLD, true);
+            } else {
+                kit.textTop(c, kit.fit(player, LanKit.CAP_SMALL, NAME_W), NAME_X, y + BOT_TEXT_DY,
+                            LanKit.CAP_SMALL, LanKit.GOLD, true);
+            }
         } else {
             kit.textMiddle(c, name, NAME_X, y, ROW_H, LanKit.CAP_BODY, LanKit.INK, true);
         }
@@ -481,7 +639,10 @@ final class LobbyPage {
 
     private int popRows() {
         if (pop == POP_SEAT) {
-            return snap.seats[popSeat].kind.equals(LanRoom.HUMAN) ? 5 : 4;
+            // Remove frees a seat a person or a computer holds (owner 2026-10-17); no "allied" computer
+            // kind: the team selector does that.
+            final String kind = snap.seats[popSeat].kind;
+            return (kind.equals(LanRoom.HUMAN) || kind.equals(LanRoom.COMPUTER)) ? 4 : 3;
         }
         return (pop == POP_TEAM) ? LanRoom.TEAMS : LanRoom.COLOURS;
     }
@@ -525,8 +686,7 @@ final class LobbyPage {
         final float w = popW();
         LanKit.pop(c, kit, popX, popY, w, popH());
         final LanRoom.Seat s = snap.seats[popSeat];
-        final String[] kinds = { kit.own("Open"), kit.own("Closed"), kit.own("Computer"),
-                                 kit.own("Computer (allied to me)"), kit.own("Remove") };
+        final String[] kinds = { kit.own("Open"), kit.own("Closed"), kit.own("Computer"), kit.own("Remove") };
         for (int r = 0; r < popRows(); ++r) {
             final float y = popY + 12f + POP_PITCH * r;
             final boolean now = (pop == POP_TEAM && s.team == r + 1) || (pop == POP_COLOUR && s.colour == r);
@@ -545,7 +705,7 @@ final class LobbyPage {
                                LanKit.INK, true);
                 final LanRoom.Seat held = holder(r);
                 if (held != null) {
-                    kit.textMiddleRight(c, kit.fit(seatName(kit, held), LanKit.CAP_SMALL, 300f), popX + w - 48f,
+                    kit.textMiddleRight(c, fittedName(kit, held, LanKit.CAP_SMALL, 300f), popX + w - 48f,
                                         y, POP_ROW, LanKit.CAP_SMALL, LanKit.INK_MUTED, true);
                 }
             }
@@ -556,14 +716,14 @@ final class LobbyPage {
     private void choose(int row) {
         final boolean mine = isMine(popSeat);
         if (pop == POP_SEAT) {
-            if (row == 4) {
-                room.hostKick(popSeat);
+            if (row == 3) {
+                if (snap.seats[popSeat].kind.equals(LanRoom.HUMAN)) {
+                    room.hostKick(popSeat);
+                } else {
+                    room.hostSetSeat(popSeat, LanRoom.OPEN);
+                }
             } else {
                 room.hostSetSeat(popSeat, row == 0 ? LanRoom.OPEN : row == 1 ? LanRoom.CLOSED : LanRoom.COMPUTER);
-                final LanRoom.Seat me = mySeat();
-                if (row == 3 && me != null) {
-                    room.hostSetTeam(popSeat, me.team);
-                }
             }
         } else if (pop == POP_TEAM) {
             if (mine) {
@@ -661,7 +821,10 @@ final class LobbyPage {
                 return ACTION_NONE;
             }
             final int race = mayRace(i) ? LanKit.segmentAt(x, y, 2, RACE_X, ry + BOX_DY, RACE_W, BOX_H) : -1;
-            if (mayPick(i) && LanKit.in(x, y, COL_X, ry + COL_DY, COL, COL)) {
+            final boolean badge = snap.host && showsBot(s);
+            if (badge && LanKit.in(x, y, NAME_X, ry + BADGE_DY, BADGE_W, BADGE_H)) {
+                room.hostSetBot(i, nextBot(s.bot));
+            } else if (mayPick(i) && LanKit.in(x, y, COL_X, ry + COL_DY, COL, COL)) {
                 open(POP_COLOUR, i, COL_X, kit);
             } else if (mayPick(i) && LanKit.in(x, y, TEAM_BOX_X, ry + BOX_DY, TEAM_BOX_W, BOX_H)) {
                 open(POP_TEAM, i, TEAM_BOX_X, kit);
@@ -674,7 +837,8 @@ final class LobbyPage {
                 } else {
                     room.hostSetRace(i, to);
                 }
-            } else if (maySeat(i) && LanKit.in(x, y, NAME_X, ry, NAME_W, ROW_H)) {
+            } else if (maySeat(i) && LanKit.in(x, y, NAME_X, ry, NAME_W, badge ? BADGE_DY - 12f : ROW_H)) {
+                // With the badge the name box is the part above it: the two never share a tap.
                 open(POP_SEAT, i, NAME_X, kit);
             } else {
                 return ACTION_NONE;

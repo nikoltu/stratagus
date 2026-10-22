@@ -64,6 +64,11 @@
 **    Size (width and height) of a frame in the image. All sprite
 **    frames of the missile-type must have the same size.
 **
+**  MissileType::Start
+**
+**    The config of the (other) missile to generate at the start point
+**    when a unit fires this missile (the flash of a cannon shot).
+**
 **  MissileType::SpriteFrames
 **
 **    Total number of sprite frames in the graphic image.
@@ -116,6 +121,12 @@
 **    missile animation and effects starts. Delay denotes the number
 **    of display cycles to skip before drawing the first sprite frame
 **    and only happens once at start.
+**
+**  MissileType::FirstFrameWait
+**
+**    Game cycles the first sprite frame is shown longer than the
+**    others (Lua key FirstFrameWait). The original holds picture 0 for
+**    the cycle of its lead-in handler and then its own first wait.
 **
 **  MissileType::Sleep
 **
@@ -362,7 +373,8 @@ enum class MissileClass
 	ClipToTarget,             /// Missile remains clipped to target's current goal and plays its animation once
 	Continuous,               /// Missile stays and plays its animation several times
 	StraightFly,              /// Missile flies from x,y to x1,y1 then continues to fly, until incompatible terrain is detected
-	DeathAndDecay             /// Missile stays, plays the Death and Decay picture script and hits once
+	DeathAndDecay,            /// Missile stays, plays the Death and Decay picture script and hits once
+	ClickCross                /// Missile stays, plays the picture script of the order cross and vanishes
 };
 
 /// Base structure of missile-types
@@ -411,6 +423,7 @@ public:
 	int ParabolaCoefficient = 2048; /// parabola coefficient in parabolic missile
 	int StartDelay = 0;            /// missile start delay
 	int Sleep = 0;                 /// missile sleep
+	int FirstFrameWait = 0;        /// extra cycles of the first sprite frame
 	int Speed = 0;                 /// missile speed
 	int BlizzardSpeed = 0;         /// speed for blizzard shards
 	int TTL = -1;                  /// missile time-to-live
@@ -427,6 +440,7 @@ public:
 	bool AimedHit = false;                 /// hits the unit fired at while it is alive on the map, not the impact tile
 	std::vector<MissileConfig> Impact; /// missile produces an impact
 	MissileConfig Smoke;                   /// trailing missile
+	MissileConfig Start;                   /// missile at the start point of a shot of a unit
 	mutable LuaCallback<void(int pixelPosx, int pixelPosy)> ImpactParticle; /// impact particle
 	mutable LuaCallback<void(int pixelPosx, int pixelPosy)> SmokeParticle; /// smoke particle
 	mutable LuaCallback<void(int attackerSlot, int targetSlot, int damage)> OnImpact; /// called when
@@ -563,6 +577,11 @@ class MissileDeathAndDecay : public Missile
 public:
 	void Action() override;
 };
+class MissileClickCross : public Missile
+{
+public:
+	void Action() override;
+};
 class MissileWhirlwind : public Missile
 {
 public:
@@ -677,6 +696,16 @@ extern void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos);
 
 extern std::vector<Missile *> FindAndSortMissiles(const CViewport &);
 
+/// true when a live global missile of the type has its centre on the tile
+extern bool MissileOfTypeOnTile(const MissileType &mtype, const Vec2i &tilePos);
+
+/// The original's rune tile test (cast 0x4CBED0): a rune is laid on a map tile only when no ground
+/// unit stands on it and no rune lies there; a tile not taken gives back a fifth of the cost.
+constexpr bool RuneTileTaken(bool onMap, bool groundUnit, bool runeThere)
+{
+	return onMap && !groundUnit && !runeThere;
+}
+
 /// handle all missiles
 extern void MissileActions();
 /// distance from view point to missile
@@ -684,6 +713,12 @@ extern int ViewPointDistanceToMissile(const Missile &missile);
 
 /// Get the burning building missile based on hp percent
 extern MissileType *MissileBurningBuilding(int percent);
+/// The frame a building with `hp` of `maxHp` hit points shows: the last one whose percent of the
+/// hit points, cut down to a whole number (maxHp * percent / 100), the building still has. As the
+/// original: under maxHp / 2 the big fire, under 3 * maxHp / 4 the small one. -1: none.
+extern int BurningBuildingFrameOf(const std::vector<BurningBuildingFrame> &frames, int hp, int maxHp);
+/// The missile of BurningBuildingFrameOf over BurningBuildingFrames, or nullptr.
+extern MissileType *MissileBurningBuilding(int hp, int maxHp);
 
 /// Save missiles
 extern void SaveMissiles(CFile &file);
@@ -711,6 +746,11 @@ extern std::string CurrentEffectTileset();
 extern std::shared_ptr<CAtlasGraphic> GetSharedHDAtlas(const std::string &stem);
 /// HD-ATLAS-CACHE-GROWS: the effects resolved for another biome let their atlas go.
 extern void ReleaseHDMissileArtOfOtherBiomes();
+/// PRELOAD-PLAN: the atlas page `stem` is in the shared cache and loaded (nothing is loaded here).
+extern bool HDAtlasResident(const std::string &stem);
+/// PRELOAD-PLAN: every effect the HD art draws is resolved at load time, its classic sheet a
+/// placeholder without a file search. Returns the number of effects resolved.
+extern int PreloadHDMissileArt();
 
 //@}
 

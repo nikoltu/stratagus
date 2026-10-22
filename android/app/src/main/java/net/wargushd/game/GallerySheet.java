@@ -38,6 +38,10 @@ final class GallerySheet {
     private int color = -1;
     /** Index into SLOTS of the chosen portrait. */
     private int selected;
+    /** Fixed / Random (design 22.2): Random draws a new portrait at each launcher start. */
+    private boolean random;
+    /** Slot -> key of the game's string that names it (PortraitNames); null until read. */
+    private volatile java.util.Map<Integer, String> nameKeys;
     /** Counts openings, so that a tinting run started for an earlier one stops. */
     private int run;
 
@@ -45,7 +49,18 @@ final class GallerySheet {
      * Show the gallery for a colour with a portrait chosen. The portraits are tinted off the
      * drawing thread; `redraw` is called from there as they become ready.
      */
-    void open(final SkinKit kit, final int colorIndex, int slot, final Runnable redraw) {
+    void open(final SkinKit kit, final int colorIndex, int slot, boolean randomMode, final java.io.File dataDir,
+              final Runnable redraw) {
+        random = randomMode;
+        if (nameKeys == null) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    nameKeys = PortraitNames.read(dataDir);
+                    redraw.run();
+                }
+            }, "gallery-names").start();
+        }
         selected = 0;
         for (int i = 0; i < SLOTS.length; ++i) {
             if (SLOTS[i] == slot) {
@@ -84,6 +99,11 @@ final class GallerySheet {
         return SLOTS[selected];
     }
 
+    /** True when Random is chosen. */
+    boolean random() {
+        return random;
+    }
+
     private float x() { return (Screen.CANVAS_W - W) / 2f; }
     private float y(SkinKit kit) { return kit.height / 2f - H / 2f; }
     private float px() { return x() + PAD; }
@@ -91,6 +111,8 @@ final class GallerySheet {
     private float gx() { return px() + FACE_W + 144f; }
     private float cellX(int i) { return gx() + CELL_DX * (i % COLUMNS); }
     private float cellY(SkinKit kit, int i) { return py(kit) + CELL_DY * (i / COLUMNS); }
+    private static final float MODE_H = 108f;
+    private float modeY(SkinKit kit) { return py(kit) + 896f; }
     private float buttonY(SkinKit kit) { return y(kit) + H - PAD - BUTTON_H; }
     private float okX() { return x() + W - PAD - BUTTON_W; }
     private float cancelX() { return okX() - GAP - BUTTON_W; }
@@ -110,14 +132,23 @@ final class GallerySheet {
         kit.nine(c, frame, px - 12f, py + 84f, FACE_W + 24f, FACE_H + 23.5f, 25);
         kit.picture(c, cells[selected], px, py + 96f, FACE_W, FACE_H);
 
-        // One choice of two; only the first exists so far.
-        final float my = py + 896f, mh = 108f, pw = FACE_W / 2f;
+        // The game's name of the unit or hero (table pname: [456, 1296, 756, 44], cap 44).
+        final java.util.Map<Integer, String> names = nameKeys;
+        final String key = (names != null) ? names.get(SLOTS[selected]) : null;
+        if (key != null) {
+            kit.textTop(c, kit.fit(kit.string(key, ""), CAP_BODY, FACE_W), px, py + 780f, CAP_BODY, INK, true);
+        }
+
+        // One choice of two: Fixed / Random.
+        final float my = modeY(kit), mh = MODE_H, pw = FACE_W / 2f;
         kit.fill(c, px, my, FACE_W, mh, WELL, 14f);
         kit.outline(c, px, my, FACE_W, mh, LINE, 14f);
-        kit.fill(c, px + 6f, my + 6f, pw - 12f, mh - 12f, GOLD, 10f);
-        kit.textCentre(c, kit.own("Fixed"), px + 6f, my + 6f, pw - 12f, mh - 12f, CAP_MID, INK_ON_GOLD, false);
-        kit.fill(c, px + pw + 6f, my + 6f, pw - 12f, mh - 12f, PART_FAINT, 10f);
-        kit.textCentre(c, kit.own("Random"), px + pw + 6f, my + 6f, pw - 12f, mh - 12f, CAP_MID, INK, true);
+        kit.fill(c, px + (random ? pw : 0f) + 6f, my + 6f, pw - 12f, mh - 12f, GOLD, 10f);
+        kit.fill(c, px + (random ? 0f : pw) + 6f, my + 6f, pw - 12f, mh - 12f, PART_FAINT, 10f);
+        kit.textCentre(c, kit.own("Fixed"), px + 6f, my + 6f, pw - 12f, mh - 12f, CAP_MID,
+                       random ? INK : INK_ON_GOLD, random);
+        kit.textCentre(c, kit.own("Random"), px + pw + 6f, my + 6f, pw - 12f, mh - 12f, CAP_MID,
+                       random ? INK_ON_GOLD : INK, !random);
 
         kit.fill(c, cellX(selected) - 12f, cellY(kit, selected) - 12f, CELL_W + 24f, CELL_H + 24f, GOLD,
                  10f);
@@ -140,6 +171,10 @@ final class GallerySheet {
 
     /** A finger was lifted at (x, y), in logical units. */
     int up(float x, float y, SkinKit kit) {
+        if (in(x, y, px(), modeY(kit), FACE_W, MODE_H)) {
+            random = x >= px() + FACE_W / 2f;
+            return NONE;
+        }
         for (int i = 0; i < SLOTS.length; ++i) {
             if (in(x, y, cellX(i), cellY(kit, i), CELL_W, CELL_H)) {
                 selected = i;

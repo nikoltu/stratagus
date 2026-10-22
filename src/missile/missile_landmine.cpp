@@ -66,9 +66,11 @@ void MissileLandMine::Action() /* override */
 {
 	const Vec2i pos = Map.MapPixelPosToTilePos(this->position);
 
-	if (LandMineTargetFinder(this->SourceUnit, this->Type->CanHitOwner).FindOnTile(Map.Field(pos)) != nullptr) {
+	if (CUnit *stepper = LandMineTargetFinder(this->SourceUnit, this->Type->CanHitOwner).FindOnTile(Map.Field(pos))) {
 		DebugPrint("Landmine explosion at %d,%d.\n", pos.x, pos.y);
-		this->MissileHit();
+		// Only the unit that stepped on it is hit (original rune tick 0x4CC600: that ONE unit loses
+		// the number), not every unit of the tile - a flyer above it is spared.
+		this->MissileHit(stepper);
 		this->TTL = 0;
 		return;
 	}

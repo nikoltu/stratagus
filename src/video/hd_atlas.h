@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -304,15 +305,225 @@ inline bool stemIsOfOtherBiome(const std::string &stem, const std::string &biome
 	return false;
 }
 
+/// LOAD-CRASH-3473 (work/LOAD_CRASH_3473.md): the unit atlas stem `stem` with its biome token
+/// replaced by `biome`. The scripts give some units of one tileset the file of another (Wasteland
+/// Town Hall: tilesets/summer/human/buildings/town_hall.png), so the roster entry names the forest
+/// atlas; the original holds the same family in the map's own biome atlas (units_human_swamp has
+/// thall_0). A stem without a biome token (a race's common pages), an unknown `biome` or a stem
+/// already of `biome` comes back unchanged.
+inline std::string stemInBiome(const std::string &stem, const std::string &biome)
+{
+	if (biome != "forest" && biome != "winter" && biome != "swamp" && biome != "xswamp") {
+		return stem;
+	}
+	size_t begin = 0;
+	while (begin <= stem.size()) {
+		size_t end = stem.find('_', begin);
+		if (end == std::string::npos) {
+			end = stem.size();
+		}
+		const std::string token = stem.substr(begin, end - begin);
+		if (token == "forest" || token == "winter" || token == "swamp" || token == "xswamp") {
+			return token == biome ? stem : stem.substr(0, begin) + biome + stem.substr(end);
+		}
+		begin = end + 1;
+	}
+	return stem;
+}
+
+/// PRELOAD-PLAN (STUTTER-FIRST-DRAW-LOAD): the unit atlas stems (each a _sprites and a _masks page)
+/// every map of `biome` loads behind the loading screen, in load order: the biome's common atlas
+/// (neutral buildings, corpses, scaffold, effects, shadows), then per race in `races` order (the
+/// local player's race first) the race's unit atlas and its building atlas of the biome. A race
+/// other than human / orc has no atlas of its own and adds nothing; an unknown biome gives none.
+inline std::vector<std::string> preloadBaseStems(const std::string &biome, const std::vector<std::string> &races)
+{
+	std::vector<std::string> stems;
+	if (biome != "forest" && biome != "winter" && biome != "swamp" && biome != "xswamp") {
+		return stems;
+	}
+	stems.push_back("units_common_" + biome);
+	for (const std::string &race : races) {
+		if (race != "human" && race != "orc") {
+			continue;
+		}
+		for (const std::string &group : {std::string("common"), biome}) {
+			const std::string stem = "units_" + race + "_" + group;
+			bool seen = false;
+			for (const std::string &s : stems) {
+				seen = seen || s == stem;
+			}
+			if (!seen) {
+				stems.push_back(stem);
+			}
+		}
+	}
+	return stems;
+}
+
+/// PRELOAD-PLAN: the stems of `wanted` (the atlases the map's unit types resolve to, in order, with
+/// repeats and empty entries) that are not in `have`, once each, in first-seen order.
+inline std::vector<std::string> preloadExtraStems(const std::vector<std::string> &wanted,
+                                                  const std::vector<std::string> &have)
+{
+	std::vector<std::string> extra;
+	for (const std::string &stem : wanted) {
+		if (stem.empty()) {
+			continue;
+		}
+		bool seen = false;
+		for (const std::string &s : have) {
+			seen = seen || s == stem;
+		}
+		for (const std::string &s : extra) {
+			seen = seen || s == stem;
+		}
+		if (!seen) {
+			extra.push_back(stem);
+		}
+	}
+	return extra;
+}
+
+/// PRELOAD-SCRIPT-UNITS (S20+ 3.4.84: an atlas of a race no player has, read mid-game, 1.9 s): the
+/// unit type idents a map's own script creates DURING play, from the text of its setup file. A file
+/// without "AddTrigger" creates nothing after the load (its units are on the map when the preload
+/// runs, and planned from there). Otherwise every CreateUnit / OldCreateUnit call whose first
+/// argument is a quoted literal counts, except the map's placed units: lines that begin with
+/// "unit = CreateUnit(" (the shape the editor and the PUD converter write; those run at load, where
+/// wc2.lua may still convert the race). Once each, in first-seen order; an ident given by a variable
+/// cannot be read and is left to its first draw.
+inline std::vector<std::string> scriptPlayUnitIdents(const std::string &text)
+{
+	std::vector<std::string> idents;
+	if (text.find("AddTrigger") == std::string::npos) {
+		return idents;
+	}
+	static const std::string call = "CreateUnit(";
+	static const std::string placed = "unit = CreateUnit(";
+	for (size_t at = text.find(call); at != std::string::npos; at = text.find(call, at + call.size())) {
+		const size_t lineStart = text.rfind('\n', at) == std::string::npos ? 0 : text.rfind('\n', at) + 1;
+		if (text.compare(lineStart, placed.size(), placed) == 0) {
+			continue;
+		}
+		size_t p = at + call.size();
+		while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) {
+			++p;
+		}
+		if (p >= text.size() || (text[p] != '"' && text[p] != '\'')) {
+			continue;
+		}
+		const char quote = text[p];
+		const size_t end = text.find(quote, p + 1);
+		if (end == std::string::npos || end == p + 1 || text.find('\n', p + 1) < end) {
+			continue;
+		}
+		const std::string ident = text.substr(p + 1, end - p - 1);
+		if (std::find(idents.begin(), idents.end(), ident) == idents.end()) {
+			idents.push_back(ident);
+		}
+	}
+	return idents;
+}
+
+/// PRELOAD-BUDGET: decoded RGBA bytes of a PNG page from its first bytes (signature + IHDR: width
+/// at 16, height at 20, big-endian); 0 when `head` is not a PNG header. Every atlas page is
+/// uploaded as RGBA32 (or re-packed into RGBA32 pages of the same total), so this is its cost.
+inline uint64_t pngRgbaBytes(const unsigned char *head, size_t n)
+{
+	static const unsigned char sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+	if (!head || n < 24) {
+		return 0;
+	}
+	for (int i = 0; i < 8; ++i) {
+		if (head[i] != sig[i]) {
+			return 0;
+		}
+	}
+	if (head[12] != 'I' || head[13] != 'H' || head[14] != 'D' || head[15] != 'R') {
+		return 0;
+	}
+	const auto be32 = [head](int at) {
+		return ((uint64_t) head[at] << 24) | ((uint64_t) head[at + 1] << 16)
+		       | ((uint64_t) head[at + 2] << 8) | (uint64_t) head[at + 3];
+	};
+	return be32(16) * be32(20) * 4;
+}
+
+/// PRELOAD-BUDGET: the cap for the unit / effect atlases resident after the preload, in MiB of
+/// RGBA. Measured pages (Data/Art/hd/unit, 2026-10-21): one biome's whole set for both races is
+/// 1040 - 1046 MiB (common <biome> 94, human common 235 + 113, orc common 232 + 151, human <biome>
+/// 118 - 120, orc <biome> 97 - 100). That set was already resident in every two-race mission
+/// before this plan, only loaded later, so the cap leaves it whole and adds about 54 MiB for the
+/// rest; the base set is not cut by it (each of its pages is drawn in a two-race map anyway).
+constexpr uint64_t HdPreloadBudgetCapMiB = 1100;
+
+/// The budget for a device with `systemRamMiB` of RAM (0 = unknown): a quarter of the RAM, never
+/// more than the cap. 6 GB and more (every tablet of the owner) -> the cap; a 4 GB device 1024.
+inline uint64_t hdPreloadBudgetMiB(uint64_t systemRamMiB)
+{
+	if (systemRamMiB == 0) {
+		return HdPreloadBudgetCapMiB;
+	}
+	const uint64_t quarter = systemRamMiB / 4;
+	return quarter < HdPreloadBudgetCapMiB ? quarter : HdPreloadBudgetCapMiB;
+}
+
+/// The indices of `bytes` (candidates in priority order) that are loaded when `resident` bytes
+/// are held already and `budget` is the cap: each candidate that still fits is taken, one that
+/// does not is left out (it loads at its first draw, as before) and a later, smaller one is
+/// still tried. A candidate of unknown size (0) is left out: what cannot be measured is not
+/// loaded ahead.
+inline std::vector<int> fitPreloadBudget(uint64_t resident, const std::vector<uint64_t> &bytes, uint64_t budget)
+{
+	std::vector<int> kept;
+	uint64_t total = resident;
+	for (int i = 0; i < (int) bytes.size(); ++i) {
+		if (bytes[i] == 0 || total + bytes[i] > budget) {
+			continue;
+		}
+		total += bytes[i];
+		kept.push_back(i);
+	}
+	return kept;
+}
+
+/// LOAD-TIME (work/LOAD_TIME_IMPL.md): the order the preload decodes its pages in - the largest
+/// first (`bytes` descending, equal sizes in list order). runOrdered hands the pages over in list
+/// order, so a big page behind small ones kept the other worker idle while the window was full of
+/// small finished pages (host: two workers took 0.9 of the serial time). Largest first, the two
+/// common pages (about 235 MiB each) start together and the small ones fill in after them.
+inline std::vector<int> preloadDecodeOrder(const std::vector<uint64_t> &bytes)
+{
+	std::vector<int> order(bytes.size());
+	for (size_t i = 0; i < order.size(); ++i) {
+		order[i] = (int) i;
+	}
+	std::stable_sort(order.begin(), order.end(), [&bytes](int a, int b) { return bytes[a] > bytes[b]; });
+	return order;
+}
+
+/// LOAD-TIME: decode threads (and the window of decoded pages, the same number) for a device with
+/// `systemRamMiB` of RAM (0 = unknown) and `cores` CPUs. Each page in flight is up to about
+/// 236 MiB of RGBA beside the resident set, so three only from 7 GiB and 6 cores (S8U, S20+);
+/// everything else keeps the two it had (S7+ 6 GB, the 3 GB emulator).
+inline int preloadDecodeWorkers(uint64_t systemRamMiB, int cores)
+{
+	return (systemRamMiB >= 7 * 1024 && cores >= 6) ? 3 : 2;
+}
+
 /// Flyer shadow. Both views: the place is measured from the centre of the unit's tile on the
 /// original (EVIDENCE-AIR-001: captures o14_30, o14_58 classic, o14_72 Remastered; Gnomish Flying
 /// Machine and Gryphon Rider). The measures are in 1/64 of a tile = 1/2 classic pixel.
 constexpr int FlyerShadowUnit = 64;
 /// Remastered view: side of the square the shadow frame is drawn into (EVIDENCE-NG82-010).
 constexpr int HdFlyerShadowSize = 92;
-/// Remastered view: centre of the blot from the tile centre, +0.5, +44.5 classic px (o14_72).
+/// Remastered view: centre of the blot from the tile centre, +0.5, +43.5 classic px. Live run 58
+/// at 96 px a tile (4 cases, 28 grabs: Gryphon Rider and Flying Machine, facings S and E): dx
+/// -1.3 .. +1.6, dy +126.8 .. +133.4 screen px, case means +130.0 .. +131.3 = 43.5 classic px;
+/// o14_72 (tile 64) had read +44.5. The same +43.5 as the classic disc's ink centre.
 constexpr int HdFlyerShadowCentreX = 1;
-constexpr int HdFlyerShadowCentreY = 89;
+constexpr int HdFlyerShadowCentreY = 87;
 /// Classic view: the group and the frame of the 23 x 23 disc (o14_30 and o14_58: 208 of 208 drawn
 /// pixels equal), and the centre of its 32 x 32 cell from the tile centre: 0, +43 classic px. The
 /// ink sits at 5..27 of the cell, so its own centre is +0.5, +43.5.
@@ -332,14 +543,14 @@ struct FlyerShadowRect {
 inline FlyerShadowRect hdFlyerShadowRect(int tilesW, int tilesH, int tilePxX, int tilePxY,
                                          int offX, int offY, int zDisp, float zoom)
 {
-	const int size = HdFlyerShadowSize * tilePxX / FlyerShadowUnit;
-	int x = -(size - tilesW * tilePxX) / 2 + offX + HdFlyerShadowCentreX * tilePxX / FlyerShadowUnit;
-	int y = -(size - tilesH * tilePxY) / 2 + offY + HdFlyerShadowCentreY * tilePxY / FlyerShadowUnit
-	        - 2 * zDisp;
-	if (zoom == 1.0f) {
-		return {x, y, size};
-	}
-	return {(int) std::lround(x * zoom), (int) std::lround(y * zoom), (int) std::lround(size * zoom)};
+	// The centre is kept in half pixels until the end: at 32 px a tile the +43.5 would otherwise
+	// lose its half pixel before the zoom (1.5 screen px at 96 a tile).
+	const float unit = (float) FlyerShadowUnit;
+	const int size = (int) std::lround(HdFlyerShadowSize * tilePxX / unit * zoom);
+	const float cx = (tilesW * tilePxX / 2.0f + offX + HdFlyerShadowCentreX * tilePxX / unit) * zoom;
+	const float cy = (tilesH * tilePxY / 2.0f + offY + HdFlyerShadowCentreY * tilePxY / unit - 2 * zDisp)
+	                 * zoom;
+	return {(int) std::lround(cx - size / 2.0f), (int) std::lround(cy - size / 2.0f), size};
 }
 
 /// SKELETON-SIZE: a family whose sheet is stored reduced (Skeleton, canvas 225 where the rule
@@ -389,6 +600,23 @@ inline int classicMinimapMarkPixels(int tiles, int scale, int fac)
 {
 	const int covered = tiles * scale / fac;
 	return covered < 2 ? 2 : covered;
+}
+
+/// Remastered view: the minimap mark of a unit `tiles` wide, in surface pixels, on a minimap
+/// surface `surfacePx` pixels across (its shorter side) at `scale` / `fac` pixels a tile.
+/// Measured in the original's Remastered view (live run 71, ORIG71 "Retry", M; minimap 128 px):
+/// the mark is the footprint x 4 / 2 / 1 px a tile on 32 / 64 / 128 maps (Farm 8 / 4 / 2, Town
+/// Hall 16 / 8 / 4, Gold Mine 12 / 6 / 3), and a one-tile unit is never under 2 x 2 (Peasant
+/// 4 / 2 / 2, Footman 2 on 64). The 2 is in the original's 128-pixel minimap's pixels, so on our
+/// surface it is 2 x surfacePx / 128 (rounded), never under 2.
+inline int remasteredMinimapMarkPixels(int tiles, int scale, int fac, int surfacePx)
+{
+	const int covered = tiles * scale / fac;
+	int floorPx = (2 * surfacePx + 64) / 128;
+	if (floorPx < 2) {
+		floorPx = 2;
+	}
+	return covered < floorPx ? floorPx : covered;
 }
 
 // Classic view: the picture of the original is a 4:3 box fitted into the window and centred. In
@@ -547,8 +775,11 @@ constexpr int ClassicHudPieceMax = 32;
 /// top-left and cut at the end; so it is at other logical sizes too (o21_14 at 776 x 582 and
 /// o21_50 at 720 x 540, orc: column below the top piece, foot, bottom and right strips and both
 /// corners equal in every pixel, the top strip outside the resource row).
+/// The top piece is TopLeftAlt (the same column with the info panel's frame) while a unit is
+/// selected, TopLeft while nothing is (run 56 U2: 2 selected / 3 unselected captures).
 /// Returns the number of pieces written (12 at 1024 x 768).
-inline int classicHudFramePieces(int lw, int lh, ClassicHudPiece out[ClassicHudPieceMax])
+inline int classicHudFramePieces(int lw, int lh, ClassicHudPiece out[ClassicHudPieceMax],
+                                 bool unitSelected = false)
 {
 	constexpr int Side = ClassicViewX;                    // 176
 	constexpr int Bar = ClassicFrameStrip;                // 16
@@ -561,7 +792,7 @@ inline int classicHudFramePieces(int lw, int lh, ClassicHudPiece out[ClassicHudP
 	const int right = lw - Bar;
 	const int bottom = lh - Bar;
 	int n = 0;
-	out[n++] = {"TopLeft", 0, 0, Side, bottom < SideTopH ? bottom : SideTopH};
+	out[n++] = {unitSelected ? "TopLeftAlt" : "TopLeft", 0, 0, Side, bottom < SideTopH ? bottom : SideTopH};
 	for (int y = SideTopH; y < bottom && n < ClassicHudPieceMax - 6;) {
 		const int h = bottom - y < SideTile ? bottom - y : SideTile;
 		out[n++] = {"TileableLeft", 0, y, Side, h};

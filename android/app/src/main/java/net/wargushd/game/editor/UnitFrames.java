@@ -11,44 +11,239 @@ public final class UnitFrames {
     /** Pixels of the game's art a map tile (HdNativeTilePx of the engine). */
     public static final float NATIVE_TILE = 216f;
 
-    /** The kinds with a picture, in the order of the tables below. */
-    public static final int[] TYPES = { MapRules.GOLD_MINE, MapRules.OIL_PATCH, MapRules.PEASANT, MapRules.PEON,
-        MapRules.TOWN_HALL, MapRules.GREAT_HALL };
+    /**
+     * The types with a picture: every type of the palette (UnitCatalog) but the two start
+     * locations, which are drawn as marks; in the PUD table's order, as FILES.
+     */
+    public static final int[] TYPES = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+        0x0C, 0x0D, 0x0E, 0x0F, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+        0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x23, 0x26, 0x27, 0x28,
+        0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x31, 0x32, 0x33, 0x34, 0x35,
+        0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42,
+        0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E,
+        0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A,
+        0x5B, 0x5C, 0x5D, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+    };
 
     /**
-     * The picture file of each kind by the PUD's tileset number (summer, winter, wasteland,
-     * swamp), as UnitTypeFiles of scripts/units.lua, scripts/human/units.lua and
-     * scripts/orc/units.lua give it; a worker has one file for every tileset.
+     * The picture file of each type, by the PUD's tileset number (summer, winter, wasteland,
+     * swamp) where it differs by tileset, else one for all: UnitTypeFiles of scripts/units.lua,
+     * scripts/human/units.lua and scripts/orc/units.lua where the type has one there (the game's
+     * scripts.lua puts the tileset's file into Image), else the "file" of its Image (HD scripts,
+     * fulltree-changes; the JVM test reads them and checks every row).
      */
     private static final String[][] FILES = {
-        { "tilesets/summer/neutral/buildings/gold_mine.png", "tilesets/winter/neutral/buildings/gold_mine.png",
-          "tilesets/wasteland/neutral/buildings/gold_mine.png", "tilesets/swamp/neutral/buildings/gold_mine.png" },
-        { "tilesets/summer/neutral/buildings/oil_patch.png", "tilesets/summer/neutral/buildings/oil_patch.png",
-          "tilesets/wasteland/neutral/buildings/oil_patch.png", "tilesets/swamp/neutral/buildings/oil_patch.png" },
-        { "human/units/peasant.png", "human/units/peasant.png", "human/units/peasant.png", "human/units/peasant.png" },
-        { "orc/units/peon.png", "orc/units/peon.png", "orc/units/peon.png", "orc/units/peon.png" },
+        { "human/units/footman.png" },  // unit-footman
+        { "orc/units/grunt.png" },  // unit-grunt
+        { "human/units/peasant.png" },  // unit-peasant
+        { "orc/units/peon.png" },  // unit-peon
+        { "human/units/ballista.png" },  // unit-ballista
+        { "orc/units/catapult.png" },  // unit-catapult
+        { "human/units/knight.png" },  // unit-knight
+        { "orc/units/ogre.png" },  // unit-ogre
+        { "human/units/elven_archer.png" },  // unit-archer
+        { "orc/units/troll_axethrower.png" },  // unit-axethrower
+        { "human/units/mage.png" },  // unit-mage
+        { "orc/units/death_knight.png" },  // unit-death-knight
+        { "human/units/knight.png" },  // unit-paladin
+        { "orc/units/ogre.png" },  // unit-ogre-mage
+        { "human/units/dwarven_demolition_squad.png" },  // unit-dwarves
+        { "orc/units/goblin_sappers.png" },  // unit-goblin-sappers
+        { "human/units/elven_archer.png" },  // unit-ranger
+        { "orc/units/troll_axethrower.png" },  // unit-berserker
+        { "human/units/elven_archer.png" },  // unit-female-hero
+        { "orc/units/death_knight.png" },  // unit-evil-knight
+        { "human/units/gryphon_rider.png" },  // unit-flying-angel
+        { "orc/units/ogre.png" },  // unit-fad-man
+        { "human/units/mage.png" },  // unit-white-mage
+        { "orc/units/grunt.png" },  // unit-beast-cry
+        { "human/units/oil_tanker_empty.png" },  // unit-human-oil-tanker
+        { "orc/units/oil_tanker_empty.png" },  // unit-orc-oil-tanker
+        { "human/units/transport.png" },  // unit-human-transport
+        { "orc/units/transport.png" },  // unit-orc-transport
+        { "human/units/elven_destroyer.png" },  // unit-human-destroyer
+        { "orc/units/troll_destroyer.png" },  // unit-orc-destroyer
+        { "human/units/battleship.png" },  // unit-battleship
+        { "orc/units/ogre_juggernaught.png" },  // unit-ogre-juggernaught
+        { "orc/units/dragon.png" },  // unit-fire-breeze
+        // unit-human-submarine
+        { "human/units/gnomish_submarine.png", "human/units/gnomish_submarine.png",
+          "tilesets/wasteland/human/units/gnomish_submarine.png", "tilesets/swamp/human/units/gnomish_submarine.png" },
+        // unit-orc-submarine
+        { "orc/units/giant_turtle.png", "orc/units/giant_turtle.png",
+          "tilesets/wasteland/orc/units/giant_turtle.png", "tilesets/swamp/orc/units/giant_turtle.png" },
+        { "human/units/gnomish_flying_machine.png" },  // unit-balloon
+        { "orc/units/goblin_zeppelin.png" },  // unit-zeppelin
+        { "human/units/gryphon_rider.png" },  // unit-gryphon-rider
+        { "orc/units/dragon.png" },  // unit-dragon
+        { "human/units/knight.png" },  // unit-knight-rider
+        { "orc/units/eye_of_kilrogg.png" },  // unit-eye-of-vision
+        { "human/units/footman.png" },  // unit-arthor-literios
+        { "orc/units/grunt.png" },  // unit-quick-blade
+        { "orc/units/ogre.png" },  // unit-double-head
+        { "human/units/knight.png" },  // unit-wise-man
+        { "orc/units/death_knight.png" },  // unit-ice-bringer
+        { "human/units/knight.png" },  // unit-man-of-light
+        { "orc/units/troll_axethrower.png" },  // unit-sharp-axe
+        { "neutral/units/skeleton.png" },  // unit-skeleton
+        // unit-daemon
+        { "tilesets/summer/neutral/units/daemon.png", "tilesets/winter/neutral/units/daemon.png",
+          "tilesets/wasteland/neutral/units/daemon.png", "tilesets/swamp/neutral/units/daemon.png" },
+        // unit-critter
+        { "tilesets/summer/neutral/units/critter.png", "tilesets/winter/neutral/units/critter.png",
+          "tilesets/wasteland/neutral/units/critter.png", "tilesets/swamp/neutral/units/critter.png" },
+        // unit-farm
+        { "tilesets/summer/human/buildings/farm.png", "tilesets/winter/human/buildings/farm.png",
+          "tilesets/wasteland/human/buildings/farm.png", "tilesets/swamp/human/buildings/farm.png" },
+        // unit-pig-farm
+        { "tilesets/summer/orc/buildings/pig_farm.png", "tilesets/winter/orc/buildings/pig_farm.png",
+          "tilesets/wasteland/orc/buildings/pig_farm.png", "tilesets/swamp/orc/buildings/pig_farm.png" },
+        // unit-human-barracks
+        { "tilesets/summer/human/buildings/barracks.png", "tilesets/winter/human/buildings/barracks.png",
+          "tilesets/summer/human/buildings/barracks.png", "tilesets/swamp/human/buildings/barracks.png" },
+        // unit-orc-barracks
+        { "tilesets/summer/orc/buildings/barracks.png", "tilesets/winter/orc/buildings/barracks.png",
+          "tilesets/summer/orc/buildings/barracks.png", "tilesets/swamp/orc/buildings/barracks.png" },
+        // unit-church
+        { "tilesets/summer/human/buildings/church.png", "tilesets/winter/human/buildings/church.png",
+          "tilesets/summer/human/buildings/church.png", "tilesets/swamp/human/buildings/church.png" },
+        // unit-altar-of-storms
+        { "tilesets/summer/orc/buildings/altar_of_storms.png", "tilesets/winter/orc/buildings/altar_of_storms.png",
+          "tilesets/summer/orc/buildings/altar_of_storms.png", "tilesets/swamp/orc/buildings/altar_of_storms.png" },
+        // unit-human-watch-tower
+        { "tilesets/summer/human/buildings/scout_tower.png", "tilesets/winter/human/buildings/scout_tower.png",
+          "tilesets/summer/human/buildings/scout_tower.png", "tilesets/swamp/human/buildings/scout_tower.png" },
+        // unit-orc-watch-tower
+        { "tilesets/summer/orc/buildings/watch_tower.png", "tilesets/winter/orc/buildings/watch_tower.png",
+          "tilesets/summer/orc/buildings/watch_tower.png", "tilesets/swamp/orc/buildings/watch_tower.png" },
+        // unit-stables
+        { "tilesets/summer/human/buildings/stables.png", "tilesets/winter/human/buildings/stables.png",
+          "tilesets/summer/human/buildings/stables.png", "tilesets/swamp/human/buildings/stables.png" },
+        // unit-ogre-mound
+        { "tilesets/summer/orc/buildings/ogre_mound.png", "tilesets/winter/orc/buildings/ogre_mound.png",
+          "tilesets/summer/orc/buildings/ogre_mound.png", "tilesets/swamp/orc/buildings/ogre_mound.png" },
+        // unit-inventor
+        { "tilesets/summer/human/buildings/gnomish_inventor.png", "tilesets/winter/human/buildings/gnomish_inventor.png",
+          "tilesets/summer/human/buildings/gnomish_inventor.png", "tilesets/swamp/human/buildings/gnomish_inventor.png" },
+        // unit-alchemist
+        { "tilesets/summer/orc/buildings/goblin_alchemist.png", "tilesets/winter/orc/buildings/goblin_alchemist.png",
+          "tilesets/summer/orc/buildings/goblin_alchemist.png", "tilesets/swamp/orc/buildings/goblin_alchemist.png" },
+        // unit-gryphon-aviary
+        { "tilesets/summer/human/buildings/gryphon_aviary.png", "tilesets/winter/human/buildings/gryphon_aviary.png",
+          "tilesets/summer/human/buildings/gryphon_aviary.png", "tilesets/swamp/human/buildings/gryphon_aviary.png" },
+        // unit-dragon-roost
+        { "tilesets/summer/orc/buildings/dragon_roost.png", "tilesets/winter/orc/buildings/dragon_roost.png",
+          "tilesets/summer/orc/buildings/dragon_roost.png", "tilesets/swamp/orc/buildings/dragon_roost.png" },
+        // unit-human-shipyard
+        { "tilesets/summer/human/buildings/shipyard.png", "tilesets/winter/human/buildings/shipyard.png",
+          "tilesets/summer/human/buildings/shipyard.png", "tilesets/swamp/human/buildings/shipyard.png" },
+        // unit-orc-shipyard
+        { "tilesets/summer/orc/buildings/shipyard.png", "tilesets/winter/orc/buildings/shipyard.png",
+          "tilesets/summer/orc/buildings/shipyard.png", "tilesets/swamp/orc/buildings/shipyard.png" },
+        // unit-town-hall
         { "tilesets/summer/human/buildings/town_hall.png", "tilesets/winter/human/buildings/town_hall.png",
           "tilesets/summer/human/buildings/town_hall.png", "tilesets/swamp/human/buildings/town_hall.png" },
+        // unit-great-hall
         { "tilesets/summer/orc/buildings/great_hall.png", "tilesets/winter/orc/buildings/great_hall.png",
           "tilesets/summer/orc/buildings/great_hall.png", "tilesets/swamp/orc/buildings/great_hall.png" },
+        // unit-elven-lumber-mill
+        { "tilesets/summer/human/buildings/elven_lumber_mill.png", "tilesets/winter/human/buildings/elven_lumber_mill.png",
+          "tilesets/wasteland/human/buildings/elven_lumber_mill.png", "tilesets/swamp/human/buildings/elven_lumber_mill.png" },
+        // unit-troll-lumber-mill
+        { "tilesets/summer/orc/buildings/troll_lumber_mill.png", "tilesets/winter/orc/buildings/troll_lumber_mill.png",
+          "tilesets/wasteland/orc/buildings/troll_lumber_mill.png", "tilesets/swamp/orc/buildings/troll_lumber_mill.png" },
+        // unit-human-foundry
+        { "tilesets/summer/human/buildings/foundry.png", "tilesets/winter/human/buildings/foundry.png",
+          "tilesets/summer/human/buildings/foundry.png", "tilesets/swamp/human/buildings/foundry.png" },
+        // unit-orc-foundry
+        { "tilesets/summer/orc/buildings/foundry.png", "tilesets/winter/orc/buildings/foundry.png",
+          "tilesets/summer/orc/buildings/foundry.png", "tilesets/swamp/orc/buildings/foundry.png" },
+        // unit-mage-tower
+        { "tilesets/summer/human/buildings/mage_tower.png", "tilesets/winter/human/buildings/mage_tower.png",
+          "tilesets/summer/human/buildings/mage_tower.png", "tilesets/swamp/human/buildings/mage_tower.png" },
+        // unit-temple-of-the-damned
+        { "tilesets/summer/orc/buildings/temple_of_the_damned.png", "tilesets/winter/orc/buildings/temple_of_the_damned.png",
+          "tilesets/summer/orc/buildings/temple_of_the_damned.png", "tilesets/swamp/orc/buildings/temple_of_the_damned.png" },
+        // unit-human-blacksmith
+        { "tilesets/summer/human/buildings/blacksmith.png", "tilesets/winter/human/buildings/blacksmith.png",
+          "tilesets/summer/human/buildings/blacksmith.png", "tilesets/swamp/human/buildings/blacksmith.png" },
+        // unit-orc-blacksmith
+        { "tilesets/summer/orc/buildings/blacksmith.png", "tilesets/winter/orc/buildings/blacksmith.png",
+          "tilesets/summer/orc/buildings/blacksmith.png", "tilesets/swamp/orc/buildings/blacksmith.png" },
+        // unit-human-refinery
+        { "tilesets/summer/human/buildings/refinery.png", "tilesets/winter/human/buildings/refinery.png",
+          "tilesets/summer/human/buildings/refinery.png", "tilesets/swamp/human/buildings/refinery.png" },
+        // unit-orc-refinery
+        { "tilesets/summer/orc/buildings/refinery.png", "tilesets/winter/orc/buildings/refinery.png",
+          "tilesets/summer/orc/buildings/refinery.png", "tilesets/swamp/orc/buildings/refinery.png" },
+        // unit-human-oil-platform
+        { "tilesets/summer/human/buildings/oil_platform.png", "tilesets/winter/human/buildings/oil_platform.png",
+          "tilesets/wasteland/human/buildings/oil_platform.png", "tilesets/swamp/human/buildings/oil_platform.png" },
+        // unit-orc-oil-platform
+        { "tilesets/summer/orc/buildings/oil_platform.png", "tilesets/winter/orc/buildings/oil_platform.png",
+          "tilesets/wasteland/orc/buildings/oil_platform.png", "tilesets/swamp/orc/buildings/oil_platform.png" },
+        // unit-keep
+        { "tilesets/summer/human/buildings/keep.png", "tilesets/winter/human/buildings/keep.png",
+          "tilesets/summer/human/buildings/keep.png", "tilesets/swamp/human/buildings/keep.png" },
+        // unit-stronghold
+        { "tilesets/summer/orc/buildings/stronghold.png", "tilesets/winter/orc/buildings/stronghold.png",
+          "tilesets/summer/orc/buildings/stronghold.png", "tilesets/swamp/orc/buildings/stronghold.png" },
+        // unit-castle
+        { "tilesets/summer/human/buildings/castle.png", "tilesets/winter/human/buildings/castle.png",
+          "tilesets/summer/human/buildings/castle.png", "tilesets/swamp/human/buildings/castle.png" },
+        // unit-fortress
+        { "tilesets/summer/orc/buildings/fortress.png", "tilesets/winter/orc/buildings/fortress.png",
+          "tilesets/summer/orc/buildings/fortress.png", "tilesets/swamp/orc/buildings/fortress.png" },
+        // unit-gold-mine
+        { "tilesets/summer/neutral/buildings/gold_mine.png", "tilesets/winter/neutral/buildings/gold_mine.png",
+          "tilesets/wasteland/neutral/buildings/gold_mine.png", "tilesets/swamp/neutral/buildings/gold_mine.png" },
+        // unit-oil-patch
+        { "tilesets/summer/neutral/buildings/oil_patch.png", "tilesets/summer/neutral/buildings/oil_patch.png",
+          "tilesets/wasteland/neutral/buildings/oil_patch.png", "tilesets/swamp/neutral/buildings/oil_patch.png" },
+        // unit-human-guard-tower
+        { "tilesets/summer/human/buildings/guard_tower.png", "tilesets/winter/human/buildings/guard_tower.png",
+          "tilesets/summer/human/buildings/guard_tower.png", "tilesets/swamp/human/buildings/guard_tower.png" },
+        // unit-orc-guard-tower
+        { "tilesets/summer/orc/buildings/guard_tower.png", "tilesets/winter/orc/buildings/guard_tower.png",
+          "tilesets/summer/orc/buildings/guard_tower.png", "tilesets/swamp/orc/buildings/guard_tower.png" },
+        // unit-human-cannon-tower
+        { "tilesets/summer/human/buildings/cannon_tower.png", "tilesets/winter/human/buildings/cannon_tower.png",
+          "tilesets/summer/human/buildings/cannon_tower.png", "tilesets/swamp/human/buildings/cannon_tower.png" },
+        // unit-orc-cannon-tower
+        { "tilesets/summer/orc/buildings/cannon_tower.png", "tilesets/winter/orc/buildings/cannon_tower.png",
+          "tilesets/summer/orc/buildings/cannon_tower.png", "tilesets/swamp/orc/buildings/cannon_tower.png" },
+        // unit-circle-of-power
+        { "tilesets/summer/neutral/buildings/circle_of_power.png", "tilesets/winter/neutral/buildings/circle_of_power.png",
+          "tilesets/wasteland/neutral/buildings/circle_of_power.png", "tilesets/swamp/neutral/buildings/circle_of_power.png" },
+        // unit-dark-portal
+        { "tilesets/summer/neutral/buildings/dark_portal.png", "tilesets/winter/neutral/buildings/dark_portal.png",
+          "tilesets/wasteland/neutral/buildings/dark_portal.png", "tilesets/swamp/neutral/buildings/dark_portal.png" },
+        // unit-runestone
+        { "neutral/buildings/runestone.png", "tilesets/winter/neutral/buildings/runestone.png",
+          "neutral/buildings/runestone.png", "tilesets/swamp/neutral/buildings/runestone.png" },
     };
 
     private UnitFrames() {}
 
     /** The place of a unit type in TYPES, or -1 for a type without a picture. */
     public static int indexOf(int type) {
+        return (type < 0 || type >= INDEX.length) ? -1 : INDEX[type];
+    }
+
+    /** The place in TYPES by type number, -1 for none (looked up for every unit drawn). */
+    private static final int[] INDEX = new int[256];
+    static {
+        java.util.Arrays.fill(INDEX, -1);
         for (int i = 0; i < TYPES.length; ++i) {
-            if (TYPES[i] == type) {
-                return i;
-            }
+            INDEX[TYPES[i]] = i;
         }
-        return -1;
     }
 
     /** The picture file of a unit type on a tileset, or null. */
     public static String file(int type, int tileset) {
         final int i = indexOf(type);
-        return (i < 0 || tileset < 0 || tileset > 3) ? null : FILES[i][tileset];
+        return (i < 0 || tileset < 0 || tileset > 3) ? null : FILES[i][(FILES[i].length == 1) ? 0 : tileset];
     }
 
     /** The text of the object that follows a key, braces included, or null. */
@@ -118,6 +313,30 @@ public final class UnitFrames {
         final String atlas = (o == null) ? null : value(o, "atlas"), prefix = (o == null) ? null : value(o, "prefix");
         return (atlas == null || prefix == null || atlas.isEmpty() || prefix.isEmpty()) ? null
             : new String[] { atlas, prefix };
+    }
+
+    /** The biome letter of the engine's CurrentEffectTileset by the PUD's tileset number (forest, winter, swamp, xswamp). */
+    private static final String[] BIOME = { "_bf", "_bs", "_bl", "_bx" };
+
+    /**
+     * Frame n of a family of a sheet, tried in the spellings of the engine's HDFrameByNumber
+     * (src/unit/unittype.cpp), each only when the earlier ones are absent: PREFIX_N, PREFIX_fN
+     * (Circle of Power, whose prefix holds the number), PREFIX_N_f0 (a frame that ships only as
+     * a cycle: winter Church, winter Goblin Alchemist), PREFIX_N_f0_bBIOME. The suffix ("" or
+     * "_team") follows each. Null when none is there.
+     */
+    public static int[] frameOf(String atlasJson, String prefix, int n, String suffix, int tileset) {
+        int[] f = frame(atlasJson, prefix + "_" + n + suffix);
+        if (f == null) {
+            f = frame(atlasJson, prefix + "_f" + n + suffix);
+        }
+        if (f == null) {
+            f = frame(atlasJson, prefix + "_" + n + "_f0" + suffix);
+        }
+        if (f == null && tileset >= 0 && tileset < BIOME.length) {
+            f = frame(atlasJson, prefix + "_" + n + "_f0" + BIOME[tileset] + suffix);
+        }
+        return f;
     }
 
     /**

@@ -245,6 +245,7 @@
 #include "unittype.h"
 #include "video.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <deque>
@@ -288,7 +289,8 @@ CNetworkParameter::CNetworkParameter()
 	localHost = "127.0.0.1";
 	localPort = defaultPort;
 	gameCyclesPerUpdate = 1;
-	NetworkLag = 10;
+	NetworkLag = defaultLag;
+	SetupLag = defaultLag;
 	timeoutInS = 45;
 }
 
@@ -296,6 +298,18 @@ void CNetworkParameter::FixValues()
 {
 	gameCyclesPerUpdate = std::max(gameCyclesPerUpdate, 1u);
 	NetworkLag = std::max(NetworkLag, 2u * gameCyclesPerUpdate);
+	SetupLag = GameLag(true, SetupLag, gameCyclesPerUpdate);
+}
+
+/* static */ unsigned int CNetworkParameter::GameLag(bool networkGame, unsigned int setupLag,
+                                                     unsigned int cyclesPerUpdate)
+{
+	if (!networkGame) {
+		// really a single player game, but we use the command queue for determinism in replays
+		return 1;
+	}
+	cyclesPerUpdate = std::max(cyclesPerUpdate, 1u);
+	return std::clamp(setupLag, std::min(2u * cyclesPerUpdate, kMaxLag), kMaxLag);
 }
 
 bool NetworkInSync = true;                 /// Network is in sync
@@ -722,6 +736,8 @@ void CNetworkMeshEngine::SetPaused(bool paused, int player)
 
 /// The host was told that there is a chat
 static bool NetworkChatOffered = false;
+/// The launcher's "Cheat entry" is on: a single-player game offers the line too (SetCheatEntry)
+bool NetworkCheatEntry = false;
 
 /// "~" begins a colour change in a drawn text; "~~" is the character itself
 static std::string ChatNoMarkup(const std::string &text)
@@ -861,8 +877,14 @@ bool NetworkChat(const std::string &raw)
 */
 void NetworkChatFrame()
 {
-	const bool offer = IsNetworkGame() && GameRunning && ThisPlayer
+	const bool chat = IsNetworkGame() && GameRunning && ThisPlayer
 		&& (!MeshGlue || (!MeshGlue->Held() && !MeshGlue->Lingering() && !MeshGlue->Model().IsOut()));
+	// INGAME_HUD_AND_MENU 5.4: with "Cheat entry" on, a single-player game has the same line; what
+	// is typed there goes to the cheat handler only, as the original's Enter line does in a game
+	// without other players, and never becomes a chat message.
+	const bool cheats = !IsNetworkGame() && NetworkCheatEntry && GameRunning && ThisPlayer
+		&& !GameObserve && !IsReplayGame();
+	const bool offer = chat || cheats;
 
 	if (offer != NetworkChatOffered) {
 		NetworkChatOffered = offer;
@@ -873,8 +895,13 @@ void NetworkChatFrame()
 	}
 	std::string typed;
 	while (LauncherChatTakeTyped(typed)) {
-		if (offer) {
+		if (chat) {
 			NetworkChat(typed);
+		} else if (cheats && !GameEstablishing) {
+			const std::string text = NetworkChatText(typed);
+			if (!text.empty() && HandleCheats(text)) {
+				CommandLog("input", nullptr, EFlushMode::On, -1, -1, nullptr, text.c_str(), -1);
+			}
 		}
 	}
 }
@@ -1169,12 +1196,10 @@ void ExitNetwork1()
 */
 void NetworkOnStartGame()
 {
-	if (!IsNetworkGame()) {
-		// really a single player game, but we use the command queue for determinism in replays
-		CNetworkParameter::Instance.NetworkLag = 1;
-	} else {
-		CNetworkParameter::Instance.NetworkLag = 10;
-	}
+	// NET-LAG-DISCARDED: a network game runs with the lag the room set up (the host's, taken
+	// over by every joiner in the welcome), no longer with a fixed 10.
+	CNetworkParameter::Instance.NetworkLag = CNetworkParameter::GameLag(
+		IsNetworkGame(), CNetworkParameter::Instance.SetupLag, CNetworkParameter::Instance.gameCyclesPerUpdate);
 	ThisPlayer->SetName(Parameters::Instance.LocalPlayerName);
 	for (int i = 0; i < NetPlayers; ++i) {
 		Players[Hosts[i].PlyNr].SetName(Hosts[i].PlyName);
@@ -1731,6 +1756,11 @@ static void NetworkMeshLinger(const CNetworkCommandQueue(&quit)[MaxNetworkComman
 */
 void NetworkQuitGame()
 {
+	// The cheat line of a single-player game goes with the game.
+	if (NetworkChatOffered && !IsNetworkGame()) {
+		NetworkChatOffered = false;
+		LauncherPost(LauncherMsgChat, 0);
+	}
 	if (!ThisPlayer || IsNetworkGame() == false || NetworkQuitAnnounced) {
 		return;
 	}

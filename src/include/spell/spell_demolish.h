@@ -49,6 +49,7 @@ private:
 	int Damage = 0; /// Damage for every unit in range.
 	int Range = 0;  /// Range of the explosion.
 	int DamageRange = -1; /// Tiles around the caster whose units and walls are hit; -1: Range
+	MissileType *UnitMissile = nullptr; /// Missile made at every unit hit (the original's explosion)
 };
 
 /// If the explosion takes the wall on a tile

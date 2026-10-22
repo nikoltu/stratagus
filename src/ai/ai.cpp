@@ -141,6 +141,7 @@
 
 #include "ai.h"
 #include "wc2ai.h"
+#include "wc2bot.h"
 #include "ai_local.h"
 
 #include "actions.h"
@@ -414,6 +415,8 @@ void SaveAi(CFile &file)
 	}
 	// What each player's original script has reached.
 	file.printf("%s", Wc2AiSaveText().c_str());
+	// What each computer player of a mod has reached (nothing without one).
+	file.printf("%s", Wc2BotSaveText().c_str());
 
 	DebugPrint("FIXME: Saving lua function definition isn't supported\n");
 }
@@ -429,6 +432,12 @@ void AiInit(CPlayer &player)
 
 	pai->Player = &player;
 
+	// A seat that names a computer player of an enabled mod is run by it; the Lua AI found below
+	// is only the seat's type for the engine's records, and its script does not run. A name whose
+	// mod or profile is missing has been replaced by the default active AI.
+	const bool bot = Wc2BotInit(player, *pai);
+	const std::string aiName = bot ? std::string(DEFAULT_ACTIVE_AI) : player.AiName;
+
 	DebugPrint("%d - looking for class %s\n", player.Index, player.AiName.c_str());
 	//MAPTODO print the player name (player->Name) instead of the pointer
 
@@ -441,7 +450,7 @@ void AiInit(CPlayer &player)
 
 	auto it = ranges::find_if(AiTypes, [&](const auto& ait){
 		return (ait->Race.empty() || ait->Race == PlayerRaces.Name[player.Race])
-		    && (player.AiName.empty() || ait->Name == player.AiName);
+		    && (aiName.empty() || ait->Name == aiName);
 		});
 	CAiType *ait = nullptr;
 	if (it == AiTypes.end()) {
@@ -632,6 +641,10 @@ void AiHelpMe(const CUnit *attacker, CUnit &defender)
 	/* Friendly Fire - typical splash */
 	if (!attacker || attacker->Player->Index == defender.Player->Index) {
 		//FIXME - try react somehow
+		return;
+	}
+	// A computer player of a mod answers by its own defence rule, after its reaction delay.
+	if (Wc2BotHelpMe(*attacker, defender)) {
 		return;
 	}
 
@@ -1019,10 +1032,8 @@ void AiEachCycle(CPlayer &player)
 	AiPlayer = player.Ai.get();
 	// The original's script of this player, when the map named one: it advances every cycle.
 	Wc2AiCycle(player.Index);
-	// Its casters are looked at every 50 cycles (local evidence record PAI-001), not once a second.
-	if (AiPlayer && wc2ai::CastPassDue(GameCycle) && Wc2AiRuns(player.Index)) {
-		AiCheckMagic();
-	}
+	// Its casters are looked at every 50 cycles (local evidence record PAI-001), not once a second,
+	// in one pass for all such players together (AiCheckMagicAll, from PlayersEachCycle).
 }
 
 /**
@@ -1038,6 +1049,15 @@ void AiEachSecond(CPlayer &player)
 		return;
 	}
 #endif
+
+	//  A computer player of a mod decides by itself and hands its wants to the request table and
+	//  the resource manager; the Lua script, the force manager, the casting pass and the explorers
+	//  of the engine's own AI do not act for it.
+	if (Wc2BotSecond(player.Index)) {
+		AiCheckUnits();
+		AiResourceManager();
+		return;
+	}
 
 	//  Advance script. A player run by its original script takes its wants from there; its Lua
 	//  script does not run beside it.

@@ -117,6 +117,16 @@ $#include "launchresult.h"
 extern bool WriteLaunchResult(const std::string text);
 extern bool WriteLaunchLoading(const std::string text);
 extern unsigned long LastGameCycle;
+// The launcher's map editor: its export and its map check (modes "export" / "validate").
+extern bool WriteLaunchExport(const std::string text);
+extern bool WriteLaunchValidate(const std::string text);
+extern std::string EditorContentStamp();
+extern std::string EditorTilesetJson();
+extern std::string EditorUnitTypesJson();
+extern void EditorCheckBegin();
+extern std::string EditorCheckLoadedMap();
+extern void SetHDArtPreload(bool on);
+extern bool HDArtPreloadOn();
 
 // Messages to and commands from the activity hosting the engine.
 $#include "launcher_bridge.h"

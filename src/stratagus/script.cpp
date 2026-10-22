@@ -2433,6 +2433,23 @@ static bool ShouldLocalTableBeSaved(std::string_view key)
 	return !forbiddenNames.count(key);
 }
 
+std::string EscapeLuaString(std::string_view text)
+{
+	std::string res;
+	res.reserve(text.size());
+	for (char c : text) {
+		switch (c) {
+			case '\\': res += "\\\\"; break;
+			case '"': res += "\\\""; break;
+			case '\n': res += "\\n"; break;
+			case '\r': res += "\\r"; break;
+			case '\0': res += "\\000"; break;
+			default: res.push_back(c); break;
+		}
+	}
+	return res;
+}
+
 static std::optional<std::string> LuaValueToString(lua_State *l)
 {
 	const int type_value = lua_type(l, -1);
@@ -2447,21 +2464,13 @@ static std::optional<std::string> LuaValueToString(lua_State *l)
 			return b ? "true" : "false";
 		}
 		case LUA_TSTRING: {
-			const std::string s = lua_tostring(l, -1);
-
-			if ((s.find('\n') != std::string::npos)) {
-				return std::string("[[") + s + "]]";
-			} else {
-				std::string res;
-				for (char c : s) {
-					if (c == '\"') {
-						res.push_back('\\');
-					}
-					res.push_back(c);
-				}
-				res = "\"" + res + "\"";
-				return res;
-			}
+			// Always a quoted literal with every special character escaped: a raw backslash ended the
+			// string early or changed it (a profile name ending in a backslash made preferences.lua
+			// unloadable, audit EA-404), and the long-bracket form broke on "]]" and dropped a
+			// leading newline.
+			size_t length = 0;
+			const char *s = lua_tolstring(l, -1, &length);
+			return "\"" + EscapeLuaString(std::string_view(s, length)) + "\"";
 		}
 		case LUA_TTABLE:
 			return std::nullopt;

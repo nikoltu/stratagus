@@ -65,13 +65,61 @@
 #include <array>
 #include <guisan/font.hpp>
 #include <string>
+#include <functional>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 /*----------------------------------------------------------------------------
 --  Declarations
 ----------------------------------------------------------------------------*/
 class CGraphic;
 class CFontColor;
+
+/**
+**  FONT-CJK: the characters of a sheet beyond its code page. A sheet keeps its code page in the
+**  slots 32..255 (ASCII, Latin-1 ...) and may carry more glyphs after them: slot 256 + i holds
+**  the character on line i of the map file `<sheet stem>.map` (one decimal codepoint a line).
+**  This maps codepoint -> sheet index (256 + i). Empty for every sheet without a map.
+*/
+using FontGlyphMap = std::unordered_map<int, int>;
+
+/// FONT-CJK: the first sheet index the map file fills.
+constexpr int FontGlyphMapFirstSlot = 256;
+
+/// FONT-CJK: parse a map file's text (one decimal codepoint a line; line i -> slot 256 + i).
+/// A line that is not a codepoint above 0x7F keeps its slot but maps nothing.
+/// @return the number of characters mapped.
+extern int ParseFontGlyphMap(std::string_view text, FontGlyphMap &out);
+
+/// FONT-CJK: decode one UTF-8 character at `pos` and move `pos` past it. A broken or cut-off
+/// sequence gives -1 and moves past its first byte only, so the text after it is still read.
+extern int FontDecodeUTF8(std::string_view s, size_t &pos);
+
+/// FONT-CJK: true for a character of the scripts written without spaces (kana, CJK ideographs,
+/// CJK punctuation, full-width forms): a line may break before and after it.
+extern bool FontIsCJKBreakChar(int codepoint);
+/// FONT-CJK (kinsoku): a closing mark that must not begin a line (。、」） ? ! ...).
+extern bool FontNoLineStart(int codepoint);
+/// FONT-CJK (kinsoku): an opening mark that must not end a line (「（ ...).
+extern bool FontNoLineEnd(int codepoint);
+
+/**
+**  FONT-CJK: where the first line of `s` ends when it is `maxWidth` px wide at most (0 = no
+**  limit), measured with `width`. Breaks at the first newline, else at the last space or the
+**  last break between CJK characters that fits. A first word that does not fit stands on its
+**  own line.
+**  @param next  out: where the next line starts (past the newline / space; at the CJK break)
+**  @return the byte length of the line
+*/
+extern size_t FontLineBreak(std::string_view s, unsigned int maxWidth,
+                            const std::function<int(std::string_view)> &width, size_t &next);
+
+/// FONT-WIDTH: pixel width of `number` as drawn (thousands commas, '-'), each character's own
+/// width from `charWidth` (index = character - 32) + `letterSpacing`; a character the table does
+/// not have is measured as the space. Used by CFont::Width(int).
+extern int FontNumberWidth(int number, const std::vector<char> &charWidth, int letterSpacing);
 
 /// Font definition
 class CFont : public gcn::Font
@@ -137,8 +185,22 @@ public:
 	/// Data/skins/skins.json, skin `hud_widget_text`: "drop_text_color": [0, 0, 0],
 	/// "drop_text_offset": [1, 1] (measured: c_k_2960x1848.png at k = 3, o41_o1_peon.png at k = 2).
 	void SetHudShadow(int units) { ShadowUnits = units; }
+
+	/// FONT-LT: the code page this face's sheet is laid out in (see FontCodePageHdSheet);
+	/// 0 = the global FontCodePage (SetFontCodePage), which every face used before.
+	void SetCodePage(int page) { CodePage = page; }
+	/// The code page in force for this face.
+	int GetCodePage() const;
 	/// The shadow's offset in pixels on this screen; 0 when the face has none.
 	int ShadowOffset() const;
+
+	/// FONT-CJK: the characters drawn from the sheet slots after 255 (see FontGlyphMap). Read at
+	/// Load() from `<sheet stem>.map` beside the sheet, when there is one.
+	const FontGlyphMap &GetGlyphMap() const { return GlyphMap; }
+
+	/// FONT-CJK: line `line` (1-based) of `text` broken at `maxWidth` px in this face, as
+	/// GetLineFont does (spaces, newlines, and between CJK characters). For the Lua wrappers.
+	std::string WrapLine(int line, const std::string &text, int maxWidth) const;
 
 	std::shared_ptr<CGraphic> GetGraphic() const;
 
@@ -161,12 +223,16 @@ private:
 	int SpaceAdvance = 0;        /// NG84: declared SPACE advance in authored units (0 = engine default)
 	int LineHeightAuthored = 0;  /// NG101: declared LINE advance in authored units (0 = use the cell)
 	int ShadowUnits = 0;         /// HUD-TEXT-SHADOW: drop shadow offset in HUD units (0 = none)
+	int CodePage = 0;            /// FONT-LT: code page of the sheet (0 = the global FontCodePage)
 	int LetterSpacing = 1;       /// NG84: px added after each glyph. 1 = the classic bitmap-font rule;
 	                             /// 0 once a real advance table is loaded, because a true advance
 	                             /// already contains the glyph's right side bearing.
 
+	FontGlyphMap GlyphMap;       /// FONT-CJK: codepoint -> sheet index for the slots after 255
+
 private:
 	void LoadAdvanceTable();
+	void LoadGlyphMap();
 	double AuthoredScale() const;
 };
 
@@ -211,6 +277,23 @@ extern CFont &GetGameFont();   /// Normal font used in game
 extern bool IsGameFontReady(); /// true when GameFont is provided
 
 extern int FontCodePage;
+
+/**
+**  FONT-LT: the layout of the sheets the launcher bakes from BLQ55.ttf (FontBaker, layout 3):
+**  characters 32..255 as Latin-1, and in the slots 0x80..0x9D, which Latin-1 leaves to control
+**  codes, the Lithuanian letters (A, C, E, E-dot, I, S, U-ogonek, U-macron, Z with their marks,
+**  capital then small) and the typographic marks en dash, em dash, the four quotes and the
+**  ellipsis, then (layout 3) the Polish L-stroke, capital then small, and the euro sign.
+**  A face whose sheet has this layout is told so with CFont::SetCodePage.
+*/
+constexpr int FontCodePageHdSheet = 88591;
+
+/**
+**  The sheet indices `utf8` is drawn with in code page `page`: one index per character, or
+**  the indices of its ASCII stand-in where the page has no slot for it (unknown: '?').
+*/
+extern std::vector<int> FontCodepageIndices(std::string_view utf8, int page,
+                                            const FontGlyphMap *map = nullptr);
 
 /// HUD-FOOD-RED: the colour of the glyphs of a baked HD face drawn from now on (white = as
 /// baked). Those faces are white in palette indices no font colour reaches, so a coloured figure

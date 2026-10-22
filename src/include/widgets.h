@@ -113,6 +113,10 @@ public:
 	}
 };
 
+/// The caption colour of a switched-off CImageButton: a tint CFont::drawString applies (not pure
+/// white, not the unset black).
+gcn::Color ImageButtonDisabledCaption();
+
 class CImageButton : public gcn::Button
 {
 public:
@@ -336,6 +340,7 @@ class CTextField : public gcn::TextField
 public:
 	CTextField() = default;
 	explicit CTextField(const std::string &text) : TextField(text) {}
+	~CTextField() override;
 
 	void draw(gcn::Graphics *graphics) override;
 	void mousePressed(gcn::MouseEvent &) override;
@@ -351,6 +356,36 @@ protected:
 	bool isPassword = false;
 };
 
+/// A key value a text field takes as a typed character: any printable code point, so the letters
+/// of the soft keyboard beyond Latin-1 (the Lithuanian a-ogonek, c-caron, ...) reach the field as UTF-8
+bool TextFieldTakesCharacter(int value);
+/// The text field the player last tapped while it still wants the screen keyboard: focused,
+/// editable and shown inside the window on top. Null otherwise (also for a field only focused
+/// by a script, so a window opening with its field focused does not raise the keyboard).
+CTextField *TextFieldWantingKeyboard(const gcn::Widget *top);
+/// Counts the taps on text fields (a new tap raises the keyboard again after Back hid it)
+unsigned TextFieldTapCount();
+
+/// Top of the text line in an image text field of the given height (centred)
+int ImageTextFieldTextY(int fieldHeight, int fontHeight);
+/// Left inset of the text in an image text field of the given height (the original's frame)
+int ImageTextFieldTextX(int fieldHeight);
+/// The text cursor of an image text field: x, top and height of the bar
+struct ImageTextFieldCaret
+{
+	int x = 0;
+	int top = 0;
+	int height = 0;
+};
+/// The cursor after text ending at x `textRight`
+ImageTextFieldCaret ImageTextFieldCaretAt(int fieldHeight, int textRight);
+/// The x into the text (from its first glyph) under a pointer at widget-local x `pointerX`:
+/// the inverse of the draw's text origin ImageTextFieldTextX(h) - xScroll, never below 0
+int ImageTextFieldTextOffsetAt(int fieldHeight, int xScroll, int pointerX);
+/// Whether an image text field draws its focused art: only while it has keyboard focus and
+/// a focused art is set (the original's textinput_active); otherwise the normal art
+bool ImageTextFieldUsesFocusedArt(bool hasFocusedArt, bool focused);
+
 class ImageTextField : public CTextField
 {
 public:
@@ -359,11 +394,29 @@ public:
 
 	void draw(gcn::Graphics *graphics) override;
 	void drawFrame(gcn::Graphics *graphics) override;
+	void mousePressed(gcn::MouseEvent &) override;
+	void mouseDragged(gcn::MouseEvent &) override;
 
 	void setItemImage(std::shared_ptr<CGraphic> image) { itemImage = image; }
+	/// Art drawn instead of the item image while the field has keyboard focus, with the same
+	/// nine-slice settings; without it the item image is drawn in every state
+	void setItemImageFocused(std::shared_ptr<CGraphic> image) { itemImageFocused = image; }
+	/// Draw the art as a nine-slice: insets in the art's pixels, drawn at `scale` times that
+	/// size (a skin's "9slice"); without it the whole art is stretched to the field
+	void setItemImageSlice(int left, int top, int right, int bottom, double scale);
 
 private:
+	/// Caret index under a pointer at widget-local x
+	unsigned caretIndexAt(int pointerX);
+
 	std::shared_ptr<CGraphic> itemImage;
+	std::shared_ptr<CGraphic> itemImageFocused;
+	bool sliced = false;
+	int sliceLeft = 0;
+	int sliceTop = 0;
+	int sliceRight = 0;
+	int sliceBottom = 0;
+	double sliceScale = 1.0;
 };
 
 class StringListModel : public gcn::ListModel

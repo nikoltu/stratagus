@@ -34,7 +34,13 @@
 #include "net_message.h"
 #include "network/netsockets.h"
 
+#include "filesystem.h"
+
+#include <set>
+#include <string>
 #include <string_view>
+#include <cstdint>
+#include <utility>
 #include <vector>
 
 class CHost;
@@ -58,9 +64,10 @@ class CHost;
 /// tile and a building under construction lights with range 3 (simulation state on every
 /// device), +12 since an attack range against a unit is counted as the larger axis gap
 /// (simulation state on every device), +14 since a missile comes down no nearer than its
-/// unit type's minimal impact distance (simulation state on every device). A build without
-/// them is refused at Hello.
-#define NetworkProtocolPatchLevel   (StratagusPatchLevel + 14)
+/// unit type's minimal impact distance (simulation state on every device), +15 since the sync
+/// hash also mixes each unit's tile, HP and its current order's goal, range and flags. A build
+/// without them is refused at Hello.
+#define NetworkProtocolPatchLevel   (StratagusPatchLevel + 15)
 /// Network protocol version (1,2,3) -> 10203
 #define NetworkProtocolVersion \
 	(NetworkProtocolMajorVersion * 10000 + NetworkProtocolMinorVersion * 100 + \
@@ -129,6 +136,12 @@ extern int FindHostIndexBy(const CHost &host);
 extern bool NetworkIsDedicatedServerHost(const CNetworkHost &host, const CServerSetup &setup);
 /// Map transfer: a received file name stays under the library path and is a map file
 extern bool IsSafeMapTransferName(std::string_view name);
+/// Map transfer, sender: the files of `mapDirectory` whose name without its extensions is
+/// `prefix`, sorted. A directory that is missing or cannot be read gives none (no throw).
+extern std::set<fs::path> MapTransferFiles(const fs::path &mapDirectory, const fs::path &prefix);
+/// Map transfer, sender: `file`'s name relative to `libPath` with '/' separators, or empty when
+/// the file is not under `libPath`.
+extern std::string MapTransferNetworkName(const fs::path &libPath, const fs::path &file);
 extern int NetworkGetPlayerIndexForHost(int hostIndex);
 extern bool NetworkIsLocalSetupInSync(const CServerSetup &state1,
                                       const CServerSetup &state2,
@@ -157,6 +170,21 @@ extern void NetworkSendICMessage(CUDPSocket &socket, const CHost &host, const CI
 
 extern const std::string &NetworkServerStartFailure(); /// Server: why the last start was given up
 extern void NetworkMeshProbeAnswered(int hostIndex); /// Client: the peer in that host slot answered our probe
+extern int NetworkClientUnreachedPeers(); /// Client: other clients that have not answered our probe
+
+/// NET-CONTENT-ID. The game-folder files the simulation reads (src/stratagus/wc2data.cpp,
+/// src/ai/wc2ai.cpp); the same list as the launcher's LanIdentity.GAME_DATA_FILES.
+extern const std::vector<std::string> &NetworkContentDataFiles();
+/// Content id of the given files: every file under scriptsDir in the order of its path relative
+/// to it, then the data files in their given order (name -> the path found for it); each name,
+/// length and bytes go in, a missing file goes in as missing.
+extern uint32_t NetworkContentIdOf(const fs::path &scriptsDir,
+                                   const std::vector<std::pair<std::string, fs::path>> &dataFiles);
+/// What two devices compare in the hello (the "lua files" check): FileChecksums (stratagus.lua),
+/// the scripts of <lib>/scripts and the game folder's simulation data. Computed once.
+extern uint32_t NetworkContentVersion();
+/// Forget the computed content version (tests; a changed game folder).
+extern void NetworkContentVersionReset();
 
 //@}
 

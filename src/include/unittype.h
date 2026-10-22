@@ -230,6 +230,7 @@ enum {
 	ISALIVE_INDEX,
 	PLAYER_INDEX,
 	PRIORITY_INDEX,
+	FLAMESHIELD_INDEX,				/// Cycles before Flame Shield can be cast on the unit again
 	NVARALREADYDEFINED
 };
 
@@ -733,6 +734,11 @@ public:
 	mutable std::string HDSpriteFile;                    /// the File the attempt was made for (HD-ART-STALE-TILESET)
 	mutable std::string HDSpritePrefix;                  /// native Remastered atlas frame prefix (e.g.
 	                                                     /// "grunt"); empty => numeric frame names (legacy .hdatlas)
+	// CULL-HD-EXTENT: the HD frame canvas (native px, after a rule-canvas stretch) of frame 0 of the
+	// family, for the viewport cull; read for the atlas HDCanvasOf (compared, never dereferenced).
+	mutable const CAtlasGraphic *HDCanvasOf = nullptr;
+	mutable int HDCanvasW = 0;
+	mutable int HDCanvasH = 0;
 	// Classic view: the type's sprite group in the map's classic atlas, or -1. Kept apart from the
 	// HD fields; good only for the File and the atlas (CAtlasGraphic::ClassicSerial) it was asked for.
 	mutable std::string ClassicSpriteFile;
@@ -877,6 +883,10 @@ extern std::shared_ptr<CAtlasGraphic> GetHDShadowAtlas(const CUnitType &type);
 
 extern std::shared_ptr<CAtlasGraphic> GetHDConstructionAtlas(const CUnitType &building,
 														  std::string &outPrefix);
+
+/// CULL-HD-EXTENT: the native canvas (w, h) the type's HD frames are drawn at, 0 x 0 without HD art.
+/// Resolves the type's HD atlas like DrawUnitType; cached per atlas.
+extern void GetHDUnitCanvas(const CUnitType &type, int &w, int &h);
 
 /// Classic view: draw a scaffold stage of the common land construction site from the classic art,
 /// its cell centred on `centre` (the footprint centre on screen). False when it cannot be drawn so.

@@ -174,6 +174,36 @@ constexpr int MissileFlightCycles(int speed, int tileSize, int major)
 	return perCycle > 0 ? (major + perCycle - 1) / perCycle : 0;
 }
 
+// The original makes the explosion (missile type 23) of a unit that dies in it (0x4D7BE8, 0x4D7C08)
+// and of a critter clicked to death (0x4B1333) 8 pixels of the classic 32 pixel tile above the
+// unit's centre (0x49B790: y = unit y + the type's centre offset - 8).
+
+/// Pixels above the unit's centre at which a unit's own explosion is made
+constexpr int UnitExplosionLift(int tileSize)
+{
+	return 8 * tileSize / 32;
+}
+
+// The fire over a burning building stands above the centre of its footprint by a height that
+// depends on the building's size, not one tile, and is the same in both views (5 cases, live runs
+// 58 and S2B): Farm 2 x 2 24 classic px (Remastered -72.3 px at 96 a tile; classic frame match
+// -24); Barracks 3 x 3 20 (Remastered -59.8 px); Town Hall 4 x 4 26 (classic o11_68 / o11_69 /
+// o11_71 -26; Remastered -75.8 px = 25.3, one weak match). Not measured: 1 x 1 (taken as 2 x 2)
+// and 5 x 5 or more (taken as 4 x 4); the 3 x 3 in the classic view.
+
+/// Classic pixels (of the 32 pixel tile) above the footprint centre of the fire of a burning
+/// building `tilesHigh` tiles high
+constexpr int BurningFlameLiftClassicPx(int tilesHigh)
+{
+	return tilesHigh <= 2 ? 24 : (tilesHigh == 3 ? 20 : 26);
+}
+
+/// The same in map pixels, for a tile of `tileSize` pixels
+constexpr int BurningFlameLift(int tilesHigh, int tileSize)
+{
+	return BurningFlameLiftClassicPx(tilesHigh) * tileSize / 32;
+}
+
 // The picture script of the Death and Decay missile: pictures 1 .. 7 with waits 3 2 3 2 3 2 3,
 // picture 0, the handler, wait 8, and again from picture 2. The handler is called on tick 18 and
 // then on every 24th tick; the missile ends with its 10th call. Each call makes one area hit.
@@ -204,6 +234,24 @@ constexpr int DeathAndDecayPictureOn(int tick, bool laterRound)
 	     : tick < 13 ? 5
 	     : tick < 15 ? 6
 	     : tick < 18 ? 7
+	     : 0;
+}
+
+// The cross shown where an order is given, as the original draws it: the whole X (picture 3) held
+// 6 cycles first, then cracked (2) 3, broken (1) 2, shattered (0) 1, 12 in all, then the missile is
+// gone. The script reads 0 1 2 3 2 1 0 held 1 1 1 6 1 1 1, but the original's screen shows no
+// build-up before the whole X; the screen is followed here.
+
+/// Cycles the order cross is shown
+constexpr int ClickCrossCycles = 12;
+
+/// Picture of the order cross on a tick of its life, counted from 0; -1 = gone
+constexpr int ClickCrossPictureOn(int tick)
+{
+	return tick < 0 || tick >= ClickCrossCycles ? -1
+	     : tick < 6 ? 3
+	     : tick < 9 ? 2
+	     : tick < 11 ? 1
 	     : 0;
 }
 

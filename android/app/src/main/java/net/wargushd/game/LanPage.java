@@ -48,7 +48,7 @@ import java.util.List;
  * result back through the handler. Everything is shut when the page is left or the shell pauses.
  */
 final class LanPage {
-    /** A stamp nobody computes yet. Every device sends this same word, so it never differs. */
+    /** The mod-set stamp, not computed (the hello's "gm" list compares the mods). Every device sends this same word. */
     static final String STAMP_NOT_COMPUTED = "not-computed";
 
     // Layout, logical units (design 38.10, L1 - L4 and L6).
@@ -119,6 +119,10 @@ final class LanPage {
     private LanSockets.Responder responder;
     private LanSockets.Client client;
     private LobbyPage lobby;
+    /** The computer players of the switched-on mods, read when a room is entered (bots mod). */
+    private ModStore.BotChoices bots = new ModStore.BotChoices();
+    /** The heroes of the game's scripts the computer seats are named after; read once. */
+    private List<BotNames.Hero> heroes;
     private RoomMapSheet mapSheet;
     /** True from the tap on Join Lobby or Create Game until the sockets stand or have failed. */
     private boolean connecting;
@@ -280,8 +284,14 @@ final class LanPage {
             } catch (Exception e) {
                 code = 0;
             }
-            // The content, game-data and mod stamps are not computed anywhere yet.
-            identity = new LanIdentity(code, STAMP_NOT_COMPUTED, STAMP_NOT_COMPUTED, STAMP_NOT_COMPUTED);
+            // NET-CONTENT-ID: the staged scripts and the game-folder files the simulation reads
+            // (LAN_ARCHITECTURE.md). Both are small (about a hundred scripts, three game files).
+            // The mods are compared by the hello's own list of gameplay mods ("gm").
+            final String folder = GateActivity.rememberedFolder(activity);
+            identity = new LanIdentity(code,
+                LanIdentity.contentStamp(new File(Provision.dataDir(activity), "scripts")),
+                LanIdentity.gameDataStamp(folder == null ? null : new File(folder)),
+                STAMP_NOT_COMPUTED);
         }
         return identity;
     }
@@ -486,6 +496,9 @@ final class LanPage {
         typedAddress = typed ? host : null;
         roomAddress = host;
         room = LanRoom.client(identity(), me(), deviceMaps);
+        // The gameplay mods of this device go into the hello; the host compares them before Ready.
+        bots = ModStore.botChoices(activity);
+        room.setGameplayMods(ModStore.lanGameplay(activity));
         pump();
     }
 
@@ -544,7 +557,11 @@ final class LanPage {
         final String id = "r" + Long.toHexString(System.currentTimeMillis())
             + Integer.toHexString((int) (Math.random() * 0x10000));
         room = LanRoom.host(id, identity(), me());
-        room.setSoloStart(soloStartAllowed());
+        // A computer seat may play a mod's computer player only while such a mod is on here.
+        bots = ModStore.botChoices(activity);
+        final List<String[]> gameplay = ModStore.lanGameplay(activity);
+        room.setGameplayMods(gameplay);
+        room.setBotsOffered(bots.any() && !gameplay.isEmpty());
         giveMap(map);
         room.hostSetSettings(settings.resources, settings.units, settings.tileset, settings.fog,
                              settings.reveal);
@@ -606,7 +623,10 @@ final class LanPage {
             return;
         }
         if (lobby == null) {
-            lobby = new LobbyPage(room);
+            if (heroes == null) {
+                heroes = BotNames.read(Provision.dataDir(activity));
+            }
+            lobby = new LobbyPage(room, bots, heroes);
             if (typedAddress != null) {
                 AddressSheet.remember(activity, typedAddress, s.seats[0].name);
             }
@@ -626,15 +646,6 @@ final class LanPage {
 
     // ----- the hand-over to the game -----
 
-    /**
-     * Preview only: where the files lan_preview and lan_solo_start are both in the app's files,
-     * the host may start with one person and at least one computer seat.
-     */
-    private boolean soloStartAllowed() {
-        final File files = activity.getFilesDir();
-        return new File(files, "lan_preview").exists() && new File(files, "lan_solo_start").exists();
-    }
-
     /** Host: Start Game with the gate met. The final table goes to everybody, then the game starts. */
     private void startAsHost() {
         final LanRoom.StartTable table =
@@ -651,6 +662,7 @@ final class LanPage {
 
     /** The room is closed and the game is started with the request made from its final table. */
     private void handOver(String fields, String engineName, String mode) {
+        writeBotNames((room != null) ? room.snapshot() : null);
         shut();
         final boolean begun = fields != null && engineName != null && starter != null
             && starter.startLanGame(fields, engineName);
@@ -659,6 +671,31 @@ final class LanPage {
             tell(kitWords("The game could not be started"), "");
             scan();
         }
+    }
+
+    /** The launcher's file beside the request: the computer seats' heroes, for the result window. */
+    static final String BOT_NAMES_FILE = "lan_bots.json";
+
+    /**
+     * Beside the request, for the result window in the game's process: each computer seat's
+     * colour (unique in a room, so it finds the row) with its hero's name and portrait slot.
+     * Written for every network game, an empty list where there is no computer.
+     */
+    private void writeBotNames(LanRoom.Snapshot s) {
+        final StringBuilder b = new StringBuilder("[");
+        if (s != null) {
+            final List<BotNames.Hero> list = (heroes != null) ? heroes : new ArrayList<BotNames.Hero>();
+            final BotNames.Hero[] of = LobbyPage.heroesOf(s, list);
+            for (int i = 0; i < of.length; ++i) {
+                if (of[i] != null) {
+                    b.append(b.length() > 1 ? "," : "").append("{\"color\":").append(s.seats[i].colour)
+                        .append(",\"name\":\"").append(of[i].botName()).append("\",\"slot\":").append(of[i].slot)
+                        .append('}');
+                }
+            }
+        }
+        b.append(']');
+        GameLaunch.writeText(new File(GameLaunch.launchDir(activity), BOT_NAMES_FILE), b.toString());
     }
 
     /** The room is over: back to the list of rooms, with the reason when there is one to tell. */
@@ -714,9 +751,13 @@ final class LanPage {
     /** True once the system keyboard was seen up for the message being typed. */
     private boolean keysSeen;
 
+    /** The characters at the end of the message that are the keyboard's composing text. */
+    private int composing;
+
     private void showKeyboard() {
         lobby.typing = true;
         keysSeen = false;
+        composing = 0;
         view.requestFocus();
         final InputMethodManager keys = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
         keys.restartInput(view);
@@ -734,6 +775,12 @@ final class LanPage {
     /** Send the typed message; the line stays open for the next one. */
     private void send() {
         final String text = lobby.takeMessage();
+        if (composing > 0) {
+            // The word the keyboard was still composing went out with the message: the
+            // keyboard is told to forget it, or it would type it again into the next one.
+            composing = 0;
+            ((InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE)).restartInput(view);
+        }
         if (!text.isEmpty() && room != null) {
             room.say(text);
             pump();
@@ -749,21 +796,60 @@ final class LanPage {
             | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
         out.imeOptions = EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI
             | EditorInfo.IME_FLAG_NO_FULLSCREEN;
-        // Text is taken as it is committed; nothing is kept for the keyboard to edit.
+        // The message is the keyboard's text, the cursor at its end. A keyboard that composes
+        // (swipe, a non-Latin script, one that ignores the no-suggestions hint) gets its
+        // composing word shown at the end of the message and replaced as it changes; without
+        // this the base connection kept that word to itself and sent it on as one key event
+        // the view does not take, so it was lost.
         return new BaseInputConnection(v, false) {
+            private void replaceComposing(CharSequence text) {
+                lobby.erase(composing);
+                final int had = lobby.message().length();
+                lobby.type(text);
+                composing = lobby.message().length() - had;
+            }
+
             @Override
             public boolean commitText(CharSequence text, int newCursorPosition) {
                 if (typing()) {
-                    lobby.type(text);
+                    replaceComposing(text);
+                    composing = 0;
                     view.invalidate();
                 }
                 return true;
             }
 
             @Override
+            public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                if (typing()) {
+                    replaceComposing(text);
+                    view.invalidate();
+                }
+                return true;
+            }
+
+            @Override
+            public boolean finishComposingText() {
+                composing = 0;
+                return true;
+            }
+
+            @Override
+            public CharSequence getTextBeforeCursor(int n, int flags) {
+                final String message = typing() ? lobby.message() : "";
+                return message.substring(Math.max(0, message.length() - Math.max(0, n)));
+            }
+
+            @Override
+            public CharSequence getTextAfterCursor(int n, int flags) {
+                return "";
+            }
+
+            @Override
             public boolean deleteSurroundingText(int before, int after) {
                 if (typing()) {
                     lobby.erase(before);
+                    composing = Math.max(0, composing - Math.max(0, before));
                     view.invalidate();
                 }
                 return true;

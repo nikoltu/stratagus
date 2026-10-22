@@ -56,6 +56,10 @@ public:
 
 	const CUnitPtr &GetReparableTarget() const { return ReparableTarget; }
 
+	/// A worker that starts to repair drops the load it carries, without credit (run 38, A5-load:
+	/// Stop, Attack, attack-move and Build keep the sack; Repair loses it).
+	static void DropLoad(CUnit &unit);
+
 private:
 	bool RepairUnit(const CUnit &unit, CUnit &goal);
 private:

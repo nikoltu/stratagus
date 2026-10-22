@@ -28,7 +28,10 @@
 #ifndef __LAUNCHRESULT_H__
 #define __LAUNCHRESULT_H__
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 /**
 **  A game started through a launch request reports its outcome in one file,
@@ -52,5 +55,79 @@ extern bool WriteLaunchLoading(const std::string &text);
 /// Length of the game that ended last, in game cycles. The cycle counter itself
 /// is cleared when a game ends, before a script regains control.
 extern unsigned long LastGameCycle;
+
+/**
+**  The launcher's map editor asks the engine for two things it cannot work out itself
+**  (scripts/launch.lua, modes "export" and "validate"):
+**
+**  export.json    the tables the engine plays by: every tile of each tileset with its
+**                 flags and terrains, every unit type with its footprint, domain and
+**                 the map flags it is kept off;
+**  validate.json  a map as the engine loaded it: the edges where two tiles do not meet
+**                 on the same terrain, and the units the loader had to put elsewhere.
+**
+**  Both are written like the result (whole file, fixed name, same directory). The
+**  scripts compose the outer record; the parts are made here.
+*/
+extern bool WriteLaunchExport(const std::string &text);
+extern bool WriteLaunchValidate(const std::string &text);
+
+/// The checksum of the loaded game scripts, eight hex digits: the export's content stamp.
+extern std::string EditorContentStamp();
+/// The tileset loaded last (LoadTileModels) as a JSON object.
+extern std::string EditorTilesetJson();
+/// Every unit type as a JSON array.
+extern std::string EditorUnitTypesJson();
+
+/// The loader's notes on units are taken from here until EditorCheckLoadedMap reads them.
+extern void EditorCheckBegin();
+/// The map now loaded, checked: a JSON object.
+extern std::string EditorCheckLoadedMap();
+
+/// The HD art preload at a new game's load (unit atlases, terrain and water; CreateGame).
+/// On unless a launch mode that never draws (export / validate) turns it off for its run;
+/// a loaded save is not gated.
+extern void SetHDArtPreload(bool on);
+extern bool HDArtPreloadOn();
+
+/// A unit the loader could not place where the map asks (CreateUnit), while a check is on.
+extern void EditorNoteUnitMoved(const std::string &ident, int player, int askedX, int askedY,
+                                int atX, int atY, bool lost);
+
+/// An edge between two tiles whose corners name different terrains: between (x, y) and
+/// (x + 1, y), or with `down` between (x, y) and (x, y + 1).
+struct EditorSeam
+{
+	int x = 0;
+	int y = 0;
+	bool down = false;
+};
+
+/// A unit that is not where the map put it.
+struct EditorMovedUnit
+{
+	std::string ident;
+	int player = 0;
+	int askedX = 0;
+	int askedY = 0;
+	int atX = 0;
+	int atY = 0;
+	bool lost = false;
+};
+
+/// The edges whose corners differ. `quads` holds one quad a tile (CTileset::getQuadFromTile,
+/// corners ab / cd as bytes 3 2 / 1 0), row by row; a tile whose `mixes` entry is false (a
+/// wall, a decorative or non-mixing field) is left out, as the engine editor leaves it out.
+extern std::vector<EditorSeam> FindTileSeams(int width, int height,
+                                             const std::vector<uint32_t> &quads,
+                                             const std::vector<bool> &mixes);
+
+/// The check's JSON object; each list holds at most `limit` entries, the counts all.
+extern std::string EditorCheckJson(const std::string &tileset, int width, int height,
+                                   const std::vector<EditorSeam> &seams,
+                                   const std::vector<EditorMovedUnit> &moved, size_t limit);
+
+/// Text as a JSON string, quotes included.
+extern std::string EditorJsonString(const std::string &text);
 
 #endif

@@ -30,6 +30,19 @@ final class MissionsPage {
     private static final int INK_ON_GOLD = 0xFF1E1608, INK_TITLE = 0xFF000000, INK_SUB = 0xFF100A02;
     private static final int INK_DISABLED = 0xFF9C9486, DIM = 0x96000000;
     private static final int ROW_SELECTED = 0x36F0D250, ROW_FAINT = 0x10FFFFFF, SEG_FAINT = 0x0EFFFFFF;
+    /** The notice in the foot row (owner's board 3B, 2026-10-18): text 40, a green tick before it. */
+    private static final float CAP_NOTICE = 40f, NOTICE_GAP = 40f;
+    private static final int INK_NOTICE = 0xFF9FE09F;
+    private static final float TICK_W = 72f;
+    private final android.graphics.Paint tickPaint = newTickPaint();
+
+    private static android.graphics.Paint newTickPaint() {
+        final android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(android.graphics.Paint.Style.STROKE);
+        p.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+        p.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+        return p;
+    }
 
     private CampaignPage.Campaign campaign;
     /** 0-based index of the selected mission. */
@@ -49,7 +62,7 @@ final class MissionsPage {
 
     /** The list has to be moved so that the selected row is seen (it may not fit the panel). */
     private boolean reveal;
-    /** A line shown in place of the campaign's caption after a session, or null. */
+    /** A line shown after a session in the foot row, between Previous and Start Game, or null. */
     String notice;
 
     /** The name a mission is listed by: "<roman>. <name>". */
@@ -156,8 +169,7 @@ final class MissionsPage {
         kit.textTop(c, kit.string(expansion ? "campaign_expansion" : "campaign_base",
                                   expansion ? "Expansion" : "Campaign"),
                     X0, 84f, CAP_TITLE, INK_TITLE, false);
-        kit.textTop(c, notice != null ? notice : kit.string(campaign.captionKey, ""), X0, 180f, CAP_SMALL,
-                    INK_SUB, false);
+        kit.textTop(c, kit.string(campaign.captionKey, ""), X0, 180f, CAP_SMALL, INK_SUB, false);
 
         // Left: the missions.
         final float b = bottom(kit);
@@ -218,6 +230,23 @@ final class MissionsPage {
             kit.nine(c, buttonPlain, startX(), ay, ACTION_W, ACTION_H, 14);
             kit.fill(c, startX(), ay, ACTION_W, ACTION_H, DIM, 0f);
             kit.textCentre(c, start, startX(), ay, ACTION_W, ACTION_H, CAP_BODY, INK_DISABLED, false);
+        }
+        // The notice between the two, made smaller when it is too long for the room (1440 on 16:10).
+        if (notice != null) {
+            final float nx = X0 + ACTION_W + NOTICE_GAP, room = startX() - NOTICE_GAP - nx;
+            if (room > TICK_W) {
+                // The tick is drawn, not a glyph: the game's face may not have one.
+                final float u = kit.unit, ty = ay + (ACTION_H - CAP_NOTICE) / 2f;
+                final android.graphics.Path tick = new android.graphics.Path();
+                tick.moveTo(nx * u, (ty + 0.55f * CAP_NOTICE) * u);
+                tick.lineTo((nx + 0.38f * CAP_NOTICE) * u, (ty + 0.95f * CAP_NOTICE) * u);
+                tick.lineTo((nx + CAP_NOTICE) * u, (ty + 0.05f * CAP_NOTICE) * u);
+                tickPaint.setColor(INK_NOTICE);
+                tickPaint.setStrokeWidth(7f * u);
+                c.drawPath(tick, tickPaint);
+                kit.textMiddle(c, kit.fitHeading(notice, CAP_NOTICE, room - TICK_W), nx + TICK_W, ay, ACTION_H,
+                               CAP_NOTICE, INK_NOTICE, true);
+            }
         }
     }
 

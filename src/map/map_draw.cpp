@@ -168,6 +168,72 @@ static void LoadClassicTileAtlas(const char *atlasName, const char *nativePrefix
 }
 
 /**
+**  Classic view: a megatile the map shows that has no cell in the classic atlas is drawn with its
+**  Remastered frame (or the old tile sheet); one log line per megatile while the same classic
+**  atlas is loaded. Megatiles below 16 (the fog numbers) are never classic cells and not reported.
+**  With the real files no megatile is missing (S0_NOTE.md: 0 of 356 / 363 / 357 / 368).
+*/
+static void ReportNoClassicCell(unsigned int tile)
+{
+	static const CAtlasGraphic *reportedFor = nullptr;
+	static std::vector<bool> reported;
+	if (tile < 16) {
+		return;
+	}
+	if (reportedFor != Map.ClassicTileAtlas.get()) {
+		reportedFor = Map.ClassicTileAtlas.get();
+		reported.clear();
+	}
+	if (tile >= reported.size()) {
+		reported.resize(tile + 1, false);
+	}
+	if (reported[tile]) {
+		return;
+	}
+	reported[tile] = true;
+	ErrorPrint("Classic terrain: megatile %u has no classic cell, it stays Remastered\n", tile);
+}
+
+/**
+**  The HD terrain atlases of a tileset image (tilesets/<dir>/terrain/<dir>.png). The era key differs from
+**  the tileset directory name: summer->forest, winter->iceland, wasteland->swamp, swamp->xswamp.
+**  NG-TERR1: classic "wasteland" == Remastered SWAMP (wasteland.lua CV4 groups match Oracle Swamp) and
+**  classic "swamp" == Remastered XSWAMP (megatile IDs run to 383, only classic_xswamp's 368 frames cover);
+**  the mapping used to be reversed. Unknown image -> all null.
+*/
+HDTerrainNames HDTerrainNamesFor(const std::string &img)
+{
+	if (img.find("summer") != std::string::npos) {
+		return {"Forest", "forest", "classic_forest", "Forest/forest", "forest"};
+	} else if (img.find("winter") != std::string::npos) {
+		return {"Ice", "iceland", "classic_ice", "Iceland/iceland", "iceland"};
+	} else if (img.find("wasteland") != std::string::npos) {
+		return {"Swamp", "swamp", "classic_swamp", "Swamp/swamp", "swamp"};
+	} else if (img.find("swamp") != std::string::npos) {
+		return {"XSwamp", "xswamp", "classic_xswamp", "XSwamp/xswamp", "xswamp"};
+	}
+	return {};
+}
+
+/**
+**  CLASSIC-SHEET-LOOKUPS (terrain): true when the player's game folder holds a native HD terrain atlas
+**  of this tileset (Data/Art/hd/bgs/bgs_<X>.json, or the classic-resolution Data/Art/hd/classic/
+**  classic_<x>.json EnsureHDTileAtlas falls back to). Then the terrain - in the Remastered view and in
+**  the F5 classic view (Map.ClassicTileAtlas) - is drawn from those atlases, never from the classic
+**  sheet tilesets/<dir>/terrain/<dir>.png, so CclDefineTileset makes that sheet's placeholder without a
+**  file search. Two lookups of files that exist; nothing is loaded.
+*/
+bool HDTerrainCoversTileset(const std::string &imageFile)
+{
+	const HDTerrainNames names = HDTerrainNamesFor(imageFile);
+	if (!names.bgsAtlas) {
+		return false;
+	}
+	return CanAccessFile(LibraryFileName(std::string("Data/Art/hd/bgs/bgs_") + names.bgsAtlas + ".json").c_str())
+	    || CanAccessFile(LibraryFileName(std::string("Data/Art/hd/classic/") + names.classicAtlas + ".json").c_str());
+}
+
+/**
 **  World HD (P1): lazily load the RAW Remastered terrain atlas for this map's tileset and precompute
 **  the megatile-index -> atlas-frame lookup used by the per-tile blit. The atlas is a .hdatlas (P0
 **  format) deployed beside the classic tileset image as tilesets/<dir>/terrain/<era>.hdatlas (its
@@ -195,6 +261,7 @@ static void EnsureHDTileAtlas()
 	Map.ClassicTileAtlasFrameForTile.clear();
 	Map.ClassicFogFrames.clear();
 	Map.ClassicFogDitherFrames.clear();
+	ReleaseHDWater();                      // the water masks belong to the previous tileset too
 
 	const std::string &img = Map.Tileset.ImageFile;
 	// WargusHD: prefer the NATIVE Remastered terrain atlas (Data/Art/hd/classic/classic_<x>.json,
@@ -208,22 +275,10 @@ static void EnsureHDTileAtlas()
 	// at classic 32px. Prefer bgs_* (Remastered), fall back to classic_* then to a legacy .hdatlas.
 	const char *bgsAtlas = nullptr;     // Data/Art/hd/bgs/bgs_<X>.json (Forest/Ice/Swamp/XSwamp)
 	const char *bgsPrefix = nullptr;    // bare frame prefix (forest/iceland/swamp/xswamp)
-	if (img.find("summer") != std::string::npos) {
-		bgsAtlas = "Forest"; bgsPrefix = "forest";
-		atlasName = "classic_forest"; nativePrefix = "Forest/forest"; era = "forest";
-	} else if (img.find("winter") != std::string::npos) {
-		bgsAtlas = "Ice"; bgsPrefix = "iceland";
-		atlasName = "classic_ice"; nativePrefix = "Iceland/iceland"; era = "iceland";
-	} else if (img.find("wasteland") != std::string::npos) {
-		// NG-TERR1: classic "wasteland" tileset == Remastered SWAMP atlas (verified: wasteland.lua CV4
-		// groups match Oracle Swamp). The mapping used to be reversed, drawing wrong-era terrain.
-		bgsAtlas = "Swamp"; bgsPrefix = "swamp";
-		atlasName = "classic_swamp"; nativePrefix = "Swamp/swamp"; era = "swamp";
-	} else if (img.find("swamp") != std::string::npos) {
-		// NG-TERR1: classic "swamp" tileset == Remastered XSWAMP atlas (swamp.lua CV4 groups match Oracle
-		// XSwamp; megatile IDs run to 383 which only classic_xswamp's 368 frames cover).
-		bgsAtlas = "XSwamp"; bgsPrefix = "xswamp";
-		atlasName = "classic_xswamp"; nativePrefix = "XSwamp/xswamp"; era = "xswamp";
+	{
+		const HDTerrainNames names = HDTerrainNamesFor(img);
+		bgsAtlas = names.bgsAtlas; bgsPrefix = names.bgsPrefix;
+		atlasName = names.classicAtlas; nativePrefix = names.classicPrefix; era = names.era;
 	}
 	if (!atlasName) {
 		return;
@@ -234,9 +289,11 @@ static void EnsureHDTileAtlas()
 
 	auto atlas = std::make_shared<CAtlasGraphic>();
 	std::string prefix;
+	bool bgsTerrain = false; // the water masks match the bgs_* frames only
 	if (bgsAtlas
 		&& atlas->LoadTexturePacker(std::string("Data/Art/hd/bgs/bgs_") + bgsAtlas + ".json")) {
 		prefix = bgsPrefix; // TRUE HD terrain (216px)
+		bgsTerrain = true;
 	} else if (atlas->LoadTexturePacker(std::string("Data/Art/hd/classic/") + atlasName + ".json")) {
 		prefix = nativePrefix; // classic-resolution native atlas (32px)
 	} else {
@@ -268,6 +325,30 @@ static void EnsureHDTileAtlas()
 		name += std::to_string(m - 16);
 		Map.HDTileAtlasFrameForTile[m] = Map.HDTileAtlas->FrameByName(name.c_str());
 	}
+	// Animated water (owner decision 87, work/WATER_ANIM.md): bgs_water_<X> of the same tileset, from
+	// the player's game folder. Missing files: nothing is loaded and the water stays static.
+	if (bgsTerrain) {
+		LoadHDWater(bgsAtlas, bgsPrefix, count);
+	}
+}
+
+/**
+**  STALL-HUNT (work/STALL_HUNT.md): the terrain atlas (bgs_<X>, ~1.1 s decode on the S8U), the
+**  classic tile atlas and the animated water were loaded by the first DrawMapBackgroundInViewport,
+**  i.e. in the first frame of play (logged "in-game 1" after a loaded save). Called at load time,
+**  behind the loading screen, after the map's tileset is known; the first draw then finds the
+**  latch set for the same ImageFile and loads nothing. Without a renderer (dedicated server,
+**  dummy video) there is nothing to load.
+*/
+void PreloadHDTerrainForMap()
+{
+	if (!TheRenderer || Map.Tileset.ImageFile.empty()) {
+		return;
+	}
+	const unsigned long start = GetTicks();
+	EnsureHDTileAtlas();
+	ErrorPrint("HD terrain preload: '%s' %s, %lu ms\n", Map.Tileset.ImageFile.c_str(),
+	           Map.HDTileAtlas ? "loaded" : "not loaded", GetTicks() - start);
 }
 
 CViewport::~CViewport()
@@ -597,6 +678,14 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 	// Classic view: read once per pass. Off, or no classic tiles loaded -> the HD choice below stands.
 	const bool classicTiles = IsClassicView() && Map.ClassicTileAtlas;
 
+	// Animated water (owner decision 87, work/WATER_ANIM.md): the water megatiles drawn in this pass
+	// are collected and get the water layer after the tile loop, before units and fog. Only on the
+	// GPU terrain paths (not the crisp-zoom pass, not the CPU offscreen) and not in the classic view.
+	static std::vector<HDWaterTile> waterTiles;
+	waterTiles.clear();
+	const bool waterLayer = Preference.AnimatedWater && GpuWorldDrawActive && drawZoom == 1.0f
+	                        && !classicTiles && HDWaterLoaded();
+
 	while (dy <= ey && sy < map_max) {
 		int sx = this->MapPos.x + sy;
 		int dx = this->TopLeftPos.x - this->Offset.x;
@@ -630,11 +719,16 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 			const CAtlasGraphic *tileAtlas = Map.HDTileAtlas.get();
 			int hdFrame = (tileAtlas && tile < Map.HDTileAtlasFrameForTile.size())
 							  ? Map.HDTileAtlasFrameForTile[tile] : -1;
-			// Classic view: the classic cell of the same megatile; a megatile without one keeps the HD frame.
-			if (classicTiles && tile < Map.ClassicTileAtlasFrameForTile.size()
-				&& Map.ClassicTileAtlasFrameForTile[tile] >= 0) {
-				tileAtlas = Map.ClassicTileAtlas.get();
-				hdFrame = Map.ClassicTileAtlasFrameForTile[tile];
+			// Classic view: the classic cell of the same megatile; a megatile without one keeps the HD frame
+			// (logged once per megatile and map).
+			if (classicTiles) {
+				if (tile < Map.ClassicTileAtlasFrameForTile.size()
+					&& Map.ClassicTileAtlasFrameForTile[tile] >= 0) {
+					tileAtlas = Map.ClassicTileAtlas.get();
+					hdFrame = Map.ClassicTileAtlasFrameForTile[tile];
+				} else {
+					ReportNoClassicCell(tile);
+				}
 			}
 			if (drawZoom != 1.0f) {
 				// Crisp-zoom terrain: dx/dy are LOGICAL positions (this pass runs with
@@ -675,6 +769,12 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				const SDL_Rect dst = { zx, zy, zx1 - zx, zy1 - zy };
 				if (hdFrame >= 0) {
 					tileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+					if (waterLayer) {
+						const int wf = HDWaterFrame(tile);
+						if (wf >= 0) {
+							waterTiles.push_back({wf, dst});
+						}
+					}
 				} else {
 					Map.TileGraphic->DrawFrameClipTexDst(tile, dst);
 				}
@@ -682,6 +782,12 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 				if (hdFrame >= 0) {
 					const SDL_Rect dst = { dx, dy, graphicTileSize.x, graphicTileSize.y };
 					tileAtlas->DrawAtlasFrameFull(hdFrame, dst);
+					if (waterLayer) {
+						const int wf = HDWaterFrame(tile);
+						if (wf >= 0) {
+							waterTiles.push_back({wf, dst});
+						}
+					}
 				} else {
 					Map.TileGraphic->DrawFrameClip(tile, dx, dy);
 				}
@@ -722,6 +828,15 @@ void CViewport::DrawMapBackgroundInViewport(const fieldHighlightChecker highligh
 			sy += logicalMapW;
 		}
 		dy += graphicTileSize.y;
+	}
+	if (waterLayer && !waterTiles.empty()) {
+		// Where map pixel 0,0 lands and the on-screen megatile size, in the same coordinates as
+		// the tile rects above (the zoomed GPU path scales about TopLeftPos, as the tiles do).
+		const float lx0 = float(this->TopLeftPos.x - this->Offset.x - this->MapPos.x * PixelTileSize.x);
+		const float ly0 = float(this->TopLeftPos.y - this->Offset.y - this->MapPos.y * PixelTileSize.y);
+		const float z = gpuZoomTiles ? this->Zoom : 1.0f;
+		DrawHDWaterLayer(waterTiles, this->TopLeftPos.x + (lx0 - this->TopLeftPos.x) * z,
+		                 this->TopLeftPos.y + (ly0 - this->TopLeftPos.y) * z, graphicTileSize.x * z);
 	}
 	GpuWorldDrawActive = prevGpuWorld;
 	GpuWorldDrawZoom = prevGpuZoom;

@@ -359,7 +359,10 @@ static void HandleBuffsEachCycle(CUnit &unit)
 		}
 	}
 
-	const int SpellEffects[] = {BLOODLUST_INDEX, HASTE_INDEX, SLOW_INDEX, INVISIBLE_INDEX, UNHOLYARMOR_INDEX, POISON_INDEX};
+	// FLAMESHIELD_INDEX: the original's per-unit Flame Shield word [unit+0x4E], counted down by 1 for
+	// every living unit each cycle (0x4D8BE0); a new shield needs it at 0 (0x4CBA6F).
+	const int SpellEffects[] = {BLOODLUST_INDEX, HASTE_INDEX, SLOW_INDEX, INVISIBLE_INDEX, UNHOLYARMOR_INDEX, POISON_INDEX,
+	                            FLAMESHIELD_INDEX};
 	//  decrease spells effects time.
 	for (int index : SpellEffects) {
 		unit.Variable[index].Increase = -1;
@@ -402,7 +405,7 @@ static void HandleBuffsEachSecond(CUnit &unit)
 	// User defined variables
 	for (unsigned int i = 0; i < UnitTypeVar.GetNumberVariable(); i++) {
 		if (i == BLOODLUST_INDEX || i == HASTE_INDEX || i == SLOW_INDEX
-			|| i == INVISIBLE_INDEX || i == UNHOLYARMOR_INDEX || i == POISON_INDEX) {
+			|| i == INVISIBLE_INDEX || i == UNHOLYARMOR_INDEX || i == POISON_INDEX || i == FLAMESHIELD_INDEX) {
 			continue;
 		}
 		if (i == HP_INDEX && HandleBurnAndPoison(unit)) {
@@ -413,6 +416,18 @@ static void HandleBuffsEachSecond(CUnit &unit)
 				(freq == 0 || freq == 1 || (GameCycle / CYCLES_PER_SECOND % freq) == 0)) {
 			IncreaseVariable(unit, i);
 		}
+	}
+}
+
+/**
+**  The current order of a unit is about to be taken off it (ended, or replaced by a new order).
+**
+**  @param unit  the unit.
+*/
+static void OrderTakenOff(CUnit &unit)
+{
+	if (unit.CurrentAction() == UnitAction::Resource) {
+		static_cast<COrder_Resource *>(unit.CurrentOrder())->Interrupt(unit);
 	}
 }
 
@@ -432,6 +447,8 @@ static void HandleUnitAction(CUnit &unit)
 
 		if (unit.Orders[0]->Finished && unit.Orders[0]->Action != UnitAction::Still
 			&& unit.Orders.size() == 1) {
+
+			OrderTakenOff(unit);
 
 			unit.Orders[0] = COrder::NewActionStill();
 			if (IsOnlySelected(unit)) { // update display for new action
@@ -456,6 +473,7 @@ static void HandleUnitAction(CUnit &unit)
 				}
 			}
 
+			OrderTakenOff(unit);
 			unit.Orders.erase(unit.Orders.begin());
 
 			unit.Wait = 0;
@@ -705,6 +723,81 @@ static void DumpUnitInfo(const CUnit &unit)
 	fflush(nullptr);
 }
 
+SyncUnitState SyncUnitStateOf(const CUnit &unit)
+{
+	SyncUnitState state;
+	state.refs = unit.Refs;
+	state.tileX = unit.tilePos.x;
+	state.tileY = unit.tilePos.y;
+	if (unit.Variable.size() > HP_INDEX) {
+		state.hp = unit.Variable[HP_INDEX].Value;
+	}
+	if (unit.Orders.empty()) {
+		return state;
+	}
+	const COrder &order = *unit.Orders[0];
+	state.hasOrder = true;
+	state.action = static_cast<int>(order.Action);
+	const Vec2i goalPos = order.GetGoalPos();
+	state.goalX = goalPos.x;
+	state.goalY = goalPos.y;
+	if (const CUnit *goal = order.GetGoal()) {
+		state.goalSlot = UnitNumber(*goal);
+	}
+	switch (order.Action) {
+		case UnitAction::Move: {
+			const auto &move = static_cast<const COrder_Move &>(order);
+			state.range = move.GetRange();
+			state.goalPulled = move.GetGoalPulled();
+			break;
+		}
+		case UnitAction::Attack:
+		case UnitAction::AttackGround: {
+			const auto &attack = static_cast<const COrder_Attack &>(order);
+			state.range = attack.GetRange();
+			state.pointX = attack.GetAttackMovePos().x;
+			state.pointY = attack.GetAttackMovePos().y;
+			state.goalPulled = attack.GetGoalPulled();
+			break;
+		}
+		case UnitAction::Patrol: {
+			const auto &patrol = static_cast<const COrder_Patrol &>(order);
+			state.range = patrol.GetRange();
+			state.pointX = patrol.GetWayPoint().x;
+			state.pointY = patrol.GetWayPoint().y;
+			state.goalPulled = patrol.GetGoalPulled();
+			break;
+		}
+		default:
+			break;
+	}
+	return state;
+}
+
+unsigned SyncHashMixUnit(unsigned hash, const SyncUnitState &state)
+{
+	// The engine's terms first (rotate, current action, reference count).
+	hash = (hash << 5) | (hash >> 27);
+	hash ^= state.hasOrder ? static_cast<unsigned>(state.action) << 18 : 0u;
+	hash ^= static_cast<unsigned>(state.refs) << 3;
+	// Then each further field as a 32-bit word, in this fixed order: xor, then multiply by an odd
+	// constant (FNV-1a step). Both are bijections of the running hash.
+	const int words[] = {state.tileX,
+	                     state.tileY,
+	                     state.hp,
+	                     state.goalX,
+	                     state.goalY,
+	                     state.goalSlot,
+	                     state.range,
+	                     state.pointX,
+	                     state.pointY,
+	                     state.goalPulled};
+	for (const int word : words) {
+		hash = (hash ^ static_cast<unsigned>(word)) * 16777619u;
+	}
+	return hash;
+}
+
 static void UnitActionsEachCycle(const std::vector<CUnit *> &units)
 {
 	for (auto *unitPtr : units) {
@@ -744,12 +837,8 @@ static void UnitActionsEachCycle(const std::vector<CUnit *> &units)
 		const char *currentAction =
 			unit.Orders.empty() ? "No Orders" : toCStr(unit.CurrentAction());
 
-		// Calculate some hash.
-		SyncHash = (SyncHash << 5) | (SyncHash >> 27);
-		SyncHash ^= unit.Orders.empty() == false
-		              ? static_cast<std::underlying_type_t<UnitAction>>(unit.CurrentAction()) << 18
-		              : 0;
-		SyncHash ^= unit.Refs << 3;
+		// Mix the unit's state into the sync hash.
+		SyncHash = SyncHashMixUnit(SyncHash, SyncUnitStateOf(unit));
 		RecordSyncDebugUnit(unit, currentAction, SyncHash);
 
 		if (EnableUnitDebug) {

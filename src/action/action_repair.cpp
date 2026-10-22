@@ -238,6 +238,12 @@ static void AnimateActionRepair(CUnit &unit)
 	UnitShowAnimation(unit, &unit.Type->Animations->Repair);
 }
 
+/* static */ void COrder_Repair::DropLoad(CUnit &unit)
+{
+	unit.ResourcesHeld = 0;
+	unit.CurrentResource = 0;
+}
+
 void COrder_Repair::Execute(CUnit &unit) /* override */
 {
 	Assert(this->ReparableTarget == this->GetGoal());
@@ -270,6 +276,8 @@ void COrder_Repair::Execute(CUnit &unit) /* override */
 					&& goal->Variable[HP_INDEX].Value < goal->Variable[HP_INDEX].Max) {
 					this->State = 2;
 					this->RepairCycle = 0;
+					// seen on the original (run 38, A5-load): the worker hammers without the sack.
+					DropLoad(unit);
 					const Vec2i dir = goal->tilePos + goal->Type->GetHalfTileSize() - unit.tilePos;
 					UnitHeadingFromDeltaXY(unit, dir);
 				} else if (err < 0) {

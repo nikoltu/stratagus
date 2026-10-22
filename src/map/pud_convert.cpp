@@ -35,6 +35,8 @@
 #include <limits.h>
 #include <zlib.h>
 
+#include <algorithm>
+
 #include "wargus_endian.h"
 #include "pud.h"
 
@@ -132,6 +134,7 @@ const char *UnitScriptNames[] = {
 	"unit-runestone",
 	"unit-human-wall", "unit-orc-wall"
 };
+static const size_t UnitScriptNameCount = sizeof(UnitScriptNames) / sizeof(UnitScriptNames[0]);
 
 const char *AiTypeNames[] = {
 	"wc2-land-attack",
@@ -267,7 +270,19 @@ void PudData::BuildPresentation(std::string &out) const
 	strcpy(&buf[strlen(buf) - 1], ")\n");
 	out += buf;
 
-	AppendLine(out, "PresentMap(\"%s\", %d, %d, %d, %d)\n", pdata.Description,
+	// The description is the map's own text: a quote or backslash in it must not end the Lua string.
+	std::string description;
+	for (const char *c = pdata.Description; *c; ++c) {
+		if (*c == '"' || *c == '\\') {
+			description += '\\';
+			description += *c;
+		} else if (*c == '\n' || *c == '\r') {
+			description += ' ';
+		} else {
+			description += *c;
+		}
+	}
+	AppendLine(out, "PresentMap(\"%s\", %d, %d, %d, %d)\n", description.c_str(),
 		playerCount, pdata.MapSizeX, pdata.MapSizeY, 1);
 }
 
@@ -314,7 +329,8 @@ void PudData::BuildSetup(std::string &out) const
 			|| pdata.Units[i].Type == UnitOrcStart) {
 			continue;
 		}
-		if (strlen(UnitScriptNames[pdata.Units[i].Type]) <= 1) {
+		if (pdata.Units[i].Type < 0 || static_cast<size_t>(pdata.Units[i].Type) >= UnitScriptNameCount
+			|| strlen(UnitScriptNames[pdata.Units[i].Type]) <= 1) {
 			fprintf(stderr, "Skipping unknown unit type %d for player %d at [%d, %d]\n", pdata.Units[i].Type, pdata.Units[i].Player, pdata.Units[i].X, pdata.Units[i].Y);
 			continue;
 		}
@@ -331,50 +347,96 @@ void PudData::BuildSetup(std::string &out) const
 	}
 }
 
-static int PudReadHeader(const unsigned char *puddata, char *header, int *len)
-{
-	unsigned int tmp;
-
-	memcpy(header, puddata, 4);
-	header[4] = '\0';
-	memcpy(&tmp, puddata + 4, 4);
-	*len = ConvertLE32(tmp);
-	return 8;
-}
-
+// Parse a .PUD held in memory. Every read stays inside [puddata, puddata + size), and every byte that
+// later indexes a fixed table (owner type, side, tileset, unit type, a start location's owner) is
+// checked: a map that would index outside them is refused (false) instead of crashing the engine at
+// load; the caller reports the map as unreadable. The shipped maps stay inside every range (audit
+// EA-216). A declared chunk length that runs past the end of the file is cut to the bytes present,
+// as the earlier reader effectively did, so a map it accepted is still accepted.
 bool PudData::Parse(const unsigned char *puddata, size_t size)
 {
-	const unsigned char *curp = puddata;
 	PudData &pdata = *this;
 	char header[5];
-	int len;
-	curp += PudReadHeader(curp, header, &len);
-	if (strcmp(header, "TYPE")) {
+	unsigned int tmp;
+	size_t pos = 0;
+
+	// Reads one chunk header at `pos`; false when fewer than 8 bytes are left.
+	auto readHeader = [&](size_t &len) {
+		if (size - pos < 8) {
+			return false;
+		}
+		memcpy(header, puddata + pos, 4);
+		header[4] = '\0';
+		memcpy(&tmp, puddata + pos + 4, 4);
+		len = ConvertLE32(tmp);
+		pos += 8;
+		return true;
+	};
+
+	size_t len = 0;
+	if (puddata == nullptr || !readHeader(len) || strcmp(header, "TYPE")) {
 		return false;
 	}
-
-	if (strcmp(reinterpret_cast<const char *>(curp), "WAR2 MAP")) {
+	// "WAR2 MAP" and its terminator.
+	if (size - pos < 9 || memcmp(puddata + pos, "WAR2 MAP", 9) != 0) {
 		return false;
 	}
-	curp += len;
+	pos += std::min(len, size - pos);
 
-	while (curp < puddata + size) {
-		curp += PudReadHeader(curp, header, &len);
+	while (pos < size) {
+		if (!readHeader(len)) {
+			fprintf(stderr, "PUD: truncated chunk header at byte %u\n", static_cast<unsigned>(pos));
+			return false;
+		}
+		const unsigned char *curp = puddata + pos;
+		const size_t avail = size - pos;
+		// The bytes a chunk reader needs must be in the file (they may run into the next chunk, as
+		// with the earlier reader, but never past the end).
+		auto need = [&](size_t n) {
+			if (n > avail) {
+				fprintf(stderr, "PUD: chunk %s needs %u bytes, %u left\n", header,
+						static_cast<unsigned>(n), static_cast<unsigned>(avail));
+				return false;
+			}
+			return true;
+		};
 		if (!strcmp(header, "VER ")) {
 			// nothing useful here, skip it
 		} else if (!strcmp(header, "DESC")) {
-			if (curp[0] != '\0') {
-				strcpy(pdata.Description, (const char *)curp);
-			} else {
+			const size_t n = std::min({avail, std::min(len, avail), sizeof(pdata.Description) - 1});
+			size_t k = 0;
+			while (k < n && curp[k] != '\0') {
+				pdata.Description[k] = static_cast<char>(curp[k]);
+				++k;
+			}
+			pdata.Description[k] = '\0';
+			if (k == 0) {
 				strcpy(pdata.Description, "(unnamed)");
 			}
 		} else if (!strcmp(header, "OWNR")) {
+			if (!need(PLAYERMAX)) {
+				return false;
+			}
 			for (int i = 0; i < PLAYERMAX; ++i) {
+				if (curp[i] > PlayerRescueActive) {
+					fprintf(stderr, "PUD: owner type %d of slot %d is out of range\n", curp[i], i);
+					return false;
+				}
 				pdata.Players[i] = (enum PlayerTypes)curp[i];
 			}
 		} else if (!strcmp(header, "ERA ") || !strcmp(header, "ERAX")) {
+			if (!need(1)) {
+				return false;
+			}
+			if (curp[0] > TilesetSwamp) {
+				fprintf(stderr, "PUD: tileset %d is out of range\n", curp[0]);
+				return false;
+			}
 			pdata.Tileset = (enum TilesetTypes)curp[0];
 		} else if (!strcmp(header, "DIM ")) {
+			if (!need(4)) {
+				return false;
+			}
 			pdata.MapSizeX = curp[0] | (curp[1] << 8);
 			pdata.MapSizeY = curp[2] | (curp[3] << 8);
 		} else if (!strcmp(header, "UDTA")) {
@@ -384,41 +446,70 @@ bool PudData::Parse(const unsigned char *puddata, size_t size)
 		} else if (!strcmp(header, "UGRD")) {
 			// FIXME: todo
 		} else if (!strcmp(header, "SIDE")) {
+			if (!need(PLAYERMAX)) {
+				return false;
+			}
 			for (int i = 0; i < PLAYERMAX; ++i) {
+				if (curp[i] > RaceNeutral) {
+					fprintf(stderr, "PUD: side %d of slot %d is out of range\n", curp[i], i);
+					return false;
+				}
 				pdata.Races[i] = (enum RaceTypes)curp[i];
 			}
 		} else if (!strcmp(header, "SGLD")) {
+			if (!need(PLAYERMAX * 2)) {
+				return false;
+			}
 			for (int i = 0; i < PLAYERMAX; ++i) {
 				pdata.StartGold[i] = curp[i * 2] | (curp[i * 2 + 1] << 8);
 			}
 		} else if (!strcmp(header, "SLBR")) {
+			if (!need(PLAYERMAX * 2)) {
+				return false;
+			}
 			for (int i = 0; i < PLAYERMAX; ++i) {
 				pdata.StartLumber[i] = curp[i * 2] | (curp[i * 2 + 1] << 8);
 			}
 		} else if (!strcmp(header, "SOIL")) {
+			if (!need(PLAYERMAX * 2)) {
+				return false;
+			}
 			for (int i = 0; i < PLAYERMAX; ++i) {
 				pdata.StartOil[i] = curp[i * 2] | (curp[i * 2 + 1] << 8);
 			}
 		} else if (!strcmp(header, "AIPL")) {
+			if (!need(PLAYERMAX)) {
+				return false;
+			}
+			// Any byte is kept: BuildSetup clamps it to the name table when it is used.
 			for (int i = 0; i < PLAYERMAX; ++i) {
 				pdata.AiType[i] = curp[i];
 			}
 		} else if (!strcmp(header, "MTXM")) {
-			pdata.Tiles.resize(pdata.MapSizeX * pdata.MapSizeY);
-			pdata.Value.resize(pdata.MapSizeX * pdata.MapSizeY, 0);
+			const size_t cells = static_cast<size_t>(pdata.MapSizeX) * pdata.MapSizeY;
+			if (cells == 0) {
+				fprintf(stderr, "PUD: MTXM before a map size\n");
+				return false;
+			}
+			if (!need(cells * 2)) {
+				return false;
+			}
+			pdata.Tiles.assign(cells, 0);
+			pdata.Value.assign(cells, 0);
 
 			for (int j = 0; j < pdata.MapSizeY; ++j) {
 				for (int i = 0; i < pdata.MapSizeX; ++i) {
-					int v = curp[j * pdata.MapSizeX * 2 + i * 2] | (curp[j * pdata.MapSizeX * 2 + i * 2 + 1] << 8);
-					pdata.Tiles[j * pdata.MapSizeX + i] = v;
+					const size_t at = static_cast<size_t>(j) * pdata.MapSizeX + i;
+					int v = curp[at * 2] | (curp[at * 2 + 1] << 8);
+					pdata.Tiles[at] = v;
 					if ((v & 0xFFF0) == 0x00A0 || (v & 0xFFF0) == 0x00C0 || (v & 0xFF00) == 0x0900) {
 						// orc wall
-						pdata.Value[j * pdata.MapSizeX + i] = 40;
+						pdata.Value[at] = 40;
 					} else if ((v & 0x00F0) == 0x0090 || (v & 0xFFF0) == 0x00B0 || (v & 0xFF00) == 0x0800) {
 						// human wall
-						pdata.Value[j * pdata.MapSizeX + i] = 40;
+						pdata.Value[at] = 40;
 					} else {
-						pdata.Value[j * pdata.MapSizeX + i] = 0;
+						pdata.Value[at] = 0;
 					}
 				}
 			}
@@ -427,7 +518,7 @@ bool PudData::Parse(const unsigned char *puddata, size_t size)
 		} else if (!strcmp(header, "REGM")) { // action map
 		} else if (!strcmp(header, "SIGN")) {
 		} else if (!strcmp(header, "UNIT")) {
-			pdata.Units.resize(len / 8);
+			pdata.Units.resize(std::min(len, avail) / 8);
 
 			for (size_t i = 0; i < pdata.Units.size(); ++i) {
 				pdata.Units[i].X = curp[i * 8] | (curp[i * 8 + 1] << 8);
@@ -436,16 +527,28 @@ bool PudData::Parse(const unsigned char *puddata, size_t size)
 				pdata.Units[i].Player = curp[i * 8 + 5];
 				pdata.Units[i].Data = curp[i * 8 + 6] | (curp[i * 8 + 7] << 8);
 
+				if (pdata.Units[i].Player >= PLAYERMAX) {
+					fprintf(stderr, "PUD: unit %u has owner %d, out of range\n",
+							static_cast<unsigned>(i), pdata.Units[i].Player);
+					return false;
+				}
 				if (pdata.Units[i].Type == UnitHumanStart || pdata.Units[i].Type == UnitOrcStart) {
 					pdata.StartX[pdata.Units[i].Player] = pdata.Units[i].X;
 					pdata.StartY[pdata.Units[i].Player] = pdata.Units[i].Y;
 				}
 			}
 		} else {
-			printf("unknown section: %s, %d\n", header, len);
+			printf("unknown section: %s, %u\n", header, static_cast<unsigned>(len));
 			return false;
 		}
-		curp += len;
+		pos += std::min(len, avail);
+	}
+	// The setup reads one tile word per cell of the map size.
+	const size_t cells = static_cast<size_t>(pdata.MapSizeX) * pdata.MapSizeY;
+	if (pdata.Tiles.size() != cells) {
+		fprintf(stderr, "PUD: %u tiles for a %d x %d map\n", static_cast<unsigned>(pdata.Tiles.size()),
+				pdata.MapSizeX, pdata.MapSizeY);
+		return false;
 	}
 	return true;
 }

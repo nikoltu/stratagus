@@ -20,6 +20,11 @@ public final class MapModel {
     /** The slot that owns gold mines, oil patches and critters. */
     public static final int NEUTRAL_SLOT = 15;
     public static final int OWNER_NEUTRAL = 2, OWNER_NOBODY = 3, OWNER_COMPUTER = 4, OWNER_PERSON = 5;
+    /**
+     * The rescue kinds of a slot (engine: rescue-passive / rescue-active). Both join the person whose
+     * unit reaches them; 7 also runs the computer's AI against the computers (owner decision 93, 1A).
+     */
+    public static final int OWNER_RESCUE_WAITS = 6, OWNER_RESCUE_FIGHTS = 7;
     public static final int RACE_HUMAN = 0, RACE_ORC = 1, RACE_NEUTRAL = 2;
     /** A gold mine or an oil patch stores its amount in units of this size. */
     public static final int RESOURCE_UNIT = 2500;

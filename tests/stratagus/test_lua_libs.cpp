@@ -137,3 +137,58 @@ TEST_CASE("lua libs: text is compiled by the C API only")
 	CHECK(lua_tointeger(Lua, -1) == 42);
 	lua_pop(Lua, 1);
 }
+
+// A copy of RM_Upper from the device scripts (scripts/guichan.lua, M3): it is run here so that the
+// byte ranges of its pattern and its arithmetic are proven in the engine's own Lua.
+static const char *RMUpperSource = R"lua(
+local function rm_upper2(c1, c2)
+  local cp = (c1:byte() - 192) * 64 + (c2:byte() - 128)
+  local up = cp
+  if cp >= 0xE0 and cp <= 0xFE and cp ~= 0xF7 then up = cp - 0x20
+  elseif cp == 0xFF then up = 0x178
+  elseif ((cp >= 0x100 and cp <= 0x137) or (cp >= 0x14A and cp <= 0x177)) and cp ~= 0x131 then
+    if cp % 2 == 1 then up = cp - 1 end
+  elseif (cp >= 0x139 and cp <= 0x148) or (cp >= 0x179 and cp <= 0x17E) then
+    if cp % 2 == 0 then up = cp - 1 end
+  end
+  if up == cp then return c1 .. c2 end
+  return string.char(192 + math.floor(up / 64), 128 + up % 64)
+end
+function RM_Upper(s)
+  s = string.upper(s)
+  return (string.gsub(s, "([\195-\197])([\128-\191])", rm_upper2))
+end
+function RM_TitleCase(s)
+  return (string.gsub(s, "([%a\194-\244][\128-\191]*)([%w\128-\244]*)",
+    function(a, b) return RM_Upper(a) .. b end))
+end
+)lua";
+
+TEST_CASE("lua libs: RM_Upper capitalises the Lithuanian letters")
+{
+	LuaState state;
+
+	REQUIRE(CclCommand(RMUpperSource, false) == 0);
+	// "Stromgardo žlugimas" -> "STROMGARDO ŽLUGIMAS"
+	CHECK(Eval("RM_Upper('II. Stromgardo \xc5\xbelugimas')") == "II. STROMGARDO \xc5\xbdLUGIMAS");
+	// ą č ę ė į š ų ū ž -> Ą Č Ę Ė Į Š Ų Ū Ž
+	CHECK(Eval("RM_Upper('\xc4\x85\xc4\x8d\xc4\x99\xc4\x97\xc4\xaf\xc5\xa1\xc5\xb3\xc5\xab\xc5\xbe')")
+	      == "\xc4\x84\xc4\x8c\xc4\x98\xc4\x96\xc4\xae\xc5\xa0\xc5\xb2\xc5\xaa\xc5\xbd");
+	// capitals stay; Latin-1 é ü ÿ; ı and ĸ have no capital of their own
+	CHECK(Eval("RM_Upper('\xc4\x84\xc5\xbd')") == "\xc4\x84\xc5\xbd");
+	CHECK(Eval("RM_Upper('\xc3\xa9\xc3\xbc\xc3\xbf')") == "\xc3\x89\xc3\x9c\xc5\xb8");
+	CHECK(Eval("RM_Upper('\xc4\xb1\xc4\xb8')") == "\xc4\xb1\xc4\xb8");
+}
+
+TEST_CASE("lua libs: RM_TitleCase raises the first letter of every word, outside ASCII too")
+{
+	LuaState state;
+
+	REQUIRE(CclCommand(RMUpperSource, false) == 0);
+	CHECK(Eval("RM_TitleCase('garden of war')") == "Garden Of War");
+	CHECK(Eval("RM_TitleCase('2players map')") == "2Players Map");
+	// "žalgiris ąžuolas" -> "Žalgiris Ąžuolas", not "žAlgiris ąžUolas"
+	CHECK(Eval("RM_TitleCase('\xc5\xbe" "algiris \xc4\x85\xc5\xbeuolas')") == "\xc5\xbd" "algiris \xc4\x84\xc5\xbeuolas");
+	// a letter outside ASCII inside a word does not begin a new word: "cafénoir ölund"
+	CHECK(Eval("RM_TitleCase('caf\xc3\xa9noir \xc3\xb6lund')") == "Caf\xc3\xa9noir \xc3\x96lund");
+}

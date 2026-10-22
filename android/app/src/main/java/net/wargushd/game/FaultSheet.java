@@ -46,6 +46,9 @@ final class FaultSheet {
         blocked = MapRules.blocked(faults);
     }
 
+    /** True when the sheet stands before a test game: its button (SAVE) goes on with the test. */
+    boolean forTest() { return test; }
+
     private float x() { return (Screen.CANVAS_W - W) / 2f; }
     private float y(SkinKit kit) { return kit.height / 2f - H / 2f; }
     private float showX() { return x() + W - PAD - SHOW_W; }
@@ -64,7 +67,7 @@ final class FaultSheet {
         final float x = x(), y = y(kit);
         kit.fill(c, x, y, W, H, PANEL_FILL, 18f);
         kit.outline(c, x, y, W, H, LINE, 18f);
-        kit.textTop(c, kit.fit(kit.own(test ? "The map cannot be tested yet"
+        kit.textTop(c, kit.fit(kit.own(test ? (blocked ? "The map cannot be tested yet" : "Before the map is tested")
                                             : blocked ? "The map cannot be saved yet" : "Before the map is saved"),
                                CAP_BODY, W - PAD * 2f), x + PAD, y + TITLE_Y, CAP_BODY, GOLD, true);
         final float tw = W - PAD * 3f - SHOW_W;
@@ -87,7 +90,9 @@ final class FaultSheet {
         final float by = y + BUTTON_Y;
         if (!blocked) {
             kit.nine(c, buttonPlain, saveX(), by, BUTTON_W, BUTTON_H, 14);
-            kit.textCentre(c, kit.fit(kit.string("common_save", "Save"), CAP_BODY, BUTTON_W - 48f), saveX(), by, BUTTON_W, BUTTON_H,
+            // Before a test game the button goes on with it (the engine's remarks, Session 2026-10-19 e).
+            final String go = test ? kit.own("Test") : kit.string("common_save", "Save");
+            kit.textCentre(c, kit.fit(go, CAP_BODY, BUTTON_W - 48f), saveX(), by, BUTTON_W, BUTTON_H,
                            CAP_BODY, INK, true);
         }
         kit.nine(c, buttonMarked, closeX(), by, BUTTON_W, BUTTON_H, 14);

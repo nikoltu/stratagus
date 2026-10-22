@@ -67,6 +67,7 @@ void CUnitManager::Init()
 		unit->SavedOrder = nullptr;
 		unit->NewOrder = nullptr;
 		unit->CriticalOrder = nullptr;
+		unit->LastAttacker = nullptr; // a ref like the orders' goals: dropped while every slot exists
 	}
 	units.clear();
 	releasedUnits.clear();
@@ -133,7 +134,13 @@ void CUnitManager::ReleaseUnit(CUnit &unit)
 
 CUnit &CUnitManager::GetSlotUnit(int index) const
 {
+	Assert(IsSlotIndex(index));
 	return *unitSlots[index];
+}
+
+CUnit *CUnitManager::FindSlotUnit(int index) const
+{
+	return IsSlotIndex(index) ? unitSlots[index].get() : nullptr;
 }
 
 unsigned int CUnitManager::GetUsedSlotCount() const

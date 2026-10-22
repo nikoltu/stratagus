@@ -76,8 +76,9 @@ final class OptionsPage {
         },
         {
             Setting.slider("GameSpeed", "option_speed_game_speed", "Game Speed", 0, 100, 75),
-            Setting.slider("MouseScrollSpeed", "option_speed_mouse_scroll", "Mouse Scroll", 1, 10, 1),
-            Setting.slider("KeyScrollSpeed", "option_speed_key_scroll", "Key Scroll", 1, 10, 4),
+            // Both scroll knobs stand at 67 % in the original's factory settings: 7 on 1..10 is 6/9.
+            Setting.slider("MouseScrollSpeed", "option_speed_mouse_scroll", "Mouse Scroll", 1, 10, 7),
+            Setting.slider("KeyScrollSpeed", "option_speed_key_scroll", "Key Scroll", 1, 10, 7),
         },
         {
             Setting.choice("MinimapWithTerrain", "option_preference_minimap_mode", "Minimap Mode", 0, true,
@@ -88,6 +89,9 @@ final class OptionsPage {
             Setting.toggle("PlayIntro", "option_preference_intro", "Play Introduction", false),
             Setting.toggle("HideObjectivesHud", "option_preference_hide_objectives",
                            "Hide Objectives HUD Display", false),
+            // The launcher's own (owner decision 87, work/WATER_ANIM.md): the game's
+            // Preference.AnimatedWater, the HD water layer. The original has no such entry. On by default.
+            Setting.toggle("AnimatedWater", null, "Animated Water", true),
         },
         {
             Setting.toggle("ShowCommandKey", "option_gameplay_show_button_hotkeys", "Show Button Hotkeys",
@@ -112,6 +116,9 @@ final class OptionsPage {
                            true,
                            new String[] { "option_portrait_style_scaled", "Scaled" },
                            new String[] { "option_portrait_style_cropped", "Cropped" }),
+            // The launcher's own (INGAME_HUD_AND_MENU 5.4): the chat envelope in a single-player
+            // game too, its line going to the game's cheat handler only. Off by default.
+            Setting.toggle("CheatEntry", null, "Cheat entry", false),
         },
         {}, {}, {},
     };
@@ -139,6 +146,8 @@ final class OptionsPage {
     private static final float LANG_PITCH = 138f, LANG_H = 120f;
     private static final int ROW_SELECTED = 0x36F0D250, ROW_FAINT = 0x10FFFFFF;
     private String languageInUse = "enUS", languageAsked;
+    /** The rows of the tab: the game's languages and a switched-on language mod's (SkinKit.languages). */
+    private String[][] languages = SkinKit.LANGUAGES;
 
     /** The language a tap has just chosen, once; null when none was. */
     String takeLanguageAsked() {
@@ -149,15 +158,15 @@ final class OptionsPage {
 
     private void drawLanguages(Canvas c, SkinKit kit) {
         final float x = X0 + 60f, w = RIGHT - X0 - 120f;
-        for (int i = 0; i < SkinKit.LANGUAGES.length; ++i) {
+        for (int i = 0; i < languages.length; ++i) {
             final float y = PAGE_Y + 48f + LANG_PITCH * i;
-            final boolean inUse = SkinKit.LANGUAGES[i][0].equals(languageInUse);
+            final boolean inUse = languages[i][0].equals(languageInUse);
             kit.fill(c, x, y, w, LANG_H, inUse ? ROW_SELECTED : ROW_FAINT, 10f);
             if (inUse) {
                 kit.fill(c, x, y, 10f, LANG_H, GOLD, 0f);
                 kit.textMiddleRight(c, kit.own("In use"), x + w - 36f, y, LANG_H, CAP_SMALL, INK_MUTED, true);
             }
-            kit.textMiddle(c, kit.string(SkinKit.LANGUAGES[i][1], SkinKit.LANGUAGES[i][0]), x + 36f, y,
+            kit.textMiddle(c, kit.string(languages[i][1], languages[i].length > 2 ? languages[i][2] : languages[i][0]), x + 36f, y,
                            LANG_H, CAP_BODY, inUse ? GOLD : INK, true);
         }
     }
@@ -169,6 +178,7 @@ final class OptionsPage {
     void read(Context c, Profiles.Profile profile) {
         store = c.getSharedPreferences(STORE, Context.MODE_PRIVATE);
         languageInUse = SkinKit.language(c);
+        languages = SkinKit.languages(c);
         readAbout(c);
         // The Game Speed setting changed its scale (a 15..75 number, default 30, became the knob
         // position 0..100, default 75): a value stored on the old scale is dropped once.
@@ -197,8 +207,67 @@ final class OptionsPage {
         } catch (Exception e) {
             // The name alone.
         }
+        final long baked = ArtBaker.bakedAt(Provision.dataDir(c));
+        artDate = (baked > 0L)
+            ? new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date(baked))
+            : aboutDate;
         aboutFolder = GateActivity.rememberedFolder(c);
         builtInSource = store == null || store.getBoolean(KEY_BUILT_IN, true);
+        sourceAddress = (store == null) ? "" : store.getString(KEY_ADDRESS, "");
+        app = c.getApplicationContext();
+    }
+
+    // The mods source's state (owner's board 4A, 2026-10-18): a status line and Check Source
+    // under the built-in-source switch.
+    /** Asks for the page to be drawn again; may be called from any thread. */
+    Runnable redraw;
+    private Context app;
+    /** The source's answer to the last check, null before one; a check under way. */
+    private volatile ModCatalog.State sourceState;
+    private volatile boolean checking;
+    private volatile long checkedAt;
+
+    /** Ask the source for its list on a worker thread; the page is drawn again with the answer. */
+    private void checkSource() {
+        if (checking || app == null) {
+            return;
+        }
+        checking = true;
+        final Context c = app;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final ModCatalog.State s = ModCatalog.sync(c);
+                sourceState = s;
+                checkedAt = System.currentTimeMillis();
+                checking = false;
+                if (redraw != null) {
+                    redraw.run();
+                }
+            }
+        }, "mods-source-check").start();
+    }
+
+    /** The status line: whether the source answers, and what that means for the player. */
+    private String sourceStatus(SkinKit kit) {
+        final ModCatalog.State s = sourceState;
+        if (checking || s == null) {
+            return kit.own("Checking the source...");
+        }
+        final String when = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+            .format(new java.util.Date(checkedAt));
+        if (s.section == ModCatalog.NO_SOURCE) {
+            // Own source: an address of another scheme than https is said, not hidden.
+            return (!builtInSource && !sourceAddress.isEmpty())
+                ? kit.own("Mods off - the address must use https://") : kit.own("Mods off");
+        }
+        if (s.section == ModCatalog.FRESH) {
+            return kit.own("Reachable - mods list up to date (checked {0})", when);
+        }
+        if (s.section == ModCatalog.NEWER_APP) {
+            return kit.own("The source needs a newer app (last try {0})", when);
+        }
+        return kit.own("Not reachable - mods list unavailable (last try {0})", when);
     }
 
     /** The Game Files tab: two facts of this installation and the mods-source override. */
@@ -207,14 +276,17 @@ final class OptionsPage {
     private static final float VALUE_W = 1500f;
     /** The game folder (null when none is chosen) and the installed content's date. */
     private String aboutFolder, aboutDate = "";
+    /** The date the game art was last prepared from the game folder (ArtBaker's stamp); the
+     *  installed content's date where no bake has left one. */
+    private String artDate = "";
 
     private String sourceFolder(SkinKit kit) {
         return (aboutFolder != null) ? aboutFolder : kit.own("Not chosen");
     }
 
-    /** There is no record of the art's preparation yet; the unpacked content's date stands in. */
+    /** When the game art was prepared from the game folder. */
     private String sourceArt(SkinKit kit) {
-        return aboutDate.isEmpty() ? kit.own("Prepared") : kit.own("Prepared") + " " + aboutDate;
+        return artDate.isEmpty() ? kit.own("Prepared") : kit.own("Prepared") + " " + artDate;
     }
 
     private String aboutFiles(SkinKit kit) {
@@ -242,14 +314,64 @@ final class OptionsPage {
     }
 
     private void valueBox(Canvas c, SkinKit kit, float y, String value) {
+        valueBox(c, kit, y, value, true);
+    }
+
+    private void valueBox(Canvas c, SkinKit kit, float y, String value, boolean arrow) {
         final float x = controlRight() - VALUE_W;
         kit.fill(c, x, y, VALUE_W, ROW_H, WELL, 14f);
         kit.outline(c, x, y, VALUE_W, ROW_H, LINE, 14f);
-        kit.textMiddle(c, kit.fit(value, CAP_BODY, VALUE_W - 150f), x + 36f, y, ROW_H, CAP_BODY, INK, true);
-        kit.textCentre(c, "v", x + VALUE_W - 96f, y, 60f, ROW_H, CAP_SMALL, GOLD, true);
+        kit.textMiddle(c, kit.fit(value, CAP_BODY, VALUE_W - (arrow ? 150f : 72f)), x + 36f, y, ROW_H, CAP_BODY,
+                       INK, true);
+        if (arrow) {
+            kit.textCentre(c, "v", x + VALUE_W - 96f, y, 60f, ROW_H, CAP_SMALL, GOLD, true);
+        }
+    }
+
+    // The own source's address (owner decision 90 2A): typed in the top sheet, kept where
+    // ModCatalog reads it. No key: nothing reads one.
+    static final String KEY_ADDRESS = "mods_source_address";
+    static final int ADDRESS_MAX = 200;
+    private String sourceAddress = "";
+    private boolean addressAsked, artAsked;
+
+    /** True once after a tap on the own source's Address box. */
+    boolean takeAddressAsked() {
+        final boolean asked = addressAsked;
+        addressAsked = false;
+        return asked;
+    }
+
+    /** True once after a tap on the Game art box (decision 90 2A: prepare the art again). */
+    boolean takeArtAsked() {
+        final boolean asked = artAsked;
+        artAsked = false;
+        return asked;
+    }
+
+    /** The game folder as the Game Files tab names it, or null when none is chosen. */
+    String folderShown() {
+        return aboutFolder;
+    }
+
+    String sourceAddress() {
+        return sourceAddress;
+    }
+
+    /** Keep a typed address; the source is asked again when its line is next shown. */
+    void keepSourceAddress(String address) {
+        sourceAddress = (address == null) ? "" : address.trim();
+        if (store != null) {
+            store.edit().putString(KEY_ADDRESS, sourceAddress).apply();
+        }
+        sourceState = null;
     }
 
     private float sourceSwitchY() { return rowY(2) + 60f + 96f; }
+    /** The status row under the switch (board 4A: 1086 - 942 below it). */
+    private float statusY() { return sourceSwitchY() + 144f; }
+    private static final float CAP_STATUS = 40f, CAP_HINT = 32f;
+    private static final int STATUS_GOOD = 0xFF78C878, STATUS_BAD = 0xFFE8705A;
 
     private void drawSource(Canvas c, SkinKit kit) {
         final float x = X0 + 60f, rx = controlRight();
@@ -265,21 +387,55 @@ final class OptionsPage {
         kit.fill(c, sx, sy, SWITCH_W, SWITCH_H, builtInSource ? SWITCH_ON : SWITCH_OFF, 48f);
         kit.outline(c, sx, sy, SWITCH_W, SWITCH_H, LINE, 48f);
         kit.fill(c, sx + (builtInSource ? 78f : 6f), sy + 6f, 84f, 84f, KNOB, 42f);
-        if (builtInSource) {
-            return;
-        }
-        // The override's fields: shown, not yet editable (the mod list comes with a later phase).
-        kit.textMiddle(c, kit.own("Address"), x, y + ROW_PITCH, ROW_H, CAP_BODY, INK, true);
-        valueBox(c, kit, y + ROW_PITCH, "");
-        kit.textMiddle(c, kit.own("Key"), x, y + ROW_PITCH * 2f, ROW_H, CAP_BODY, INK, true);
-        valueBox(c, kit, y + ROW_PITCH * 2f, "");
         if (buttonPlain == null) {
             buttonPlain = kit.atlasFrame("Modern_Widgets_Orc", "large", 1008, 126);
         }
-        final float by = y + ROW_PITCH * 3f + 12f;
+        if (builtInSource) {
+            // Under the switch: a dot and the source's state, Check Source at the right, and what
+            // it means below (board 4A).
+            if (sourceState == null) {
+                checkSource();
+            }
+            final ModCatalog.State s = sourceState;
+            final float ly = statusY();
+            final boolean good = s != null && !checking && s.section == ModCatalog.FRESH;
+            final boolean off = s != null && !checking && s.section == ModCatalog.NO_SOURCE;
+            kit.fill(c, x + 2f, ly + ROW_H / 2f - 16f, 32f, 32f, good ? STATUS_GOOD : off ? KNOB : STATUS_BAD, 16f);
+            kit.textMiddle(c, kit.fit(sourceStatus(kit), CAP_STATUS, rx - 600f - 48f - (x + 54f)), x + 54f, ly,
+                           ROW_H, CAP_STATUS, INK, true);
+            kit.nine(c, buttonPlain, rx - 600f, ly - 6f, 600f, 120f, 14);
+            kit.textCentre(c, kit.own("Check Source"), rx - 600f, ly - 6f, 600f, 120f, CAP_BODY, INK, true);
+            kit.textTop(c, kit.fit(kit.own("Your installed mods still work. Switch the built-in source off to use your own address."),
+                                   CAP_HINT, rx - (x + 54f)), x + 54f, ly + ROW_H + 30f, CAP_HINT, INK_MUTED, true);
+            return;
+        }
+        // The own source's address, typed in the top sheet; the Key row is dropped (owner
+        // decision 90 2A) and Check Source moves up one row.
+        kit.textMiddle(c, kit.own("Address"), x, y + ROW_PITCH, ROW_H, CAP_BODY, INK, true);
+        valueBox(c, kit, y + ROW_PITCH, sourceAddress, false);
+        final float by = ownCheckY();
+        // The same status line as the built-in source's, at the left of Check Source; with
+        // https:// added to a typed address, the line says which address was asked.
+        if (sourceState == null) {
+            checkSource();
+        }
+        final ModCatalog.State s = sourceState;
+        final boolean good = s != null && !checking && s.section == ModCatalog.FRESH;
+        final boolean off = s != null && !checking && s.section == ModCatalog.NO_SOURCE;
+        kit.fill(c, x + 2f, by + 6f + ROW_H / 2f - 16f, 32f, 32f, good ? STATUS_GOOD : off ? KNOB : STATUS_BAD, 16f);
+        kit.textMiddle(c, kit.fit(sourceStatus(kit), CAP_STATUS, rx - 600f - 48f - (x + 54f)), x + 54f, by + 6f,
+                       ROW_H, CAP_STATUS, INK, true);
+        final String used = ModCatalog.ownBase(sourceAddress);
+        if (used != null && !sourceAddress.trim().contains("://")) {
+            kit.textTop(c, kit.fit(kit.own("Asked at {0}", used), CAP_HINT, rx - (x + 54f)), x + 54f,
+                        by + 6f + ROW_H + 30f, CAP_HINT, INK_MUTED, true);
+        }
         kit.nine(c, buttonPlain, rx - 600f, by, 600f, 120f, 14);
         kit.textCentre(c, kit.own("Check Source"), rx - 600f, by, 600f, 120f, CAP_BODY, INK, true);
     }
+
+    /** Check Source's top with the own source (one row under the Address). */
+    private float ownCheckY() { return sourceSwitchY() + ROW_PITCH * 2f + 12f; }
 
     /** The About tab: kind ('h' heading, 't' text, 'm' small muted line) and the line. */
     private static final String[][] ABOUT = {
@@ -482,18 +638,27 @@ final class OptionsPage {
             folderAsked = true;
             return true;
         }
+        if (tab == SOURCE_TAB && aboutFolder != null && in(x, y, rx - VALUE_W, rowY(1), VALUE_W, ROW_H)) {
+            artAsked = true;
+            return true;
+        }
+        if (tab == SOURCE_TAB && !builtInSource && store != null
+            && in(x, y, rx - VALUE_W, sourceSwitchY() + ROW_PITCH, VALUE_W, ROW_H)) {
+            addressAsked = true;
+            return true;
+        }
         if (tab == ABOUT_TAB && in(x, y, RIGHT - 72f - 600f,
                                    PAGE_Y + pageHeightOf(screenHeight) - 48f - 120f, 600f, 120f)) {
             licencesAsked = true;
             return true;
         }
         if (tab == LANGUAGE_TAB && in(x, y, X0 + 60f, PAGE_Y + 48f, RIGHT - X0 - 120f,
-                                      LANG_PITCH * SkinKit.LANGUAGES.length)) {
+                                      LANG_PITCH * languages.length)) {
             final int row = (int) ((y - PAGE_Y - 48f) / LANG_PITCH);
-            if (row >= 0 && row < SkinKit.LANGUAGES.length
+            if (row >= 0 && row < languages.length
                 && y - PAGE_Y - 48f - row * LANG_PITCH < LANG_H
-                && !SkinKit.LANGUAGES[row][0].equals(languageInUse)) {
-                languageAsked = SkinKit.LANGUAGES[row][0];
+                && !languages[row][0].equals(languageInUse)) {
+                languageAsked = languages[row][0];
                 return true;
             }
             return false;
@@ -502,6 +667,16 @@ final class OptionsPage {
             && in(x, y, rx - SWITCH_W - 24f, sourceSwitchY(), SWITCH_W + 48f, ROW_H)) {
             builtInSource = !builtInSource;
             store.edit().putBoolean(KEY_BUILT_IN, builtInSource).apply();
+            sourceState = null;   // another source: asked again when the line is next shown
+            return true;
+        }
+        if (tab == SOURCE_TAB && builtInSource && in(x, y, rx - 600f, statusY() - 6f, 600f, 120f)) {
+            checkSource();
+            return true;
+        }
+        if (tab == SOURCE_TAB && !builtInSource && in(x, y, rx - 600f, ownCheckY(), 600f, 120f)) {
+            // The typed address is asked (ModCatalog.sync reads it through base).
+            checkSource();
             return true;
         }
         for (int i = 0; i < rows.length; ++i) {

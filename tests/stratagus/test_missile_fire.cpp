@@ -32,11 +32,18 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "stratagus.h"
+#include "map.h"
 #include "missile.h"
+#include "missile_cadence.h"
 #include "spell/spell_demolish.h"
+#include "actions.h"
+#include "unit.h"
+#include "unittype.h"
+#include "viewport.h"
 
 namespace {
 	MissileType* dummyMissile(uintptr_t m)
@@ -477,6 +484,70 @@ TEST_CASE("wall steps")
 	CHECK(WallSteps(255) == 63);
 }
 
+namespace {
+	// The picture each draw of game cycles 0 .. cycles - 1 shows of a stay missile made in the unit
+	// pass of cycle 0 (-1: nothing drawn), as the game cycle runs: missiles, then the draw.
+	std::vector<int> stayTimeline(int delay, int sleep, int firstFrameWait, int frames, int cycles)
+	{
+		MissileType mtype("missile-test-stay");
+		mtype.Class = MissileClass::Stay;
+		mtype.StartDelay = delay;
+		mtype.Sleep = sleep;
+		mtype.FirstFrameWait = firstFrameWait;
+		mtype.SpriteFrames = frames;
+		mtype.NumDirections = 1;
+
+		CleanMissiles();
+		MakeLocalMissile(mtype, PixelPos(64, 64), PixelPos(64, 64));
+		const CViewport vp;
+		std::vector<int> shown;
+		for (int cycle = 0; cycle != cycles; ++cycle) {
+			MissileActions();
+			const std::vector<Missile *> table = FindAndSortMissiles(vp);
+			shown.push_back(table.empty() ? -1 : table.front()->SpriteFrame);
+		}
+		CleanMissiles();
+		return shown;
+	}
+
+	// the same timeline from the original's numbers: hidden draws, then each picture for its cycles
+	std::vector<int> expectedTimeline(int hidden, const std::vector<int> &holds, int cycles)
+	{
+		std::vector<int> shown(hidden, -1);
+		for (int picture = 0; picture != int(holds.size()); ++picture) {
+			shown.insert(shown.end(), holds[picture], picture);
+		}
+		shown.resize(cycles, -1);
+		return shown;
+	}
+} // anonymous namespace
+
+TEST_CASE("stay missile lead-in: Delay and FirstFrameWait")
+{
+	SUBCASE("cannon flash (type 25): hidden c .. c+10, picture 0 c+11 .. c+14, then 3 each, gone at c+24") {
+		const std::vector<int> shown = stayTimeline(12, 3, 1, 4, 30);
+		CHECK(shown == expectedTimeline(11, {4, 3, 3, 3}, 30));
+		CHECK(shown[23] == 3);
+		CHECK(shown[24] == -1);
+	}
+	SUBCASE("explosion (type 23): hidden c, picture 0 c+1 .. c+4, 15 more x 3, gone at c+50") {
+		std::vector<int> holds(16, 3);
+		holds[0] = 4;
+		const std::vector<int> shown = stayTimeline(2, 3, 1, 16, 56);
+		CHECK(shown == expectedTimeline(1, holds, 56));
+		CHECK(shown[49] == 15);
+		CHECK(shown[50] == -1);
+	}
+	SUBCASE("impact (type 21): Sleep 2, picture 0 three cycles, gone at c+14") {
+		const std::vector<int> shown = stayTimeline(2, 2, 1, 6, 20);
+		CHECK(shown == expectedTimeline(1, {3, 2, 2, 2, 2, 2}, 20));
+	}
+	SUBCASE("engine Delay D hides D - 1 draws; without FirstFrameWait picture 0 lasts Sleep - 1") {
+		CHECK(stayTimeline(11, 3, 0, 4, 26) == expectedTimeline(10, {3, 3, 3, 3}, 26));
+		CHECK(stayTimeline(0, 3, 0, 4, 16) == expectedTimeline(0, {2, 3, 3, 3}, 16));
+	}
+}
+
 TEST_CASE("death coil shares")
 {
 	using Shares = std::vector<int>;
@@ -540,4 +611,284 @@ TEST_CASE("aimed hit")
 	CHECK_FALSE(AimedHitTakes(false, true, false));
 	CHECK_FALSE(AimedHitTakes(true, true, true));
 	CHECK_FALSE(MissileType("x").AimedHit);
+}
+
+TEST_CASE("building fire follows the hit points: big under half, small under three quarters")
+{
+	std::vector<BurningBuildingFrame> frames(3);
+	frames[0].Percent = 0;
+	frames[0].Missile = dummyMissile(1); // big fire
+	frames[1].Percent = 50;
+	frames[1].Missile = dummyMissile(2); // small fire
+	frames[2].Percent = 75;              // none
+
+	// hp < max / 2 -> 0, hp < 3 * max / 4 -> 1, else 2 (both cut down to whole numbers)
+	CHECK(BurningBuildingFrameOf(frames, 199, 400) == 0);
+	CHECK(BurningBuildingFrameOf(frames, 200, 400) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 299, 400) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 300, 400) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 400, 400) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 1, 400) == 0);
+	// odd maxima: guard tower 130 (65 / 97), 1001 (500 / 750)
+	CHECK(BurningBuildingFrameOf(frames, 64, 130) == 0);
+	CHECK(BurningBuildingFrameOf(frames, 65, 130) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 96, 130) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 97, 130) == 2); // the percent rule had the small fire here
+	CHECK(BurningBuildingFrameOf(frames, 500, 1001) == 1); // the percent rule had the big fire here
+	CHECK(BurningBuildingFrameOf(frames, 499, 1001) == 0);
+	CHECK(BurningBuildingFrameOf(frames, 750, 1001) == 2);
+	CHECK(BurningBuildingFrameOf({}, 1, 400) == -1);
+}
+
+TEST_CASE("flame shield word: a built-in variable the cast and the cycle count share")
+{
+	// spells.lua sets "FlameShield" to 500 on a cast and refuses a cast while it is not 0; the
+	// per-cycle count-down (HandleBuffsEachCycle) works on the built-in index.
+	CHECK(UnitTypeVar.VariableNameLookup["FlameShield"] == FLAMESHIELD_INDEX);
+	CHECK(std::string(UnitTypeVar.VariableNameLookup[FLAMESHIELD_INDEX]) == "FlameShield");
+	CHECK(UnitTypeVar.VariableNameLookup["Priority"] == PRIORITY_INDEX);
+	CHECK(FLAMESHIELD_INDEX + 1 == NVARALREADYDEFINED);
+}
+
+TEST_CASE("runes: laid only on a free map tile")
+{
+	CHECK(RuneTileTaken(true, false, false));
+	CHECK_FALSE(RuneTileTaken(true, true, false));  // a ground unit stands there
+	CHECK_FALSE(RuneTileTaken(true, false, true));  // a rune lies there
+	CHECK_FALSE(RuneTileTaken(true, true, true));
+	CHECK_FALSE(RuneTileTaken(false, false, false)); // off the map
+}
+
+namespace {
+	// The pictures a catapult rock (15 frames: 3 sizes x 5 directions, NumDirections 9) shows over
+	// one flight of `tiles` tiles in the direction (dx, dy), one per missile step, repeats folded.
+	std::vector<int> rockFlight(MissileClass cls, int dx, int dy, int tiles)
+	{
+		Map.Info.MapWidth = 64;
+		Map.Info.MapHeight = 64;
+		Map.Create();
+		MissileType mtype("missile-test-rock");
+		mtype.Class = cls;
+		mtype.SpriteFrames = 15;
+		mtype.NumDirections = 9;
+		mtype.Speed = 8;
+		mtype.SmokePrecision = 8; // as DefineMissileType sets it (= Speed)
+		mtype.Sleep = 1;
+		mtype.Range = 0;
+		const PixelPos from(32 * 32, 32 * 32);
+		const PixelPos to = from + PixelPos(dx * 32 * tiles, dy * 32 * tiles);
+		auto missile = Missile::Init(mtype, from, to);
+		std::vector<int> shown;
+		for (int i = 0; i != 400 && missile->TTL != 0; ++i) {
+			missile->Action();
+			if (missile->TTL == 0) {
+				break;
+			}
+			if (shown.empty() || shown.back() != missile->SpriteFrame) {
+				shown.push_back(missile->SpriteFrame);
+			}
+		}
+		Map.Fields.clear();
+		Map.Info.MapWidth = 0;
+		Map.Info.MapHeight = 0;
+		return shown;
+	}
+} // anonymous namespace
+
+TEST_CASE("catapult rock (ORIG51 s.6): direction d held, sizes d, d+5, d+10, d+5, d over the flight")
+{
+	// the 6 live flights: E (A, D) 2, 7, 12, 7, 2; SE (B, C, E, F) 3, 8, 13, 8, 3
+	CHECK(rockFlight(MissileClass::Parabolic, 1, 0, 6) == std::vector<int>{2, 7, 12, 7, 2});
+	CHECK(rockFlight(MissileClass::Parabolic, 1, 1, 6) == std::vector<int>{3, 8, 13, 8, 3});
+	// not seen live (N, NE, S; the west half drawn mirrored): the same rule
+	CHECK(rockFlight(MissileClass::Parabolic, 0, -1, 6) == std::vector<int>{0, 5, 10, 5, 0});
+	CHECK(rockFlight(MissileClass::Parabolic, 1, -1, 7) == std::vector<int>{1, 6, 11, 6, 1});
+	// straight south: frame 4 of its size, drawn mirrored (with NumDirections 9 the south heading falls
+	// on the mirrored side of the sheet; the same picture turned over)
+	CHECK(rockFlight(MissileClass::Parabolic, 0, 1, 8) == std::vector<int>{-5, -10, -15, -10, -5});
+	// mirrored: frame f drawn flipped is -f - 1
+	CHECK(rockFlight(MissileClass::Parabolic, -1, 0, 6) == std::vector<int>{-3, -8, -13, -8, -3});
+	// without the enhanced effects the rock flies the straight line of the cycle-once class: the same pictures
+	CHECK(rockFlight(MissileClass::PointToPointCycleOnce, 1, 0, 6) == std::vector<int>{2, 7, 12, 7, 2});
+	CHECK(rockFlight(MissileClass::PointToPointCycleOnce, 1, 1, 6) == std::vector<int>{3, 8, 13, 8, 3});
+	CHECK(rockFlight(MissileClass::PointToPointCycleOnce, 0, 1, 8) == std::vector<int>{-5, -10, -15, -10, -5});
+	// each size about a fifth of the flight (live: ~2 grabs of 3.2 frames each, flights of 26 - 33 frames)
+	std::vector<int> steps;
+	{
+		Map.Info.MapWidth = 64;
+		Map.Info.MapHeight = 64;
+		Map.Create();
+		MissileType mtype("missile-test-rock");
+		mtype.Class = MissileClass::Parabolic;
+		mtype.SpriteFrames = 15;
+		mtype.NumDirections = 9;
+		mtype.Speed = 8;
+		mtype.SmokePrecision = 8;
+		mtype.Sleep = 1;
+		auto missile = Missile::Init(mtype, PixelPos(1024, 1024), PixelPos(1024 + 7 * 32, 1024));
+		int last = 99;
+		for (int i = 0; i != 400 && missile->TTL != 0; ++i) {
+			missile->Action();
+			if (missile->TTL == 0) {
+				break;
+			}
+			if (missile->SpriteFrame != last) {
+				steps.push_back(0);
+				last = missile->SpriteFrame;
+			}
+			++steps.back();
+		}
+		Map.Fields.clear();
+		Map.Info.MapWidth = 0;
+		Map.Info.MapHeight = 0;
+	}
+	REQUIRE(steps.size() == 5);
+	for (int n : steps) {
+		CHECK(n >= 4);
+		CHECK(n <= 7); // 7 tiles at 8 px a cycle: 28 cycles, 5 or 6 each
+	}
+}
+
+// Live run 54 item 10 / 14 (ORIG54.md): small fire below 75 %, big fire below 50 % - Farm 400 (none
+// at 312, small at 299; big at 193), Town Hall 1200 (small at 899, big at 598), Shipyard 1100 (826
+// none, 824 small; 551 small, 543 big). 3 buildings.
+TEST_CASE("building fire, run 54: the thresholds of the Farm, the Town Hall and the Shipyard")
+{
+	std::vector<BurningBuildingFrame> frames(3);
+	frames[0].Percent = 0;
+	frames[0].Missile = dummyMissile(1); // big fire
+	frames[1].Percent = 50;
+	frames[1].Missile = dummyMissile(2); // small fire
+	frames[2].Percent = 75;              // none
+
+	CHECK(BurningBuildingFrameOf(frames, 312, 400) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 300, 400) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 299, 400) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 193, 400) == 0);
+	CHECK(BurningBuildingFrameOf(frames, 900, 1200) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 899, 1200) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 598, 1200) == 0);
+	CHECK(BurningBuildingFrameOf(frames, 826, 1100) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 825, 1100) == 2);
+	CHECK(BurningBuildingFrameOf(frames, 824, 1100) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 551, 1100) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 550, 1100) == 1);
+	CHECK(BurningBuildingFrameOf(frames, 549, 1100) == 0);
+	CHECK(BurningBuildingFrameOf(frames, 543, 1100) == 0);
+}
+
+// Live run 54 item 10: the fire picture follows the HP change within one 250 ms grab (3 of 3). At
+// 38.5 cycles a second that is 9 cycles; the fire's step is 2 cycles (Sleep), its loop 12 / 20.
+TEST_CASE("building fire, run 54: the picture follows the hit points at the next step, not the loop end")
+{
+	MissileType small("test-small-fire");
+	small.size = PixelSize(64, 96);
+	small.SpriteFrames = 6;
+	small.NumDirections = 1;
+	small.Sleep = 2;
+	MissileType big("test-big-fire");
+	big.size = PixelSize(96, 96);
+	big.SpriteFrames = 10;
+	big.NumDirections = 1;
+	big.Sleep = 2;
+	const std::vector<BurningBuildingFrame> saved = BurningBuildingFrames;
+	setFrames({{0, &big}, {50, &small}, {75, nullptr}});
+
+	CUnit unit;
+	unit.Refs = 1;
+	unit.Variable.resize(std::max<size_t>(HP_INDEX + 1, UnitTypeVar.GetNumberVariable()));
+	unit.Variable[HP_INDEX].Max = 400;
+	unit.Variable[HP_INDEX].Value = 299;
+	unit.Orders.push_back(COrder::NewActionStill());
+	unit.Burning = 1;
+	{
+		MissileFire fire;
+		fire.Type = &small;
+		fire.SourceUnit = &unit;
+		fire.Action(); // picture 0 -> 1
+		CHECK(fire.Type == &small);
+		CHECK(fire.SpriteFrame == 1);
+
+		unit.Variable[HP_INDEX].Value = 199; // under half, in the middle of the small fire's loop
+		fire.Action();
+		CHECK(fire.Type == &big);   // at the next step (2 cycles), not 4 pictures later
+		CHECK(fire.SpriteFrame == 0);
+		CHECK(fire.TTL != 0);
+
+		unit.Variable[HP_INDEX].Value = 300; // repaired to 75 %: the fire goes at the next step
+		fire.Action();
+		CHECK(fire.TTL == 0);
+		CHECK(int(unit.Burning) == 0);
+		fire.SourceUnit = nullptr;
+	}
+	unit.Orders.clear();
+	BurningBuildingFrames = saved;
+}
+
+TEST_CASE("flame shield, run 55: the flames reach units 2 tiles off, not 3; 1 - 2 a hit there")
+{
+	// ORIG55 item 11: tile offsets from the carrier (distance = max(|dx|, |dy|)). Each flame makes
+	// its area hit from its own place on the ring; a unit is hit on a step when its centre lies in
+	// the inner (22/32 tile) or outer (42/32 tile) zone of that place.
+	const PixelSize tile(32, 32);
+	const auto zonesOn = [&](int tx, int ty, int zone) {
+		int steps = 0;
+		for (int s = 0; s < FlameShieldSteps; ++s) {
+			const PixelPos flame(FlameShieldOffset(s, 32, false), FlameShieldOffset(s, 32, true));
+			if (SplashZone(flame, PixelPos(tx * 32, ty * 32), tile) == zone) {
+				++steps;
+			}
+		}
+		return steps;
+	};
+	// The live losses over ~495 cycles (cast 1 and 3) and ours: 5 flames, a hit every 16th call,
+	// 1 - 2 (mean 1.5) in the outer zone, on the share of the 51 ring steps that reach the unit.
+	struct Live {
+		int dx, dy, lost;
+	};
+	const Live hurt[] = {{-2, 0, 44}, {-2, -1, 46}, {-2, 1, 20}, {2, -1, 63}, {-2, 1, 21}, {2, 1, 28}};
+	for (const Live &u : hurt) {
+		CAPTURE(u.dx);
+		CAPTURE(u.dy);
+		CHECK(zonesOn(u.dx, u.dy, 0) == 0); // never the inner zone at distance 2
+		const int outer = zonesOn(u.dx, u.dy, 2);
+		CHECK(outer > 0);
+		const double ours = 5.0 * 1.5 * (495.0 / 16.0) * outer / FlameShieldSteps;
+		CHECK(ours > u.lost * 0.75);
+		CHECK(ours < u.lost * 1.3);
+	}
+	// distance 3: nothing (live: Footman 1498 at +3, 0 lost 0); ours at no offset of the ring 3 off
+	for (int d = -3; d <= 3; ++d) {
+		for (const auto &t : {Vec2i(3, d), Vec2i(-3, d), Vec2i(d, 3), Vec2i(d, -3)}) {
+			CAPTURE(t.x);
+			CAPTURE(t.y);
+			CHECK(zonesOn(t.x, t.y, 0) + zonesOn(t.x, t.y, 2) == 0);
+		}
+	}
+	// the outer zone of the flames' 4 is 1 or 2 a hit (live: all 154 loss steps at distance 2)
+	CHECK(keys(splashValues(4, 2, 0)) == span(1, 2));
+	// the carrier is spared (live 3 of 3): MissileHitsZones passes it as the spared unit
+	CHECK_FALSE(SplashTakesUnit(true, false, true));
+}
+
+TEST_CASE("Burning building fire: its height above the footprint centre by building size")
+{
+	// classic px of the 32 px tile (live run 58: farm 24, barracks 20; S2B: hall 26)
+	CHECK(BurningFlameLiftClassicPx(2) == 24);
+	CHECK(BurningFlameLiftClassicPx(3) == 20);
+	CHECK(BurningFlameLiftClassicPx(4) == 26);
+	// unmeasured sizes take the nearest measured one
+	CHECK(BurningFlameLiftClassicPx(1) == 24);
+	CHECK(BurningFlameLiftClassicPx(5) == 26);
+	// never the old whole tile
+	for (int t = 1; t <= 5; ++t) {
+		CHECK(BurningFlameLift(t, 32) < 32);
+	}
+	// map px for other tile sizes: at 96 screen px a tile the farm's fire is 72 px up (measured
+	// -72.3), the barracks' 60 (-59.8), the hall's 78 (-75.8 Remastered, -78 = 26 x 3 classic)
+	CHECK(BurningFlameLift(2, 96) == 72);
+	CHECK(BurningFlameLift(3, 96) == 60);
+	CHECK(BurningFlameLift(4, 96) == 78);
+	CHECK(BurningFlameLift(2, 64) == 48);
+	CHECK(BurningFlameLift(4, 32) == 26);
 }

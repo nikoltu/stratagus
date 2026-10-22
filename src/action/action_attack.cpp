@@ -43,6 +43,7 @@
 #include "action/action_attack.h"
 
 #include "animation.h"
+#include "goal_pull.h"
 #include "iolib.h"
 #include "map.h"
 #include "missile.h"
@@ -58,6 +59,7 @@
 #include "unit_find.h"
 #include "unittype.h"
 #include "video.h"
+#include "wc2ai.h"
 
 /*----------------------------------------------------------------------------
 --  Defines
@@ -182,6 +184,13 @@ void COrder_Attack::Save(CFile &file, const CUnit &unit) const /* override */
 	}
 	file.printf(" \"tile\", {%d, %d},", this->goalPos.x, this->goalPos.y);
 	file.printf(" \"amove-tile\", {%d, %d},", this->attackMovePos.x, this->attackMovePos.y);
+	file.printf(" \"goal-pulled\", %d,", this->GoalPulled ? 1 : 0);
+	if (this->ReissueAt != 0) {
+		file.printf(" \"reissue-at\", %lu,", this->ReissueAt);
+	}
+	if (this->KillSeenAt != 0) {
+		file.printf(" \"kill-seen-at\", %lu,", this->KillSeenAt);
+	}
 	file.printf(" \"state\", %d", this->State);
 	file.printf("}");
 }
@@ -229,12 +238,27 @@ bool COrder_Attack::ParseSpecificData(lua_State *l,
 			}
 		}
 
+	} else if (value == "reissue-at") {
+		++j;
+		this->ReissueAt = LuaToNumber(l, -1, j + 1);
+	} else if (value == "kill-seen-at") {
+		++j;
+		this->KillSeenAt = LuaToNumber(l, -1, j + 1);
 	} else if (value == "amove-tile") {
 		++j;
 		lua_rawgeti(l, -1, j + 1);
 		CclGetPos(l, &this->attackMovePos);
 		lua_pop(l, 1);
-
+		// A save written before the goal pull has no "goal-pulled" (written after "amove-tile"): an
+		// attack-move heading for its point keeps that point as it is and is not pulled again from a
+		// tile on the way; one on its way to a target is not heading for its point.
+		this->GoalPulled = !this->HasGoal() && this->goalPos == this->attackMovePos;
+	} else if (value == "goal-pulled") {
+		++j;
+		this->GoalPulled = LuaToNumber(l, -1, j + 1) != 0;
+	} else if (value == "ship-fight") {
+		// Written by older builds (a ship's fight state, since removed): read and ignored.
+		++j;
 	} else {
 		return false;
 	}
@@ -351,11 +375,44 @@ bool COrder_Attack::IsMovingToAttackPos() const
 {
 	return (this->State & MOVE_TO_ATTACKPOS) != 0;
 }
+bool COrder_Attack::IsRememberedAttackMove() const
+{
+	return IsAutoTargeting() && Map.Info.IsPointOnMap(this->attackMovePos) && !IsAttackGroundOrWall();
+}
+
+/**
+**  The re-issue check of a remembered attack-move at the end of a fight or a cast: while its counter
+**  runs the unit stands and keeps it; with the counter at 0 it is sent again (counter 20) when the unit
+**  is 2 or more tiles from its point, else it is forgotten. Other attack orders are put back at once.
+*/
+wc2ai::Reissue COrder_Attack::ReissueReady(const CUnit &unit, unsigned long cycle) /* override */
+{
+	if (!IsRememberedAttackMove()) {
+		return wc2ai::Reissue::Ready;
+	}
+	const wc2ai::Reissue answer = wc2ai::AttackMoveReissue(cycle,
+	                                                       this->ReissueAt,
+	                                                       unit.tilePos.x - this->attackMovePos.x,
+	                                                       unit.tilePos.y - this->attackMovePos.y);
+	if (answer == wc2ai::Reissue::Ready) {
+		this->ReissueAt = cycle + wc2ai::AttackMoveRetryWait;
+	}
+	return answer;
+}
+
 bool COrder_Attack::IsAttackGroundOrWall() const
 {
 	/// FIXME: Check if need to add this: (goal && goal->Type && goal->Type->BoolFlag[WALL_INDEX].value)
+	// A pulled attack-move point may lie on a wall tile; the order is still the attack-move to the
+	// ordered point, so the wall test looks at that point.
+	const Vec2i &point = (IsAutoTargeting() && this->GoalPulled) ? this->attackMovePos : this->goalPos;
 	return this->Action == UnitAction::AttackGround
-	       || (Map.Info.IsPointOnMap(this->goalPos) && Map.WallOnMap(this->goalPos));
+	       || (Map.Info.IsPointOnMap(point) && Map.WallOnMap(point));
+}
+
+bool COrder_Attack::HeadsForOwnPoint() const
+{
+	return this->GoalPulled || this->goalPos == this->attackMovePos;
 }
 
 CUnit &COrder_Attack::BestTarget(const CUnit &unit, CUnit &target1, CUnit &target2) const
@@ -420,6 +477,7 @@ bool COrder_Attack::CheckIfGoalValid(CUnit &unit)
 	// Goal could be destroyed or unseen
 	// So, cannot use type.
 	this->goalPos = goal->tilePos;
+	this->GoalPulled = false;
 	this->MinRange = 0;
 	this->Range = 0;
 	this->ClearGoal();
@@ -470,6 +528,7 @@ void COrder_Attack::SetAutoTarget(CUnit &unit, CUnit *target)
 	}
 	this->SetGoal(target);
 	this->goalPos = target->tilePos;
+	this->GoalPulled = false;
 	this->Range = unit.Stats->Variables[ATTACKRANGE_INDEX].Max;
 	this->MinRange = unit.Type->MinAttackRange;
 	if (unit.Type->BoolFlag[SKIRMISHER_INDEX].value) {
@@ -513,6 +572,9 @@ bool COrder_Attack::AutoSelectTarget(CUnit &unit)
 
 	/// if attacker can't move (stand_ground, building, in a bunker or transport)
 	const bool immobile = this->Action == UnitAction::StandGround || unit.Removed || !unit.CanMove();
+	// A ship searches as a land unit does: in the original a person's ship on an attack-move takes
+	// land units and buildings on its way, moving or idle (owner's play; run 49: Shipyard, Catapult,
+	// Tower, Axethrowers).
 	if (immobile) {
 		newTarget = AttackUnitsInRange(unit); // search for enemies only in attack range
 	} else {
@@ -590,8 +652,25 @@ bool COrder_Attack::EndActionAttack(CUnit &unit, const bool canBeFinished = true
 {
 	/// Restore saved order only when UnderAttack counter is expired
 	if ((unit.UnderAttack && IsAutoTargeting()) || !unit.RestoreOrder()) {
-		if (IsAutoTargeting() && this->goalPos != this->attackMovePos) {
+		if (IsAutoTargeting() && !HeadsForOwnPoint()) {
+			// The fight of an attack-move is over: the same re-issue check as for a saved one.
+			if (IsRememberedAttackMove()) {
+				switch (this->ReissueReady(unit, GameCycle)) {
+					case wc2ai::Reissue::Ready:
+						break;
+					case wc2ai::Reissue::Wait:
+						// The unit stands; the attack-move is kept for the next check.
+						RememberAttackMove(unit);
+						this->Finished = true;
+						return true;
+					case wc2ai::Reissue::Forget:
+						this->Finished = true;
+						return true;
+				}
+			}
+			// Sent on to its point again: pulled again from where the unit stands (0x4D892B).
 			this->goalPos = this->attackMovePos;
+			this->GoalPulled = false;
 			this->Range = 0;
 			this->MinRange = 0;
 			this->State = AUTO_TARGETING;
@@ -601,6 +680,96 @@ bool COrder_Attack::EndActionAttack(CUnit &unit, const bool canBeFinished = true
 		return true;
 	}
 	return false;
+}
+
+/**
+**  Keep this attack-move as the unit's memory (the saved order) while it stands: the end of its
+**  next fight or cast runs the re-issue check on it.
+*/
+void COrder_Attack::RememberAttackMove(CUnit &unit) const
+{
+	if (unit.SavedOrder != nullptr) {
+		return;
+	}
+	auto memory = std::make_unique<COrder_Attack>(*this);
+	memory->ClearGoal();
+	memory->offeredTarget = nullptr;
+	memory->goalPos = memory->attackMovePos;
+	memory->GoalPulled = false; // pulled again when the memory is sent (0x4D892B -> 0x4D8970)
+	memory->Range = 0;
+	memory->MinRange = 0;
+	memory->State = AUTO_TARGETING;
+	memory->KillSeenAt = 0;
+	unit.SavedOrder = std::move(memory);
+}
+
+/**
+**  An attack-move whose path to its point fails. The original (ORIG46 item 2, unit memory read
+**  live) does not try it again on a timer: the unit goes idle where it stands and keeps the
+**  attack-move as its memory with the counter at 0, and nothing more happens until a fight or a
+**  cast ends (the re-issue check, RestoreOrder). Within 1 tile of the point it is done.
+*/
+void COrder_Attack::EndBlockedAttackMove(CUnit &unit)
+{
+	if (wc2ai::AttackMoveRetry(unit.tilePos.x - this->attackMovePos.x,
+	                           unit.tilePos.y - this->attackMovePos.y)) {
+		RememberAttackMove(unit);
+		this->Finished = true;
+		return;
+	}
+	EndActionAttack(unit, true);
+}
+
+/**
+**  A person's ship on an attack-move to a point whose target has died does not go on at once: in
+**  the original it stays in its fight with no target - no search, no re-issue, no answer to hits -
+**  for about 111 frames after the kill, then takes the next target in reach or, with none, is sent
+**  on to its point (run 49 H1 / H2 / H3, ORIG47 E4; wc2ai::ShipKillHold). A shot's animation that
+**  is still playing when the target dies plays out first.
+**
+**  @return true when this cycle is spent: the ship holds, or the hold has just ended.
+*/
+bool COrder_Attack::HoldAfterKill(CUnit &unit)
+{
+	if (this->KillSeenAt == 0) {
+		const CUnit *goal = this->GetGoal();
+		if (goal == nullptr || goal->IsAlive()
+		    || !wc2ai::HoldsAfterKill(!unit.Player->AiEnabled,
+		                              unit.Type->MoveType == EMovement::Naval,
+		                              IsRememberedAttackMove())) {
+			return false;
+		}
+		this->KillSeenAt = GameCycle ? GameCycle : 1;
+	}
+	if (unit.Anim.Unbreakable) {
+		return false; // the running animation (the shot, a move step) ends first
+	}
+	if (GameCycle < this->KillSeenAt + wc2ai::ShipKillHold) {
+		if (this->HasGoal()) {
+			CheckIfGoalValid(unit); // the dead target is dropped (its tile kept, as a lost goal)
+		}
+		this->State = AUTO_TARGETING;
+		if (unit.Type->Animations) {
+			UnitShowAnimation(unit, &unit.Type->Animations->Still);
+		}
+		return true;
+	}
+	// The hold is over: the next target in reach is taken at once, without a re-issue; with none
+	// the attack-move is sent on to its point (or stands, by the re-issue check).
+	this->KillSeenAt = 0;
+	this->Sleep = 0;
+	if (AutoSelectTarget(unit) && this->HasGoal()) {
+		if (InAttackRange(unit, *this->GetGoal())) {
+			TurnToTarget(unit, this->GetGoal());
+			this->State = AUTO_TARGETING | ATTACK_TARGET;
+		} else {
+			unit.Frame = 0;
+			this->State = AUTO_TARGETING | MOVE_TO_TARGET;
+		}
+		return true;
+	}
+	EndActionAttack(unit);
+	return true;
 }
 
 /**
@@ -620,6 +789,7 @@ void COrder_Attack::MoveToBetterPos(CUnit &unit)
 			this->attackMovePos = this->goalPos;
 		}
 	}
+	this->GoalPulled = false;
 	this->goalPos =
 		goal
 			? GetRndPosInDirection(unit.tilePos, *goal, true, unit.Type->MinAttackRange, 3)
@@ -745,6 +915,9 @@ void COrder_Attack::MoveToTarget(CUnit &unit)
 	if (unit.Anim.Unbreakable || this->Finished) {
 		return;
 	}
+	if (HoldAfterKill(unit)) {
+		return;
+	}
 	if (IsMovingToAttackPos()) {
 		MoveToAttackPos(unit, err);
 		return;
@@ -796,17 +969,44 @@ void COrder_Attack::MoveToTarget(CUnit &unit)
 			this->State |= ATTACK_TARGET;
 			return;
 		}
+		// An attack-move that came as near as it could (a widened range) to its point: the unit stands
+		// next to it, idle with the attack-move as its memory (ORIG47 6a A2 / A3 / D1). On its way to a
+		// lost target's last tile it goes on to its point instead (EndActionAttack below).
+		if (!goal && IsAutoTargeting() && !IsAttackGroundOrWall() && this->Range > 0 && HeadsForOwnPoint()) {
+			EndBlockedAttackMove(unit);
+			return;
+		}
 	}
 	// Unreachable.
 	// FIXME: look at this
 	if (err == PF_UNREACHABLE) {
 		if (!this->HasGoal()) {
+			if (IsAutoTargeting() && !IsAttackGroundOrWall()) {
+				// As Move: widen the range round the (pulled) point until a tile of the ring can be
+				// reached; no wait, no timed retry. An enclosed unit ends at the map's size, idle with
+				// the attack-move as its memory (ORIG46).
+				if (this->Range > std::max(Map.Info.MapWidth, Map.Info.MapHeight)) {
+					EndBlockedAttackMove(unit);
+					return;
+				}
+				this->Range++;
+				return;
+			}
 			// When attack-moving we have to allow a bigger range (PF)
 			this->Range++;
 			unit.Wait = 5;
 			return;
 		}
 		this->ClearGoal();
+		// A person's attack-move whose next target cannot be reached stops for good: idle, the
+		// attack-move kept as its memory, not sent on (run 49 H3, ORIG47 E3 / E4: a ship 3 frames
+		// after such a pick; no resume in 5735 frames). A fight that ends otherwise resumes.
+		if (!unit.Player->AiEnabled && unit.SavedOrder == nullptr && IsRememberedAttackMove()) {
+			EndBlockedAttackMove(unit);
+			return;
+		}
+		EndActionAttack(unit, true);
+		return;
 	}
 	EndActionAttack(unit);
 }
@@ -824,6 +1024,9 @@ void COrder_Attack::AttackTarget(CUnit &unit)
 	/// Order may be set as finished by outside code while playing attack animation.
 	/// In this case we must not execute code of AttackTarget
 	if (unit.Anim.Unbreakable || this->Finished) {
+		return;
+	}
+	if (HoldAfterKill(unit)) {
 		return;
 	}
 	if (!this->HasGoal() && IsAttackGroundOrWall()) {
@@ -871,6 +1074,23 @@ void COrder_Attack::Execute(CUnit &unit) /* override */
 	}
 	StopWaiting(unit);
 
+	// A person's ship whose target has just died stays in its fight for a while (run 49 H1 / H2).
+	if (HoldAfterKill(unit)) {
+		return;
+	}
+
+	bool justPulled = false;
+	if (!this->GoalPulled && this->Action == UnitAction::Attack && IsAutoTargeting() && !this->HasGoal()
+	    && this->goalPos == this->attackMovePos && Map.Info.IsPointOnMap(this->attackMovePos)
+	    && !IsAttackGroundOrWall()) {
+		// An attack-move (or its re-issue) has just become the unit's order: a blocked point is pulled
+		// toward the unit from where it stands now (0x4D8970 -> 0x4C2880 -> 0x4C2630). Only the goal
+		// moves; the ordered point stays in attackMovePos (+0x90, ORIG47 log A2 f436).
+		this->goalPos = PullGoalTowardUnit(unit, this->attackMovePos);
+		this->GoalPulled = true;
+		justPulled = true;
+	}
+
 	if (this->State != ATTACK_TARGET && unit.CanStoreOrder(this) && AutoCast(unit)) {
 		this->Finished = true;
 		return;
@@ -890,6 +1110,14 @@ void COrder_Attack::Execute(CUnit &unit) /* override */
 				TurnToTarget(unit, this->GetGoal());
 				this->State |= ATTACK_TARGET;
 				AttackTarget(unit);
+				return;
+			}
+			// The point was just pulled and no target was taken: the path step finds no way at all
+			// from here (its first line step blocked and nothing free up to the blocked goal), so the
+			// unit is idle where it stands with the attack-move kept as the memory (0x4D5E20 ->
+			// 0x4C2A9B -> 0x4D8720; ORIG48 trials 5, 8).
+			if (justPulled && !this->HasGoal() && PathStepFindsNoWay(unit, this->goalPos)) {
+				EndBlockedAttackMove(unit);
 				return;
 			}
 			this->State |= MOVE_TO_TARGET;

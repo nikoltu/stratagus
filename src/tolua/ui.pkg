@@ -560,6 +560,8 @@ class ImageTextField : public Widget
 	virtual void setText(const std::string text);
 	virtual std::string &getText();
 	void setItemImage(CGraphicPtr image);
+	void setItemImageFocused(CGraphicPtr image);
+	void setItemImageSlice(int left, int top, int right, int bottom, double scale);
 	virtual void setPassword(bool flag);
 };
 

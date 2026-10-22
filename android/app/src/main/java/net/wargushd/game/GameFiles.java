@@ -31,6 +31,22 @@ final class GameFiles {
         "Data/Backgrounds/main_background_characters.png",
         "Data/Strings/enUS.json",
         "Data/Font/BLQ55.ttf",
+        // What the app's own preparation reads and cannot do without (GATE-ENGINE-FILES, taken
+        // from the code, not guessed): FontBaker.CLASSIC makes the game's bitmap fonts from these,
+        // and a missing one fails the whole font step.
+        "Data/Font/FONT6.FNT",
+        "Data/Font/FONT10.FNT",
+        "Data/Font/FONT12.FNT",
+        "Data/Font/FONT32.FNT",
+        "Data/Font/FONT50.FNT",
+        // The engine's own game rules (GATE-ENGINE-FILES, from the engine's code): the unit numbers
+        // (wc2data.cpp ApplyRemasteredUnitData), the computer players' program (wc2ai.cpp, ai.bin)
+        // and the computer's attack rates (wc2ai.cpp, script.bin). Without one of them the
+        // engine does not stop but plays by other rules in silence; they are also the three files
+        // of the LAN content id (netconnect.cpp NetworkContentDataFiles), kept equal by a host test.
+        "Data/Rez/unitdata.dat",
+        "Data/Rez/ai.bin",
+        "Data/Rez/script.bin",
     };
 
     /** Content the game runs without: directory, and the word used for it on screen. */

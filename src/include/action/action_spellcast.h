@@ -59,6 +59,8 @@ public:
 
 	const SpellType &GetSpell() const { return *Spell; }
 	void SetSpell(const SpellType &spell) { Spell = &spell; }
+	/// The end of the cast: back to the saved order (the original's re-issue check, DECODE_B11_ROUND2 1).
+	bool RestoreAfterCast(CUnit &unit);
 private:
 	bool CheckForDeadGoal(CUnit &unit);
 	bool SpellMoveToTarget(CUnit &unit);

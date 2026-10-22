@@ -122,6 +122,9 @@ void Spell_SpawnMissile::Parse(lua_State *l, int startIndex, int endIndex) /* ov
 		} else if (value == "state") {
 			// the missile's own state at the start (a flame of the Flame Shield: its step on the ring)
 			this->State = LuaToNumber(l, -1, j + 1);
+		} else if (value == "free-tile-refund") {
+			// a rune: laid only on a free tile, the mana given back for a tile not taken
+			this->FreeTileRefund = LuaToNumber(l, -1, j + 1);
 		} else if (value == "start-point") {
 			lua_rawgeti(l, -1, j + 1);
 			CclSpellMissileLocation(l, this->StartPoint);
@@ -247,6 +250,18 @@ int Spell_SpawnMissile::Cast(CUnit &caster,
 		const PixelPos startPos =
 			EvaluateMissileLocation(this->StartPoint, caster, target, goalPos);
 		const PixelPos endPos = EvaluateMissileLocation(this->EndPoint, caster, target, goalPos);
+		if (this->FreeTileRefund >= 0) {
+			const Vec2i tile = Map.MapPixelPosToTilePos(startPos);
+			const bool onMap = Map.Info.IsPointOnMap(tile);
+			const bool groundUnit = onMap && ranges::any_of(Map.Field(tile)->UnitCache, [](const CUnit *unit) {
+				return unit->Type->MoveType != EMovement::Fly && unit->CurrentAction() != UnitAction::Die;
+			});
+			if (!RuneTileTaken(onMap, groundUnit, onMap && MissileOfTypeOnTile(*this->Missile, tile))) {
+				// SpellCast takes the whole cost after the actions.
+				caster.Variable[MANA_INDEX].Value += this->FreeTileRefund;
+				return 1;
+			}
+		}
 		::Missile *missile = MakeMissile(*this->Missile, startPos, endPos);
 		missile->TTL = this->TTL;
 		missile->Delay = this->Delay;

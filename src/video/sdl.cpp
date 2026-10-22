@@ -52,6 +52,8 @@
 #include "loadingscreen.h"
 #include "video.h"
 #include "hd_classic_hud.h"
+#include "touch_drag.h"
+#include "water_anim.h"
 #include "widgets.h"
 
 #include <climits>
@@ -369,7 +371,8 @@ void InitVideoSdl()
 		SDL_StartTextInput();
 #else
 		// On Android, SDL_StartTextInput pops up the soft keyboard, which covers the
-		// whole game. Keep it off; open it explicitly only when a text field is focused.
+		// whole game. Keep it off; it is opened for a text field the player taps and closed
+		// when that field loses the focus (SyncScreenKeyboard, widgets.cpp).
 		SDL_StopTextInput();
 #endif
 
@@ -1169,15 +1172,14 @@ static void HandleFingerEvent(const SDL_Event &event)
 				break;
 			}
 			{
-				const bool drift = std::abs(px - TouchDownX) > TOUCH_DRAG_PX
-				                   || std::abs(py - TouchDownY) > TOUCH_DRAG_PX;
-				if (TouchPair && !TouchDragging && !drift) {
-					break;   // still a possible second tap: the pointer stays on the first tap's point
-				}
-				PushMouseMotion(px, py);
-				if (!TouchDragging && drift) {
-					// Enough drift: this is a drag. Start a left press from the
-					// origin so box-select / map-scroll behave like a held button.
+				// IG-014: the events of this motion (touch_drag.h). A pair that has not drifted
+				// sends none (the pointer stays on the first tap's point); the motion that starts
+				// a drag sends motion + left press at the landing point, then the motion to here.
+				const touchdrag::Step step = touchdrag::onMotion(TouchDownX, TouchDownY, px, py,
+				                                                 TouchDragging, TouchPair, TOUCH_DRAG_PX);
+				if (step.startsDrag) {
+					// Enough drift: this is a drag. The left press is given at the origin so
+					// box-select / map-scroll behave like a held button from where the finger landed.
 					TouchDragging = true;
 					// TOUCH-R5: the drag of a pair, begun and ended on the map view while the
 					// engine is in pointer mode, adds its box (Shift at the release, below).
@@ -1189,7 +1191,14 @@ static void HandleFingerEvent(const SDL_Event &event)
 						// The first tap of the pair, on empty ground, has cleared the selection.
 						UITouchRestoreClearedSelection();
 					}
-					PushMouseButton(SDL_MOUSEBUTTONDOWN, SDL_BUTTON_LEFT, px, py);
+				}
+				for (int i = 0; i < step.count; ++i) {
+					const touchdrag::Event &ev = step.events[i];
+					if (ev.kind == touchdrag::Kind::LeftDown) {
+						PushMouseButton(SDL_MOUSEBUTTONDOWN, SDL_BUTTON_LEFT, ev.x, ev.y);
+					} else {
+						PushMouseMotion(ev.x, ev.y);
+					}
 				}
 			}
 			break;
@@ -2001,13 +2010,221 @@ void EndFrame()
 static constexpr Uint32 GreyLiveSettleMs = 500;
 static constexpr Uint32 GreyLiveIdleMs = 250;
 
+static SDL_Texture *GreyTex = nullptr;
+static int GreyW = 0, GreyH = 0;
+static std::vector<uint8_t> GreyPx;   // kept between calls: a live frame is read again and again
+static Uint32 GreyLastRead = 0;
+static bool GreyLastLive = false;
+static bool GreyRetake = false;     // the held frame is read again once (GreyFrameRetake)
+
+/**
+**  PERF-A3a held water on the GPU (WATER_ANIM.md "Frame-time check"). Before, each water step under a
+**  held window drew the whole game and read it back (2960x1848: 20.9 MB each way, ~8.3 / s). Now the
+**  kept greys are taken once without the water layer (probe NoLayer), and two more frames measure,
+**  per pixel, how much of the layer's area shows through what is drawn over it (units, fog, HUD):
+**  the area filled with 0 (probe Black) and with 255 (probe White); cover = grey(White) - grey(Black).
+**  Alpha blending and adding are linear in what lies under them, and so are greys, so the grey of
+**  the game with the water is grey(no water) + cover x grey(water). From then on each step only the
+**  water layer is built (as in play), drawn in greys into GreyWaterTex, multiplied by the cover and
+**  added over the kept greys: no draw of the game, no readback. Not exact where a layer over the
+**  water multiplies by a colour (a MOD blend) or where a channel clips at 255.
+*/
+enum class GreyWaterState { Off, Base, Black, White, Ready };
+static GreyWaterState GreyWater = GreyWaterState::Off;
+static SDL_Texture *GreyCoverTex = nullptr;  // cover per pixel, as a grey (MOD)
+static SDL_Texture *GreyWaterTex = nullptr;  // the water of the step in greys x cover (target, ADD)
+static std::vector<uint8_t> GreyBlackPx;     // grey of the Black probe, one byte a pixel
+static uint32_t GreyWaterStep = 0;
+static bool GreyWaterComposed = false;
+
+static void GreyWaterReset()
+{
+	if (GreyCoverTex) {
+		SDL_DestroyTexture(GreyCoverTex);
+		GreyCoverTex = nullptr;
+	}
+	if (GreyWaterTex) {
+		SDL_DestroyTexture(GreyWaterTex);
+		GreyWaterTex = nullptr;
+	}
+	GreyBlackPx.clear();
+	GreyBlackPx.shrink_to_fit();
+	GreyWater = GreyWaterState::Off;
+	GreyWaterComposed = false;
+}
+
+/// Size in pixels of the frame the grey copy is read from and laid over.
+static bool GreyTargetSize(int &w, int &h)
+{
+	SDL_Rect vp;
+	float sx = 1.f, sy = 1.f;
+	SDL_RenderGetViewport(TheRenderer, &vp);
+	SDL_RenderGetScale(TheRenderer, &sx, &sy);
+	w = static_cast<int>(vp.w * sx + 0.5f);
+	h = static_cast<int>(vp.h * sy + 0.5f);
+	return w > 0 && h > 0;
+}
+
+/**
+**  PERF-A3a: will the next GreyFrameUnderMenu(true, false) only lay the kept frame over the game,
+**  without reading the backbuffer again? Then nothing the game draws before it is seen: the copy
+**  is opaque and covers the whole frame. False while live (bare pause), before the first read,
+**  after a change of size (the next read is of a fully drawn frame) and while the window is not
+**  shown.
+*/
+bool GreyFrameHeld()
+{
+	if (dummyRenderer || !TheRenderer || !GreyTex || GreyLastLive || !IsSDLWindowVisible) {
+		return false;
+	}
+	// The two probe frames are drawn in full (they are read, never seen).
+	if (GreyWater == GreyWaterState::Black || GreyWater == GreyWaterState::White) {
+		return false;
+	}
+	int w = 0, h = 0;
+	return GreyTargetSize(w, h) && w == GreyW && h == GreyH;
+}
+
+void GreyFrameRetake()
+{
+	GreyRetake = true;
+}
+
+HDWaterProbe GreyFrameWaterProbe(bool wanted)
+{
+	if (!wanted) {
+		if (GreyWater != GreyWaterState::Off) {
+			GreyWaterReset();
+		}
+		return HDWaterProbe::None;
+	}
+	int w = 0, h = 0;
+	if (dummyRenderer || !TheRenderer || !IsSDLWindowVisible || !GreyTargetSize(w, h)
+	    || SDL_RenderTargetSupported(TheRenderer) != SDL_TRUE) {
+		return HDWaterProbe::None;
+	}
+	// The next GreyFrameUnderMenu(true, false) takes the kept frame (its take branch): taken without
+	// the water layer.
+	if (!GreyTex || GreyLastLive || w != GreyW || h != GreyH) {
+		GreyWaterReset();
+		GreyWater = GreyWaterState::Base;
+		return HDWaterProbe::NoLayer;
+	}
+	switch (GreyWater) {
+		case GreyWaterState::Black: return HDWaterProbe::Black;
+		case GreyWaterState::White: return HDWaterProbe::White;
+		default: return HDWaterProbe::None;
+	}
+}
+
+bool GreyFrameWaterOnGpu()
+{
+	return GreyWater == GreyWaterState::Ready;
+}
+
+/// Read the w x h frame into px as greys (RGBA bytes, grey in R, G, B). False when the read fails.
+static bool GreyReadFrame(std::vector<uint8_t> &px, int w, int h)
+{
+	px.resize(static_cast<size_t>(w) * h * 4);
+	// The rectangle is given, never left to the renderer: with none it reads its own viewport,
+	// and when that is larger than w x h here (seen once as a crash in memcpy under
+	// SDL_ConvertPixels at a campaign mission's start) it writes past this buffer. A given
+	// rectangle is only ever cut down to the viewport.
+	const SDL_Rect readRect = {0, 0, w, h};
+	if (SDL_RenderReadPixels(TheRenderer, &readRect, SDL_PIXELFORMAT_ABGR8888, px.data(), w * 4) != 0) {
+		return false;
+	}
+	for (size_t i = 0; i < px.size(); i += 4) {
+		// bytes are R, G, B, A in this format
+		px[i] = px[i + 1] = px[i + 2] =
+			static_cast<uint8_t>(classichud::greyOf(px[i], px[i + 1], px[i + 2]));
+		px[i + 3] = 255;
+	}
+	return true;
+}
+
+/// A probe frame of the held water (Black / White) is read; the White one makes the cover.
+static void GreyWaterProbeRead(std::vector<uint8_t> &px, int w, int h)
+{
+	if (!GreyReadFrame(px, w, h)) {
+		GreyWaterReset();
+		return;
+	}
+	const size_t n = static_cast<size_t>(w) * h;
+	if (GreyWater == GreyWaterState::Black) {
+		GreyBlackPx.resize(n);
+		for (size_t i = 0; i < n; ++i) {
+			GreyBlackPx[i] = px[i * 4];
+		}
+		GreyWater = GreyWaterState::White;
+		return;
+	}
+	if (GreyBlackPx.size() != n) {
+		GreyWaterReset();
+		return;
+	}
+	for (size_t i = 0; i < n; ++i) {
+		const int c = std::max(0, int(px[i * 4]) - int(GreyBlackPx[i]));
+		px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = static_cast<uint8_t>(c);
+	}
+	GreyBlackPx.clear();
+	GreyBlackPx.shrink_to_fit();
+	GreyCoverTex = SDL_CreateTexture(TheRenderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, w, h);
+	GreyWaterTex = SDL_CreateTexture(TheRenderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
+	if (!GreyCoverTex || !GreyWaterTex) {
+		GreyWaterReset();
+		return;
+	}
+	SDL_UpdateTexture(GreyCoverTex, nullptr, px.data(), w * 4);
+	SDL_SetTextureBlendMode(GreyCoverTex, SDL_BLENDMODE_MOD);
+	SDL_SetTextureBlendMode(GreyWaterTex, SDL_BLENDMODE_ADD);
+	GreyWater = GreyWaterState::Ready;
+	GreyWaterComposed = false;
+	LogPrint("Grey frame held: water on the GPU, cover %dx%d\n", w, h);
+}
+
+/// Ready: the water of the current step, in greys and times the cover, added over the kept greys.
+/// Composed again only when the step changed; otherwise only added (one full-frame blend).
+static void GreyWaterAdd()
+{
+	water_anim::Clock &clock = water_anim::Game();
+	clock.Advance(SDL_GetTicks());
+	if (!GreyWaterComposed || clock.Step() != GreyWaterStep) {
+		float sx = 1.f, sy = 1.f;
+		SDL_RenderGetScale(TheRenderer, &sx, &sy);
+		SDL_Texture *prev = SDL_GetRenderTarget(TheRenderer);
+		Uint8 cr, cg, cb, ca;
+		SDL_GetRenderDrawColor(TheRenderer, &cr, &cg, &cb, &ca);
+		SDL_SetRenderTarget(TheRenderer, GreyWaterTex);
+		// Alpha 255: the ADD below weighs the colour by it.
+		SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, 255);
+		SDL_RenderClear(TheRenderer);
+		const bool ok = HDWaterAddHeldGreys(sx, sy);
+		if (ok) {
+			SDL_RenderCopy(TheRenderer, GreyCoverTex, nullptr, nullptr);
+		}
+		SDL_SetRenderTarget(TheRenderer, prev);
+		SDL_SetRenderDrawColor(TheRenderer, cr, cg, cb, ca);
+		if (!ok) {
+			// The kept greys have no water: from the next step they are taken again the old way
+			// (RedrawHeldFrame: a full draw with the water, then a read).
+			GreyWaterReset();
+			return;
+		}
+		GreyWaterStep = clock.Step();
+		GreyWaterComposed = true;
+	}
+	SDL_RenderCopy(TheRenderer, GreyWaterTex, nullptr, nullptr);
+}
+
 void GreyFrameUnderMenu(bool menuUp, bool live)
 {
-	static SDL_Texture *grey = nullptr;
-	static int greyW = 0, greyH = 0;
-	static std::vector<uint8_t> px;   // kept between calls: a live frame is read again and again
-	static Uint32 lastRead = 0;
-	static bool lastLive = false;
+	SDL_Texture *&grey = GreyTex;
+	int &greyW = GreyW;
+	int &greyH = GreyH;
+	std::vector<uint8_t> &px = GreyPx;
+	Uint32 &lastRead = GreyLastRead;
+	bool &lastLive = GreyLastLive;
 	if (dummyRenderer || !TheRenderer) {
 		return;
 	}
@@ -2019,6 +2236,8 @@ void GreyFrameUnderMenu(bool menuUp, bool live)
 		px.clear();
 		px.shrink_to_fit();
 		lastLive = false;
+		GreyRetake = false;
+		GreyWaterReset();
 		return;
 	}
 	// Nothing is presented while the window is not shown (EndFrame), and its surface may be going
@@ -2032,35 +2251,45 @@ void GreyFrameUnderMenu(bool menuUp, bool live)
 	// caption): the frame kept from the live phase is taken again on the change of mode.
 	const bool modeChanged = (live != lastLive);
 	lastLive = live;
-	if (!grey || refresh || modeChanged) {
-		SDL_Rect vp;
-		float sx = 1.f, sy = 1.f;
-		SDL_RenderGetViewport(TheRenderer, &vp);
-		SDL_RenderGetScale(TheRenderer, &sx, &sy);
-		const int w = static_cast<int>(vp.w * sx + 0.5f);
-		const int h = static_cast<int>(vp.h * sy + 0.5f);
-		if (w <= 0 || h <= 0) {
-			return;
+	if (live && GreyWater != GreyWaterState::Off) {
+		GreyWaterReset(); // a bare pause re-reads the frame with the water in it (GreyLiveIdleMs)
+	}
+	int w = 0, h = 0;
+	if (!GreyTargetSize(w, h)) {
+		return;
+	}
+	// A change of size (a resize, a turn of the device) takes the frame again: the kept one would
+	// be stretched over the new frame.
+	const bool sizeChanged = grey && (w != greyW || h != greyH);
+	// The animated water moved under a held frame (mainloop.cpp HoldFrameUnderWindow): the game was
+	// drawn again this frame and is read again. Not logged: it is about 8 times a second.
+	const bool retake = GreyRetake;
+	GreyRetake = false;
+	if (!grey || refresh || modeChanged || sizeChanged || retake) {
+		if (!live && (!grey || modeChanged || sizeChanged)) {
+			// PERF-A3a: a held frame is taken (see GreyFrameHeld); live reads are not named.
+			LogPrint("Grey frame held: built %dx%d (%s)\n", w, h,
+			         !grey ? "new" : sizeChanged ? "size" : "mode");
 		}
-		if (grey && (w != greyW || h != greyH)) {
+		if (sizeChanged) {
 			SDL_DestroyTexture(grey);
 			grey = nullptr;
 		}
-		px.resize(static_cast<size_t>(w) * h * 4);
-		// The rectangle is given, never left to the renderer: with none it reads its own viewport,
-		// and when that is larger than w x h here (seen once as a crash in memcpy under
-		// SDL_ConvertPixels at a campaign mission's start) it writes past this buffer. A given
-		// rectangle is only ever cut down to the viewport.
-		const SDL_Rect readRect = {0, 0, w, h};
-		if (SDL_RenderReadPixels(TheRenderer, &readRect, SDL_PIXELFORMAT_ABGR8888, px.data(), w * 4) != 0) {
+		// Held water: only the take its probe asked for (NoLayer, GreyFrameWaterProbe) starts it;
+		// any other take (a live read, a retake with the water drawn) drops it.
+		const bool waterBase = !live && GreyWater == GreyWaterState::Base;
+		if (!waterBase && GreyWater != GreyWaterState::Off) {
+			GreyWaterReset();
+		}
+		if (!GreyReadFrame(px, w, h)) {
+			if (waterBase) {
+				GreyWaterReset();
+			}
 			return;
 		}
 		lastRead = now;
-		for (size_t i = 0; i < px.size(); i += 4) {
-			// bytes are R, G, B, A in this format
-			px[i] = px[i + 1] = px[i + 2] =
-				static_cast<uint8_t>(classichud::greyOf(px[i], px[i + 1], px[i + 2]));
-			px[i + 3] = 255;
+		if (waterBase) {
+			GreyWater = GreyWaterState::Black;
 		}
 		if (!grey) {
 			grey = SDL_CreateTexture(TheRenderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, w, h);
@@ -2072,8 +2301,14 @@ void GreyFrameUnderMenu(bool menuUp, bool live)
 			SDL_SetTextureBlendMode(grey, SDL_BLENDMODE_NONE);
 		}
 		SDL_UpdateTexture(grey, nullptr, px.data(), w * 4);
+	} else if (!live && (GreyWater == GreyWaterState::Black || GreyWater == GreyWaterState::White)) {
+		// A probe frame of the held water: read, never shown (the kept greys are laid over it).
+		GreyWaterProbeRead(px, w, h);
 	}
 	SDL_RenderCopy(TheRenderer, grey, nullptr, nullptr);
+	if (!live && GreyWater == GreyWaterState::Ready) {
+		GreyWaterAdd();
+	}
 }
 
 void RealizeVideoMemory()

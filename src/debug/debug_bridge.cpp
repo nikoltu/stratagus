@@ -95,7 +95,11 @@ static bool DbgInited = false;
 /// Whether the command file is read and the debug Lua calls exist. On Android only a build
 /// marked debuggable asks for it (the game activity keeps the file "debug_bridge" in the app's files folder); elsewhere
 /// the environment variable WARGUSHD_DEBUG_BRIDGE=1 does. Off until DebugBridge_Init has found one of them.
+#ifdef WARGUSHD_DEBUG_COMMANDS
 static bool DbgCommands = false;
+#else
+static constexpr bool DbgCommands = false; // a build without the command channel
+#endif
 static fs::path DbgDir;       /// <UserDirectory>/wdbg
 static fs::path DbgCmdFile;   /// wdbg/cmd
 static fs::path DbgOutFile;   /// wdbg/out.json
@@ -188,6 +192,11 @@ struct Json {
 	void key_(const char *key) { s += '"'; s += key; s += "\":"; }
 	void comma() { s += ','; }
 };
+
+// The command channel (the command file, its commands, the status file and the debug Lua
+// calls) is compiled only where WARGUSHD_DEBUG_COMMANDS is defined (CMake option of that name,
+// OFF for a release build). Without it only the crash records and the watchdog remain.
+#ifdef WARGUSHD_DEBUG_COMMANDS
 
 void WriteFileAtomic(const std::string &payload)
 {
@@ -526,7 +535,7 @@ CUnitType *FindUnitTypeByIdent(const std::string &ident)
 	return nullptr;
 }
 
-// Safe unit lookup by slot id (GetSlotUnit() does no bounds check).
+// Safe unit lookup by slot id: only a unit that is in the game (not a released slot).
 CUnit *FindUnitById(long id)
 {
 	if (!UnitManager) return nullptr;
@@ -1284,6 +1293,8 @@ void WriteStatus()
 	}
 }
 
+#endif // WARGUSHD_DEBUG_COMMANDS
+
 /*----------------------------------------------------------------------------
 --  Crash handler
 ----------------------------------------------------------------------------*/
@@ -1591,7 +1602,13 @@ void DebugBridge_Init()
 
 	DbgInited = true;
 
+#ifndef WARGUSHD_DEBUG_COMMANDS
 #ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_INFO, DBG_LOG_TAG, "debug bridge commands not built");
+#else
+	ErrorPrint("debug bridge commands not built\n");
+#endif
+#elif defined(__ANDROID__)
 	{
 		// A file, not an environment variable: where the library runs under binary translation
 		// (an x86 emulator) the Java side and this side do not share an environment.
@@ -1607,18 +1624,22 @@ void DebugBridge_Init()
 	}
 	ErrorPrint("debug bridge commands %s\n", DbgCommands ? "on" : "off");
 #endif
+#ifdef WARGUSHD_DEBUG_COMMANDS
 	if (Lua && DbgCommands) {
 		lua_register(Lua, "DebugNetQuitPlayer", CclDebugNetQuitPlayer);
 		lua_register(Lua, "DebugNetFakeWait", CclDebugNetFakeWait);
 		lua_register(Lua, "DebugNetForceWatchChoice", CclDebugNetForceWatchChoice);
 	}
+#endif
 	if (Lua) {
 		lua_register(Lua, "DebugBridgeOn", CclDebugBridgeOn); // the in-game Debug row asks
 	}
 
+#ifdef WARGUSHD_DEBUG_COMMANDS
 	if (DbgCommands) {
 		WriteStatus();
 	}
+#endif
 
 	DebugBridge_StartWatchdog();
 }
@@ -1645,6 +1666,7 @@ void DebugBridge_Poll()
 	if (!DbgCommands) {
 		return; // crash records only: no status file, no command read
 	}
+#ifdef WARGUSHD_DEBUG_COMMANDS
 	WriteStatus();
 
 	std::error_code ec;
@@ -1676,6 +1698,7 @@ void DebugBridge_Poll()
 		response = "{\"error\":\"exception while dispatching command\"}";
 	}
 	WriteFileAtomic(response);
+#endif // WARGUSHD_DEBUG_COMMANDS
 }
 
 //@}

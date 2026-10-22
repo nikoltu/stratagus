@@ -52,6 +52,7 @@
 #include "settings.h"
 #include "stratagus.h"
 #include "tileset.h"
+#include "actions.h"
 #include "unit.h"
 #include "unit_find.h"
 
@@ -109,16 +110,35 @@ static inline bool AStarOnGrid(int x, int y)
 	return !((x - AStarStart.x) % AStarStep) && !((y - AStarStart.y) % AStarStep);
 }
 
-/// heuristic cost function for a*
+/// The goal area of the running search (AStarFindPath): size, range, the unit's size.
+static int AStarGoalW = 1;
+static int AStarGoalH = 1;
+static int AStarGoalRange = 0;
+static int AStarUnitW = 1;
+static int AStarUnitH = 1;
+/// The cheapest step of the running search: 1 + the least tile move cost (1 on a map from a tileset:
+/// 2; the bare fields of host-test maps have 0: 1).
+static int AStarStepCost = 2;
+
+/**
+**  Heuristic cost function for A*: the steps still to go at the least step cost of the game.
+**
+**  A step costs 1 + the tile's move cost (1 on plain land, CostMoveToCallBack_Default): 2. The
+**  estimate is the Chebyshev distance from the unit to the goal area less the range, in steps of
+**  the unit's grid, x the cheapest step (AStarStepCost) - never more than the real cost, so the
+**  search returns the shortest way.
+**  The old estimate (Manhattan to the goal's top-left tile x 8, up to 4-8 x the real cost) made
+**  the search greedy: live run 68 the Peasants left the hall's west side (29,43) into the lane
+**  with a first step east (29,43 -> 30,44, about 11 steps to the mine; 55 of 69 legs); the greedy
+**  search ran west along the forest and took the way round (26 steps): host "lane 68" 44 of 96
+**  legs round (work/PATHFINDING_2026-10-21.md C7, work/CALIB_RUN68.md).
+*/
 static inline int AStarCosts(const Vec2i &pos, const Vec2i &goalPos)
 {
-	int baseCost = (std::abs(pos.x - goalPos.x) + std::abs(pos.y - goalPos.y)) / AStarStep;
-	// the base cost underestimates the real cost, because movement cost
-	// is increased by terrain or other units. it's difficult to give a good
-	// estimate, but we want to be pretty greedy anyway, so we multiply by a
-	// constant factor. This factor can be tweaked to nudge A* to be more greedy
-	// (if you make the factor higher), or explore more (if you make it lower).
-	return baseCost << 3;
+	const int dx = std::max({0, goalPos.x - (pos.x + AStarUnitW - 1), pos.x - (goalPos.x + AStarGoalW - 1)});
+	const int dy = std::max({0, goalPos.y - (pos.y + AStarUnitH - 1), pos.y - (goalPos.y + AStarGoalH - 1)});
+	const int tiles = std::max(0, std::max(dx, dy) - AStarGoalRange);
+	return AStarStepCost * ((tiles + AStarStep - 1) / AStarStep);
 }
 
 /*----------------------------------------------------------------------------
@@ -142,11 +162,57 @@ static std::vector<Node> AStarMatrix;
 /// see pathfinder.h
 int AStarFixedUnitCrossingCost;// = MaxMapWidth * MaxMapHeight;
 int AStarMovingUnitCrossingCost = 5;
-int AStarMaxSearchIterations = 1024 * 5;
+/// 0: the budget follows the map (AStarSearchBudget). The fixed 5120 of Wargus ran out before a
+/// way round a long wall or a forest serpentine on a 128 x 128 map was found: the search then
+/// answered a part way to the wall, the unit walked it, searched again from there and went to
+/// and fro without end (host test "path quality": 137 searches, 3000 steps, goal never reached).
+int AStarMaxSearchIterations = 0;
+/// Forget the regions of the map (see AStarGoalOutOfRegion)
+static void AStarClearRegions();
+/// Nodes generated or improved by the last search (host tests)
+int AStarLastSearchIterations = 0;
+/// Calls of AStarFindPath (host tests)
+int AStarSearchCalls = 0;
 bool AStarKnowUnseenTerrain = false;
 int AStarUnknownTerrainCost = 2;
 /// Used to temporary make enemy units unpassable (needs for correct path length calculating for automatic targeting algorithm)
 static bool AStarFixedEnemyUnitsUnpassable = false;
+/// A unit the search treats as standing (a wall) even while it moves: PathRoundUnit (live run 67 M1).
+const CUnit *AStarWallUnit = nullptr;
+/// PathThroughWaitingMates: own units standing on their way are crossed at a cost, not refused.
+bool AStarCrossMatesOnTheWay = false;
+/// The last search failed after its flood and refused a tile held by a standing unit of the
+/// searching unit's player that is on its way (see AStarLastFailByUnits in pathfinder.h).
+bool AStarLastFailByUnits = false;
+bool AStarLastFailBoxed = false;
+bool AStarLastFailGoalHeldForGood = false;
+/// A unit standing for good (not on its way) was refused by the running search.
+static bool AStarRefusedUnitForGood = false;
+/// Why the last AStarFindPath failed (see pathfinder.h, AStarFailReason).
+int AStarLastFailReason = 0;
+int AStarBudgetOuts = 0;
+/// A standing unit (not the searching one) was refused by the running search.
+static bool AStarRefusedUnit = false;
+/// A unit refused by the running search is such a unit on its way.
+static bool AStarRefusedUnitOnItsWay = false;
+
+/// A standing unit of the same player with an order still to go (a Move to another tile, a
+/// worker on its trip): it stands between two steps or waits for a step of its own, and leaves
+/// its tile soon. Units that stand for good (Still, a finished order, buildings) are not.
+static bool StandingUnitOnItsWay(const CUnit &unit, const CUnit &holder)
+{
+	if (holder.Player != unit.Player || holder.Type->Building || holder.Orders.empty()) {
+		return false;
+	}
+	const COrder &order = *holder.CurrentOrder();
+	if (order.Finished) {
+		return false;
+	}
+	if (order.Action == UnitAction::Move) {
+		return order.GetGoalPos() != holder.tilePos;
+	}
+	return order.Action == UnitAction::Resource;
+}
 
 static int AStarMapWidth;
 static int AStarMapHeight;
@@ -361,7 +427,10 @@ void InitAStar(int mapWidth, int mapHeight)
 		node.SetDirection(-1);
 	}
 #endif
-	OpenSet.resize(AStarMapWidth * AStarMapHeight / MAX_OPEN_SET_RATIO);
+	// A tile is at most once in the open set: room for every tile, so a search with the budget of
+	// the map never ends on "raise Open Set Max Size" (the old 1/8 of the map did not hold it).
+	OpenSet.resize(AStarMapWidth * AStarMapHeight + 1);
+	AStarClearRegions();
 	CostMoveToCache.resize(AStarMapWidth * AStarMapHeight, CacheNotSet);
 
 	for (int i = 0; i < 9; ++i) {
@@ -378,6 +447,7 @@ void FreeAStar()
 {
 	AStarMatrix.clear();
 	OpenSet.clear();
+	AStarClearRegions();
 	OpenSetSize = 0;
 	CostMoveToCache.clear();
 
@@ -454,7 +524,10 @@ static inline int AStarAddNode(const Vec2i &pos, int64_t costs)
 		return PF_FAILED;
 	}
 
-	const int costToGoal = costs;
+	// Ties of the whole cost go to the node nearer the goal: its own estimate, which every caller
+	// stores before adding it. (It was the whole cost itself, always above the estimate of the node
+	// it was compared with: a tie went behind all nodes of the same cost, first in first out.)
+	const int costToGoal = AStarMatrix[pos.y * AStarMapWidth + pos.x].GetCostToGoal();
 	const int dist = std::abs(pos.x - AStarGoalX) + std::abs(pos.y - AStarGoalY);
 
 	// find where we should insert this node.
@@ -503,7 +576,7 @@ static inline int AStarAddNode(const Vec2i &pos, int64_t costs)
 **  Can be further optimized knowing that the new cost MUST BE LOWER
 **  than the old one.
 */
-static void AStarReplaceNode(int pos)
+static void AStarReplaceNode(int pos, int64_t costs)
 {
 	ProfileBegin("AStarReplaceNode");
 
@@ -514,8 +587,9 @@ static void AStarReplaceNode(int pos)
 	OpenSetSize--;
 	memmove(&OpenSet[pos], &OpenSet[pos+1], sizeof(Open) * (OpenSetSize-pos));
 
-	// Re-add the node with the new cost
-	AStarAddNode(node.pos, node.GetCosts());
+	// Re-add the node with the new cost (it was re-added with its old cost, so a node reached by a
+	// cheaper way kept the place of the dearer one in the open set)
+	AStarAddNode(node.pos, costs);
 	ProfileEnd("AStarReplaceNode");
 }
 
@@ -582,7 +656,7 @@ static int CostMoveToCallBack_Default(unsigned int index, const CUnit &unit)
 #endif
 					return -1;
 				}
-				if (goal->Moving)  {
+				if (goal->Moving && goal != AStarWallUnit) {
 					// moving unit are crossable
 					cost += AStarMovingUnitCrossingCost;
 				} else {
@@ -597,7 +671,18 @@ static int CostMoveToCallBack_Default(unsigned int index, const CUnit &unit)
 						if (goal->Player->IsEnemy(unit) && unit.IsAggressive() && CanTarget(*unit.Type, *goal->Type)
 							&& goal->Variable[UNHOLYARMOR_INDEX].Value == 0 && goal->IsVisibleAsGoal(*unit.Player)) {
 								cost += 2 * AStarMovingUnitCrossingCost;
+						} else if (AStarCrossMatesOnTheWay && goal != AStarWallUnit && StandingUnitOnItsWay(unit, *goal)) {
+							// (PathHasWayRound: the wall unit itself is never crossed)
+							// PathThroughWaitingMates: an own unit waiting on its way is crossed at
+							// twice the moving cost (UNMEASURED, round 3.4.81 head-on deadlock).
+							cost += 2 * AStarMovingUnitCrossingCost;
 						} else {
+							AStarRefusedUnit = true;
+							if (StandingUnitOnItsWay(unit, *goal)) {
+								AStarRefusedUnitOnItsWay = true;
+							} else {
+								AStarRefusedUnitForGood = true;
+							}
 						// FIXME: Need support for moving a fixed unit to add cost
 #ifdef DEBUG
 							const_cast<CMapField *>(mf)->lastAStarCost = -1;
@@ -1072,6 +1157,184 @@ extern bool DumpNextAStar;
 void AStarDumpStats();
 #endif
 
+/*----------------------------------------------------------------------------
+--  Regions: a goal no way can reach fails at once
+----------------------------------------------------------------------------*/
+
+// With the budget of the map (C1) a search for a goal that cannot be reached explores the whole
+// region the unit stands in before it fails, up to twice the tiles of the map: 10 ms on a 128 map
+// and 70 ms on a 256 map on the host, 20 units ordered there 0.25 s / 1.4 s in one cycle, and the
+// Range++ retry of COrder_Move repeats it every cycle (host test "path quality: search cost of an
+// unreachable goal", work/PATHFINDING_2026-10-21.md "Search cost").
+//
+// A region is an 8-neighbour area of tiles CostMoveTo does not refuse for their fixed flags
+// (terrain, forest, rocks, walls, buildings; the units on the map left out). A way of the search
+// never leaves the region of its start, whatever the units do, so a goal area without a tile of
+// that region is unreachable and the search is not run. Regions are kept per movement mask. A
+// "joined" answer runs the search as before, so stale regions cost at most the old flood; before an
+// "apart" answer the flags are compared with a fingerprint and the regions rebuilt if anything
+// changed (a tree cut, a wall or a building gone).
+
+namespace
+{
+constexpr tile_flags AStarUnitFlags = MapFieldLandUnit | MapFieldAirUnit | MapFieldSeaUnit;
+/// Larger goal areas (a long Range++ retry, a wide attack range) are left to the search.
+constexpr int AStarRegionMaxGoalArea = 64 * 64;
+
+struct AStarRegionMap {
+	tile_flags mask = 0;       /// the fixed flags that refuse a tile (movement mask without units)
+	uint64_t fingerprint = 0;  /// of the masked flags when the regions were built
+	bool verify = false;       /// a search failed after a flood: compare the fingerprint first
+	std::vector<int> region;   /// per tile; 0: refused by its flags
+};
+std::vector<AStarRegionMap> AStarRegionMaps;
+
+enum class ERegion { Joined, Apart, Unknown };
+}
+
+static uint64_t AStarRegionFingerprint(tile_flags mask)
+{
+	uint64_t hash = 14695981039346656037ull ^ ((uint64_t(AStarMapWidth) << 32) | uint64_t(AStarMapHeight));
+	const int count = AStarMapWidth * AStarMapHeight;
+	for (int i = 0; i != count; ++i) {
+		hash = (hash ^ uint64_t(Map.Field(i)->Flags & mask)) * 1099511628211ull;
+	}
+	return hash;
+}
+
+static void AStarBuildRegions(AStarRegionMap &regions)
+{
+	const int w = AStarMapWidth;
+	const int h = AStarMapHeight;
+	regions.region.assign(w * h, 0);
+	std::vector<int> stack;
+	int next = 0;
+	for (int i = 0; i != w * h; ++i) {
+		if (regions.region[i] != 0 || (Map.Field(i)->Flags & regions.mask)) {
+			continue;
+		}
+		regions.region[i] = ++next;
+		stack.push_back(i);
+		while (!stack.empty()) {
+			const int o = stack.back();
+			stack.pop_back();
+			const int x = o % w;
+			const int y = o / w;
+			for (int dy = -1; dy <= 1; ++dy) {
+				for (int dx = -1; dx <= 1; ++dx) {
+					const int nx = x + dx;
+					const int ny = y + dy;
+					if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+						continue;
+					}
+					const int no = ny * w + nx;
+					if (regions.region[no] == 0 && !(Map.Field(no)->Flags & regions.mask)) {
+						regions.region[no] = next;
+						stack.push_back(no);
+					}
+				}
+			}
+		}
+	}
+	regions.fingerprint = AStarRegionFingerprint(regions.mask);
+	regions.verify = false;
+}
+
+/**
+**  Whether no way at all can join the start and the goal area of a search.
+**
+**  The goal area taken is the rectangle round the goal and its range (a superset of the tiles
+**  AStarMarkGoal marks), so "true" holds for every tile the search could end on.
+*/
+static bool AStarGoalOutOfRegion(const Vec2i &startPos, const Vec2i &goalPos, int gw, int gh,
+								 int tilesizex, int tilesizey, int maxrange, const CUnit &unit)
+{
+	if (!AStarKnowUnseenTerrain) {
+		// an unexplored tile is crossed whatever it holds: the regions would depend on the player
+		return false;
+	}
+	if (AStarStep > std::min<int>(unit.Type->TileWidth, unit.Type->TileHeight)) {
+		// a step longer than the unit could jump over a refused tile
+		return false;
+	}
+	const tile_flags mask = unit.Type->MovementMask & ~AStarUnitFlags;
+	if (mask == 0) {
+		return false;
+	}
+	const int minx = std::max(0, goalPos.x - maxrange - (tilesizex - 1));
+	const int miny = std::max(0, goalPos.y - maxrange - (tilesizey - 1));
+	const int maxx = std::min(AStarMapWidth - 1, goalPos.x + std::max(gw, 1) - 1 + maxrange);
+	const int maxy = std::min(AStarMapHeight - 1, goalPos.y + std::max(gh, 1) - 1 + maxrange);
+	if (minx > maxx || miny > maxy
+		|| int64_t(maxx - minx + 1) * (maxy - miny + 1) > AStarRegionMaxGoalArea) {
+		return false;
+	}
+	auto it = ranges::find_if(AStarRegionMaps, [&](const AStarRegionMap &r) { return r.mask == mask; });
+	if (it == AStarRegionMaps.end()) {
+		if (AStarRegionMaps.size() >= 8) {
+			AStarRegionMaps.clear();
+		}
+		AStarRegionMaps.emplace_back();
+		it = AStarRegionMaps.end() - 1;
+		it->mask = mask;
+		AStarBuildRegions(*it);
+	}
+	AStarRegionMap &regions = *it;
+	if (regions.verify) {
+		regions.verify = false;
+		if (AStarRegionFingerprint(mask) != regions.fingerprint) {
+			AStarBuildRegions(regions);
+		}
+	}
+	const auto decide = [&]() {
+		const int own = regions.region[startPos.y * AStarMapWidth + startPos.x];
+		if (own == 0) {
+			return ERegion::Unknown;
+		}
+		for (int y = miny; y <= maxy; ++y) {
+			const int *row = &regions.region[y * AStarMapWidth];
+			for (int x = minx; x <= maxx; ++x) {
+				if (row[x] == own) {
+					return ERegion::Joined;
+				}
+			}
+		}
+		return ERegion::Apart;
+	};
+	ERegion answer = decide();
+	if (answer == ERegion::Joined) {
+		return false;
+	}
+	if (AStarRegionFingerprint(mask) != regions.fingerprint) {
+		AStarBuildRegions(regions);
+		answer = decide();
+	}
+	return answer == ERegion::Apart;
+}
+
+static void AStarClearRegions()
+{
+	AStarRegionMaps.clear();
+}
+
+/// A search failed after a flood: the regions may be older than the map (a way closed).
+static void AStarVerifyRegions()
+{
+	for (AStarRegionMap &regions : AStarRegionMaps) {
+		regions.verify = true;
+	}
+}
+
+/// Nodes one search may generate or improve: the Lua value, or twice the tiles of the map
+/// (a search may reach a tile again by a cheaper way).
+static int AStarSearchBudget()
+{
+	if (AStarMaxSearchIterations > 0) {
+		return AStarMaxSearchIterations;
+	}
+	return std::max(1024 * 5, 2 * AStarMapWidth * AStarMapHeight);
+}
+
 /**
 **  Find path.
 */
@@ -1082,8 +1345,13 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 	Assert(Map.Info.IsPointOnMap(startPos));
 
 	ProfileBegin("AStarFindPath");
+	++AStarSearchCalls;
+	AStarLastFailByUnits = false;
+	AStarLastFailBoxed = false;
+	AStarLastFailGoalHeldForGood = false;
+	AStarLastFailReason = AStarFailNone;
 
-	AStarStep = std::max<int>(1, unit.Type->GridStep);
+	AStarStep =std::max<int>(1, unit.Type->GridStep);
 	AStarStart = startPos;
 	// A unit on a grid cannot stand on every tile: sent to a single tile, it has arrived on a grid
 	// tile within one tile less than its step of that tile.
@@ -1115,17 +1383,37 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 
 	AStarGoalX = goalPos.x;
 	AStarGoalY = goalPos.y;
+	AStarGoalW = std::max(1, gw);
+	AStarGoalH = std::max(1, gh);
+	AStarGoalRange = std::max(0, maxrange);
+	AStarUnitW = std::max(1, tilesizex);
+	AStarUnitH = std::max(1, tilesizey);
+	AStarStepCost = 1 + std::min(1, int(Map.Field(startPos)->getMoveCost()));
 
 	//  Check for simple cases first
 	int ret = AStarFindSimplePath(startPos, goalPos, gw, gh, tilesizex, tilesizey,
 								  minrange, maxrange, path, unit, squareRange);
 	if (ret != PF_FAILED) {
+		if (ret == PF_UNREACHABLE) {
+			AStarLastFailReason = AStarFailSimple;
+		}
 		ProfileEnd("AStarFindPath");
 		return ret;
 	}
 
+	// No way can join the region of the unit and the goal area: fail without the flood.
+	if (AStarGoalOutOfRegion(startPos, goalPos, gw, gh, tilesizex, tilesizey, maxrange, unit)) {
+		AStarLastFailReason = AStarFailRegion;
+		AStarLastSearchIterations = 0;
+		ProfileEnd("AStarFindPath");
+		return PF_UNREACHABLE;
+	}
+
 	//  Initialize
 	AStarCleanUp();
+	AStarRefusedUnitOnItsWay = false;
+	AStarRefusedUnit = false;
+	AStarRefusedUnitForGood = false;
 
 	if (gridPoint) {
 		ret = AStarFindGridLine(startPos, goalPos, minrange, maxrange, path, pathlen, unit, AStarStep, 0);
@@ -1148,6 +1436,9 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 	if (!AStarMarkGoal(goalPos, gw, gh, tilesizex, tilesizey, minrange, maxrange, unit, squareRange)) {
 		// goal is not reachable
 		ret = PF_UNREACHABLE;
+		AStarLastFailReason = AStarRefusedUnitOnItsWay ? AStarFailGoalUnitsOnTheWay : AStarFailGoalFull;
+		AStarLastFailGoalHeldForGood = AStarRefusedUnitForGood; // live run 78 (pathfinder.h)
+		AStarLastFailByUnits = AStarRefusedUnitOnItsWay;
 		ProfileEnd("AStarFindPath");
 		return ret;
 	}
@@ -1174,7 +1465,9 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 	}
 	Vec2i endPos;
 
-	int counter = AStarMaxSearchIterations;
+	const int budget = AStarSearchBudget();
+	int counter = budget;
+	AStarLastSearchIterations = 0;
 
 	//  Begin search
 	while (1) {
@@ -1200,6 +1493,8 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 
 		// If we have looked too long, then exit.
 		if (counter <= 0) {
+			AStarVerifyRegions();
+			++AStarBudgetOuts;
 			AstarDebugPrint("way too long\n");
 			ProfileEnd("AStarFindPath");
 			// return current best
@@ -1280,6 +1575,7 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 				AStarMatrix[eo].SetCostToGoal(costToGoal);
 				if (AStarAddNode(endPos, new_cost + costToGoal) == PF_FAILED) {
 					ret = PF_FAILED;
+					AStarLastFailReason = AStarFailOpenSet;
 					ProfileEnd("AStarFindPath");
 					return ret;
 				}
@@ -1296,19 +1592,27 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 					AStarMatrix[eo].SetCostToGoal(costToGoal);
 					if (AStarAddNode(endPos, new_cost + costToGoal) == PF_FAILED) {
 						ret = PF_FAILED;
+					AStarLastFailReason = AStarFailOpenSet;
 						ProfileEnd("AStarFindPath");
 						return ret;
 					}
 				} else {
 					costToGoal = AStarCosts(endPos, goalPos);
 					AStarMatrix[eo].SetCostToGoal(costToGoal);
-					AStarReplaceNode(j);
+					AStarReplaceNode(j, new_cost + costToGoal);
 				}
 				// we don't have to add this point to the close set
 			}
 		}
 		if (OpenSetSize <= 0) { // no new nodes generated
 			ret = PF_UNREACHABLE;
+			AStarLastFailByUnits = AStarRefusedUnitOnItsWay;
+			AStarLastFailReason = AStarRefusedUnitOnItsWay ? AStarFailFloodUnitsOnTheWay
+			                      : AStarRefusedUnit ? AStarFailFloodStandingUnits : AStarFailFloodTerrain;
+			AStarLastSearchIterations = budget - counter;
+			// Not one tile entered and a unit standing for good among those round it: boxed in.
+			AStarLastFailBoxed = AStarLastSearchIterations == 0 && AStarRefusedUnitForGood;
+			AStarVerifyRegions();
 			ProfileEnd("AStarFindPath");
 			return ret;
 		}
@@ -1317,7 +1621,8 @@ int AStarFindPath(const Vec2i &startPos, const Vec2i &goalPosIn, int gw, int gh,
 #ifdef DEBUG
 	DumpNextAStar = false;
 #endif
-	AstarDebugPrint("AStar counter %d/%d\n", counter, AStarMaxSearchIterations);
+	AStarLastSearchIterations = budget - counter;
+	AstarDebugPrint("AStar counter %d/%d\n", counter, budget);
 	const int path_length = AStarSavePath(startPos, endPos, path, pathlen);
 
 	ret = path_length;

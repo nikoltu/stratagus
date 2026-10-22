@@ -179,6 +179,15 @@ void CFogOfWar::InitTiled()
 	if (TiledAlphaFog || TileOfFogOnly) {
 		this->Clean();
 	}
+    // FOG-CLASSIC-LOOKUP (S20+ 3.4.84): the classic fog sheet is SetFogOfWarGraphics' file, the
+    // summer tileset's sheet (stratagus.lua), whatever the map's tileset. With the HD fog atlas held
+    // the GPU path (DrawHDTiled) never reads it, and the Remastered folder has no such file: the
+    // lookup only logged "Can't open ... summer.png" on every winter / swamp / wasteland map. The
+    // same transparent placeholder is made without the file search (CLASSIC-SHEET-LOOKUPS). A sheet
+    // shared with the map's own tile graphic (a summer map, same file and frame) keeps its flag.
+    if (HasHDFog() && CFogOfWar::TiledFogSrc && CFogOfWar::TiledFogSrc != Map.TileGraphic) {
+        CFogOfWar::TiledFogSrc->NoClassicFile = true;
+    }
     CFogOfWar::TiledFogSrc->Load();
 
     if (Settings.Type == FogOfWarTypes::cTiledLegacy) {
@@ -369,7 +378,10 @@ void CFogOfWar::GenerateFog()
                 visCell = 0; /// Clear it before check for players
                 const CMapField *mapField = Map.Field(mapIndex + col);
                 for (const uint8_t player : playersToRenderView) {
-                    visCell = std::max<uint8_t>(visCell, mapField->playerInfo.Visible[player]);
+                    // FOW-BUG2: clamp before the narrowing - a count of 256 / 257 seen through
+                    // uint8_t read as 0 / 1 (unexplored / fog) on a tile many units see.
+                    const unsigned short count = mapField->playerInfo.Visible[player];
+                    visCell = std::max<uint8_t>(visCell, static_cast<uint8_t>(std::min<unsigned short>(count, 2)));
                     if (visCell >= visibleThreshold) {
                         visCell = 2;
                         break;

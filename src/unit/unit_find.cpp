@@ -40,13 +40,16 @@
 #include "missile.h"
 #include "pathfinder.h"
 #include "player.h"
+#include "pud.h"
 #include "spells.h"
 #include "tileset.h"
 #include "unit.h"
 #include "unit_manager.h"
 #include "unittype.h"
+#include "wc2ai.h"
 
 #include <climits>
+#include <string>
 
 /*----------------------------------------------------------------------------
   -- Finding units
@@ -674,6 +677,42 @@ CUnit *ResourceDepositOnMap(const Vec2i &pos, int resource)
 --  Finding units for attack
 ----------------------------------------------------------------------------*/
 
+/// What the target score needs of a unit type by the original's type number (an "-super" type
+/// counts as its plain type), looked up once per type slot.
+struct TargetKind {
+	std::string Ident;
+	int MinDistance = 0;
+	bool Submarine = false;
+};
+
+static const TargetKind &TargetKindOf(const CUnitType &type)
+{
+	static std::vector<TargetKind> kinds;
+	const size_t slot = static_cast<size_t>(type.Slot);
+	if (slot >= kinds.size()) {
+		kinds.resize(slot + 1);
+	}
+	TargetKind &kind = kinds[slot];
+	if (kind.Ident != type.Ident) {
+		std::string ident = type.Ident;
+		const std::string super = "-super";
+		if (ident.size() > super.size() && ident.compare(ident.size() - super.size(), super.size(), super) == 0) {
+			ident.erase(ident.size() - super.size());
+		}
+		const int number = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, 0x69, ident);
+		kind.Ident = type.Ident;
+		kind.MinDistance = wc2ai::MinSearchDistance(number);
+		kind.Submarine = wc2ai::SubmarineKind(number);
+	}
+	return kind;
+}
+
+/// The pixel y of a unit's top left on the map: the key of the original's unit list
+static int UnitPixelY(const CUnit *unit)
+{
+	return unit->tilePos.y * PixelTileSize.y + unit->IY;
+}
+
 class BestTargetFinder
 {
 public:
@@ -690,13 +729,20 @@ private:
 	template <typename Iterator>
 	CUnit *Find(Iterator begin, Iterator end) const
 	{
+		if (!GameSettings.SimplifiedAutoTargeting) {
+			// the original's 0x495F40: the highest score wins, a strictly higher one replaces (the
+			// first of equals stays), a score of 0 is never chosen
+			const Iterator best =
+				FirstOfBestScore(begin, end, [this](CUnit *dest) { return Score(dest); });
+			return best == end ? nullptr : *best;
+		}
 		CUnit *enemy = nullptr;
-		int best_cost = GameSettings.SimplifiedAutoTargeting ? INT_MIN : INT_MAX;
+		int best_cost = INT_MIN;
 
 		for (Iterator it = begin; it != end; ++it) {
-			int cost = GameSettings.SimplifiedAutoTargeting ? TargetPriorityCalculate(*attacker, **it) : ComputeCost(*it);
+			const int cost = TargetPriorityCalculate(*attacker, **it);
 
-			if (GameSettings.SimplifiedAutoTargeting ? (cost > best_cost) : (cost < best_cost)) {
+			if (cost > best_cost) {
 				enemy = *it;
 				best_cost = cost;
 			}
@@ -704,73 +750,42 @@ private:
 		return enemy;
 	}
 
-	int ComputeCost(CUnit *const dest) const
+	/**
+	**  The original's target score (0x495F40, DECODE_B8_ROUND2 item 1), the same for a person's and
+	**  a computer's unit; 0 = refused. Refused: not an enemy, not seen as a goal (dying, fog for a
+	**  person's unit, invisible), not hittable, an unarmed flyer for a flyer, nearer than the
+	**  missile's minimum, and (the port's own rule: the original's walls are map tiles) a wall
+	**  farther than 1. Hit points, reachability and whether the target can hit this unit play no
+	**  part. Declared difference: d is box to box (MapDistanceTo), the original's runs from the
+	**  searcher's top-left tile.
+	*/
+	int Score(CUnit *const dest) const
 	{
 		const CPlayer &player = *attacker->Player;
 		const CUnitType &type = *attacker->Type;
 		const CUnitType &dtype = *dest->Type;
-		const int attackrange = attacker->Stats->Variables[ATTACKRANGE_INDEX].Max;
 
 		if (!player.IsEnemy(*dest) // a friend or neutral
 			|| !dest->IsVisibleAsGoal(player)
 			|| !CanTarget(type, dtype)) {
-			return INT_MAX;
+			return 0;
 		}
-		// Don't attack invulnerable units
-		if (dtype.BoolFlag[INDESTRUCTIBLE_INDEX].value || dest->Variable[UNHOLYARMOR_INDEX].Value) {
-			return INT_MAX;
+		if (type.MoveType == EMovement::Fly && dtype.MoveType == EMovement::Fly && !dtype.CanAttack) {
+			return 0;
 		}
-		// Unit in range ?
 		const int d = attacker->MapDistanceTo(*dest);
-
-		if (attacker->AttackDistanceTo(*dest) > attackrange
-			&& !UnitReachable(*attacker, *dest, attackrange, false, true)) {
-			return INT_MAX;
+		if (d < TargetKindOf(type).MinDistance) {
+			return 0;
 		}
-
-		// Attack walls only if we are stuck in them
 		if (dtype.BoolFlag[WALL_INDEX].value && d > 1) {
-			return INT_MAX;
+			return 0;
 		}
-
-		if (dtype.MoveType == EMovement::Fly && dest->IsAggressive() == false) {
-			return INT_MAX / 2;
-		}
-
-		// Calculate the costs to attack the unit.
-		// Unit with the smallest attack costs will be taken.
-		int cost = 0;
-
-		// Priority 0-255
-		cost -= dtype.DefaultStat.Variables[PRIORITY_INDEX].Value * PRIORITY_FACTOR;
-		// Remaining HP (Health) 0-65535
-		cost += dest->Variable[HP_INDEX].Value * 100 / dest->Variable[HP_INDEX].Max * HEALTH_FACTOR;
-
-		if (d <= attackrange && d >= type.MinAttackRange) {
-			cost += d * INRANGE_FACTOR;
-			cost -= INRANGE_BONUS;
-		} else {
-			cost += d * DISTANCE_FACTOR;
-		}
-
-		for (unsigned int i = 0; i < UnitTypeVar.GetNumberBoolFlag(); i++) {
-			if (type.BoolFlag[i].AiPriorityTarget != ECondition::Ignore) {
-				if ((type.BoolFlag[i].AiPriorityTarget == ECondition::ShouldBeTrue)
-				    & (dtype.BoolFlag[i].value)) {
-					cost -= AIPRIORITY_BONUS;
-				}
-				if ((type.BoolFlag[i].AiPriorityTarget == ECondition::ShouldBeFalse)
-				    & (dtype.BoolFlag[i].value)) {
-					cost += AIPRIORITY_BONUS;
-				}
-			}
-		}
-
-		// Unit can attack back.
-		if (CanTarget(dtype, type)) {
-			cost -= CANATTACK_BONUS;
-		}
-		return cost;
+		const bool airOrSub = dtype.MoveType == EMovement::Fly || TargetKindOf(dtype).Submarine;
+		return wc2ai::TargetScore(dtype.CanAttack,
+		                          airOrSub,
+		                          d <= attacker->Stats->Variables[ATTACKRANGE_INDEX].Max,
+		                          dtype.DefaultStat.Variables[PRIORITY_INDEX].Value,
+		                          d);
 	}
 
 private:
@@ -1134,8 +1149,10 @@ bool CheckObstaclesBetweenTiles(const Vec2i &unitPos, const Vec2i &goalPos, unsi
 */
 CUnit *AttackUnitsInDistance(const CUnit &unit, int range, CUnitFilter pred)
 {
-	// if necessary, take possible damage on allied units into account...
-	if (unit.Type->Missile.Missile->Range > 1
+	// if necessary, take possible damage on allied units into account... (only with the simplified
+	// targeting: the original's score has no splash weighing, BestTargetFinder takes the box)
+	if (GameSettings.SimplifiedAutoTargeting
+		&& unit.Type->Missile.Missile->Range > 1
 		&& (range + unit.Type->Missile.Missile->Range < 15)) {
 		//  If catapult, count units near the target...
 		//   FIXME : make it configurable
@@ -1163,7 +1180,10 @@ CUnit *AttackUnitsInDistance(const CUnit &unit, int range, CUnitFilter pred)
 		                     range,
 		                     MakeAndPredicate(HasNotSamePlayerAs(Players[PlayerNumNeutral]), pred));
 
-		if (range > 25 && table.size() > 9) {
+		if (!GameSettings.SimplifiedAutoTargeting) {
+			// the original takes the candidates north to south: a tie goes to the northernmost
+			SortNorthFirst(table, UnitPixelY);
+		} else if (range > 25 && table.size() > 9) {
 			ranges::sort(table, CompareUnitDistance(unit));
 		}
 
@@ -1228,6 +1248,32 @@ CUnit *AttackUnitsInIdleRange(const CUnit &unit)
 	                                  unit.Stats->Variables[ATTACKRANGE_INDEX].Max,
 	                                  unit.Type->ReactRangeComputer);
 	return AttackUnitsInDistance(unit, range, NoFilter());
+}
+
+/**
+**  Target of a computer fighter that was hit (original 0x495830 with argument 0): the best of its
+**  attacker, at any distance, and the units in its idle search range, scored by BestTargetFinder
+**  (the original's 0x495F40 unless the simplified targeting is on).
+**
+**  @param unit      The unit that was hit.
+**  @param attacker  The unit that hit it.
+**
+**  @return          Pointer to the unit which should be attacked, or nullptr.
+*/
+CUnit *AttackUnitsInIdleRangeOrAttacker(const CUnit &unit, CUnit &attacker)
+{
+	Assert(unit.Type->CanAttack);
+	const int range = IdleSearchRange(unit.Player->Type != PlayerTypes::PlayerPerson,
+	                                  unit.Stats->Variables[ATTACKRANGE_INDEX].Max,
+	                                  unit.Type->ReactRangeComputer);
+	const CUnit *firstContainer = unit.Container ? unit.Container : &unit;
+	std::vector<CUnit *> box =
+		SelectAroundUnit(*firstContainer, range, HasNotSamePlayerAs(Players[PlayerNumNeutral]));
+	if (!GameSettings.SimplifiedAutoTargeting) {
+		// the box north to south; the attacker stays first
+		SortNorthFirst(box, UnitPixelY);
+	}
+	return BestTargetFinder(unit).Find(HitReactionCandidates(&attacker, box));
 }
 
 //@}

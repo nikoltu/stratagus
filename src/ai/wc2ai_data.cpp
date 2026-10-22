@@ -25,6 +25,7 @@
 #include "home_leash.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 
 namespace wc2ai
@@ -685,6 +686,257 @@ Place PlaceWalk(int refX, int refY, int step, int mapSide, bool (*sameGround)(in
 			return Place();
 		}
 	}
+}
+
+int NearestOf(const std::vector<int> &distances, bool laterOnTie)
+{
+	int best = -1;
+	for (size_t i = 0; i < distances.size(); ++i) {
+		if (distances[i] < 0) {
+			continue;
+		}
+		if (best < 0 || distances[i] < distances[best] || (laterOnTie && distances[i] == distances[best])) {
+			best = static_cast<int>(i);
+		}
+	}
+	return best;
+}
+
+int PlatformPick(const std::vector<PlatformView> &platforms)
+{
+	int best = -1;
+	int bestScore = 0;
+	for (size_t i = 0; i < platforms.size(); ++i) {
+		const PlatformView &platform = platforms[i];
+		if (!platform.usable) {
+			continue;
+		}
+		const int score = platform.toDepot + platform.toTanker / 2;
+		if (best < 0 || score < bestScore) {
+			best = static_cast<int>(i);
+			bestScore = score;
+		}
+	}
+	return best;
+}
+
+int PlatformWaitPick(const std::vector<PlatformView> &platforms)
+{
+	if (PlatformPick(platforms) >= 0) {
+		return -1;
+	}
+	int best = -1;
+	int bestScore = 0;
+	for (size_t i = 0; i < platforms.size(); ++i) {
+		const PlatformView &platform = platforms[i];
+		if (!platform.building) {
+			continue;
+		}
+		const int score = platform.toDepot + platform.toTanker / 2;
+		if (best < 0 || score < bestScore) {
+			best = static_cast<int>(i);
+			bestScore = score;
+		}
+	}
+	return best;
+}
+
+Place FleePoint(int x, int y, int direction8, int randX, int randY, int mapWidth, int mapHeight)
+{
+	static const int dx[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+	static const int dy[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
+	const int d = direction8 & 7;
+	const int fx = std::clamp(x - 2 + 4 * dx[d] + (randX & 7), 0, mapWidth - 1);
+	const int fy = std::clamp(y - 2 + 4 * dy[d] + (randY & 7), 0, mapHeight - 1);
+	return Place{true, fx, fy};
+}
+
+bool SiteTaken(int x, int y, int w, int h, const std::vector<Site> &sites)
+{
+	for (const Site &site : sites) {
+		if (x < site.x + site.w && site.x < x + w && y < site.y + site.h && site.y < y + h) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// t / n of d, rounded to the nearest whole number (halves away from zero); 0 when n is 0.
+static int RoundedShare(int d, int t, int n)
+{
+	if (n == 0) {
+		return 0;
+	}
+	return (2 * d * t + (d < 0 ? -n : n)) / (2 * n);
+}
+
+static bool InSite(const Site &site, int x, int y)
+{
+	return x >= site.x && x < site.x + site.w && y >= site.y && y < site.y + site.h;
+}
+
+std::vector<Place> HaulLineTiles(const Site &depot, const Site &resource)
+{
+	std::vector<Place> line;
+	const int x0 = depot.x + depot.w / 2;
+	const int y0 = depot.y + depot.h / 2;
+	const int dx = resource.x + resource.w / 2 - x0;
+	const int dy = resource.y + resource.h / 2 - y0;
+	const int steps = std::max(std::abs(dx), std::abs(dy));
+	for (int t = 0; t <= steps; ++t) {
+		const int x = x0 + RoundedShare(dx, t, steps);
+		const int y = y0 + RoundedShare(dy, t, steps);
+		if (!InSite(depot, x, y) && !InSite(resource, x, y)) {
+			line.push_back({true, x, y});
+		}
+	}
+	return line;
+}
+
+bool HaulLineBlocked(int x, int y, int w, int h, const std::vector<Place> &line,
+                     bool (*open)(int x, int y, void *context), void *context)
+{
+	const Site building{x, y, w, h};
+	static const int sides[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+	for (const Place &tile : line) {
+		if (InSite(building, tile.x, tile.y)) {
+			return true;
+		}
+	}
+	for (const Place &tile : line) {
+		for (const auto &side : sides) {
+			if (InSite(building, tile.x + side[0], tile.y + side[1])
+			    && !open(tile.x - side[0], tile.y - side[1], context)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+int PointToBoxDistance(int px, int py, int bx, int by, int bw, int bh)
+{
+	const int dx = px < bx ? bx - px : (px > bx + bw - 1 ? px - (bx + bw - 1) : 0);
+	const int dy = py < by ? by - py : (py > by + bh - 1 ? py - (by + bh - 1) : 0);
+	return std::max(dx, dy);
+}
+
+void ReserveSquare(std::vector<uint8_t> &tiles, int mapWidth, int mapHeight, int x, int y, int size, int grow,
+                   bool footprint)
+{
+	if (tiles.size() != static_cast<size_t>(mapWidth) * mapHeight) {
+		return;
+	}
+	for (int ty = std::max(0, y - grow); ty < std::min(mapHeight, y + size + grow); ++ty) {
+		for (int tx = std::max(0, x - grow); tx < std::min(mapWidth, x + size + grow); ++tx) {
+			const bool inner = tx >= x && tx < x + size && ty >= y && ty < y + size;
+			if (footprint || !inner) {
+				tiles[static_cast<size_t>(ty) * mapWidth + tx] = 1;
+			}
+		}
+	}
+}
+
+bool ReservedAny(const std::vector<uint8_t> &tiles, int mapWidth, int mapHeight, int x, int y, int w, int h)
+{
+	if (tiles.size() != static_cast<size_t>(mapWidth) * mapHeight) {
+		return false;
+	}
+	for (int ty = std::max(0, y); ty < std::min(mapHeight, y + h); ++ty) {
+		for (int tx = std::max(0, x); tx < std::min(mapWidth, x + w); ++tx) {
+			if (tiles[static_cast<size_t>(ty) * mapWidth + tx]) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+std::vector<Place> RoadTiles(int x0, int y0, int x1, int y1)
+{
+	std::vector<Place> road;
+	if (x0 == x1 || y0 == y1) {
+		return road;
+	}
+	// 0x4B7890 / 0x4B7630: the error starts at half the major length (at least 1); each step takes
+	// the minor length off it, and the minor axis steps when it is then 0 or below.
+	const int dx = std::abs(x1 - x0);
+	const int dy = std::abs(y1 - y0);
+	const int sx = x1 > x0 ? 1 : -1;
+	const int sy = y1 > y0 ? 1 : -1;
+	const bool xMajor = dx >= dy;
+	const int major = xMajor ? dx : dy;
+	const int minor = xMajor ? dy : dx;
+	int err = major / 2;
+	if (err == 0) {
+		err = 1;
+	}
+	int x = x0;
+	int y = y0;
+	while (x != x1 && y != y1) {
+		err -= minor;
+		const bool minorStep = err <= 0;
+		if (minorStep) {
+			err += major;
+		}
+		if (xMajor) {
+			x += sx;
+			y += minorStep ? sy : 0;
+		} else {
+			y += sy;
+			x += minorStep ? sx : 0;
+		}
+		road.push_back(Place{true, x, y});
+	}
+	return road;
+}
+
+std::string ReservedText(const std::vector<uint8_t> &tiles)
+{
+	std::string text;
+	size_t i = 0;
+	while (i < tiles.size()) {
+		if (!tiles[i]) {
+			++i;
+			continue;
+		}
+		size_t end = i;
+		while (end < tiles.size() && tiles[end]) {
+			++end;
+		}
+		text += (text.empty() ? "" : ",") + std::to_string(i) + "," + std::to_string(end - i);
+		i = end;
+	}
+	return text;
+}
+
+std::vector<uint8_t> ReservedFromText(const std::string &text, size_t size)
+{
+	std::vector<uint8_t> tiles(size, 0);
+	std::vector<long> numbers;
+	long value = 0;
+	bool inNumber = false;
+	for (const char c : text) {
+		if (c >= '0' && c <= '9') {
+			value = value * 10 + (c - '0');
+			inNumber = true;
+		} else {
+			if (inNumber) {
+				numbers.push_back(value);
+			}
+			value = 0;
+			inNumber = false;
+		}
+	}
+	if (inNumber) {
+		numbers.push_back(value);
+	}
+	for (size_t n = 0; n + 1 < numbers.size(); n += 2) {
+		for (long t = numbers[n]; t < numbers[n] + numbers[n + 1] && t < static_cast<long>(size); ++t) {
+			tiles[static_cast<size_t>(t)] = 1;
+		}
+	}
+	return tiles;
 }
 
 } // namespace wc2ai

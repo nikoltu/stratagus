@@ -46,6 +46,9 @@
 #include "unit.h"
 #include "unit_manager.h"
 
+#include <algorithm>
+#include <string>
+
 bool CMapField::IsTerrainResourceOnMap(int resource) const
 {
 	switch (resource) {
@@ -122,69 +125,47 @@ void CMapField::setTileIndex(const CTileset &tileset,
 
 void CMapField::Save(CFile &file) const
 {
-	file.printf("  {%3d, %3d, %2d, %2d", tile, playerInfo.SeenTile, Value, moveCost);
+	// One write per field (a 128x128 map has 16384): the text is put together here, not in
+	// about ten formatted writes each.
+	char head[64];
+	const int n = snprintf(head, sizeof(head), "  {%3d, %3d, %2d, %2d", (int)tile,
+	                       (int)playerInfo.SeenTile, (int)Value, (int)moveCost);
+	std::string text;
+	text.reserve(160);
+	text.append(head, n > 0 ? std::min<size_t>(n, sizeof(head) - 1) : 0);
 	for (int i = 0; i != PlayerMax; ++i) {
 		if (playerInfo.Visible[i] == 1) {
-			file.printf(", \"explored\", %d", i);
+			text += ", \"explored\", ";
+			text += std::to_string(i);
 		}
 	}
-	if (Flags & MapFieldOpaque) {
-		file.printf(", \"opaque\"");
-	}
-	if (Flags & MapFieldHuman) {
-		file.printf(", \"human\"");
-	}
-	if (Flags & MapFieldLandAllowed) {
-		file.printf(", \"land\"");
-	}
-	if (Flags & MapFieldCoastAllowed) {
-		file.printf(", \"coast\"");
-	}
-	if (Flags & MapFieldWaterAllowed) {
-		file.printf(", \"water\"");
-	}
-	if (Flags & MapFieldNoBuilding) {
-		file.printf(", \"mud\"");
-	}
-	if (Flags & MapFieldUnpassable) {
-		file.printf(", \"block\"");
-	}
-	if (Flags & MapFieldWall) {
-		file.printf(", \"wall\"");
-	}
-	if (Flags & MapFieldRocks) {
-		file.printf(", \"rock\"");
-	}
-	if (Flags & MapFieldForest) {
-		file.printf(", \"wood\"");
-	}
-	if (Cost4OnMap()) {
-		file.printf(", \"cost4\"");
-	}
-	if (Cost5OnMap()) {
-		file.printf(", \"cost5\"");
-	}
-	if (Cost6OnMap()) {
-		file.printf(", \"cost6\"");
-	}
-#if 1
+	const auto flag = [&](bool on, const char *word) {
+		if (on) {
+			text += word;
+		}
+	};
+	flag(Flags & MapFieldOpaque, ", \"opaque\"");
+	flag(Flags & MapFieldHuman, ", \"human\"");
+	flag(Flags & MapFieldLandAllowed, ", \"land\"");
+	flag(Flags & MapFieldCoastAllowed, ", \"coast\"");
+	flag(Flags & MapFieldWaterAllowed, ", \"water\"");
+	flag(Flags & MapFieldNoBuilding, ", \"mud\"");
+	flag(Flags & MapFieldUnpassable, ", \"block\"");
+	flag(Flags & MapFieldWall, ", \"wall\"");
+	flag(Flags & MapFieldRocks, ", \"rock\"");
+	flag(Flags & MapFieldForest, ", \"wood\"");
+	flag(Cost4OnMap(), ", \"cost4\"");
+	flag(Cost5OnMap(), ", \"cost5\"");
+	flag(Cost6OnMap(), ", \"cost6\"");
 	// Not Required for save
 	// These are required for now, UnitType::FieldFlags is 0 until
 	// UpdateStats is called which is after the game is loaded
-	if (Flags & MapFieldLandUnit) {
-		file.printf(", \"ground\"");
-	}
-	if (Flags & MapFieldAirUnit) {
-		file.printf(", \"air\"");
-	}
-	if (Flags & MapFieldSeaUnit) {
-		file.printf(", \"sea\"");
-	}
-	if (Flags & MapFieldBuilding) {
-		file.printf(", \"building\"");
-	}
-#endif
-	file.printf("}");
+	flag(Flags & MapFieldLandUnit, ", \"ground\"");
+	flag(Flags & MapFieldAirUnit, ", \"air\"");
+	flag(Flags & MapFieldSeaUnit, ", \"sea\"");
+	flag(Flags & MapFieldBuilding, ", \"building\"");
+	text += '}';
+	file.write(text);
 }
 
 

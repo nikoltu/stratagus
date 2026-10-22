@@ -8,6 +8,7 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 
 import net.wargushd.game.editor.CanvasView;
+import net.wargushd.game.editor.EngineRuns;
 import net.wargushd.game.editor.MapGen;
 import net.wargushd.game.editor.MapModel;
 import net.wargushd.game.editor.MapRules;
@@ -51,11 +52,27 @@ final class EditorPage {
          * @return true when the game was started
          */
         boolean test(File pud, File map);
+        /**
+         * Start one of the engine's runs for the editor (EDITOR_STATUS.md, Engine E13/E17):
+         * "export" (pud null) or "validate" of a map file written for it; `map` is the map being
+         * edited, or null. Nothing is counted; the shell hands the run's files to
+         * {@link EditorPage#afterEngineRun} when it is over.
+         *
+         * @return true when the run was started
+         */
+        boolean engineRun(String mode, File pud, File map);
+        /** What an export depends on: the app's version and the mods a scenario game takes. */
+        String engineKey();
     }
 
     // Layout of the page, logical units (the layout table's screen editor_maps).
     private static final float X0 = 816f, TITLE_Y = 84f, BOTTOM_UP = 264f;
-    private static final float LIST_Y = 264f, LIST_W = 1192f;
+    private static final float LIST_Y = 420f, LIST_W = 1192f;
+    // The segment above the list (table 6.17 kind): Maps / Campaigns, and the game folder's maps as a
+    // third (owner decision 94, E4 = option A). Campaigns is stage 3 (6.17d): shown, not live yet.
+    private static final float KIND_Y = 264f, KIND_H = 108f, KIND_IN = 6f;
+    private static final int KIND_MAPS = 0, KIND_CAMPAIGNS = 1, KIND_GAME = 2;
+    private static final String[] KIND_WORD = { "Maps", "Campaigns", "Game maps" };
     private static final float ROW_X = 840f, ROW_W = 1144f, ROW_H = 132f, ROW_PITCH = 138f, ROW_TOP = 24f;
     private static final float ROW_INSET = 36f, ROW_NAME_W = 588f, ACCENT_W = 10f;
     private static final float INFO_X = 2056f, INFO_Y = 264f, INFO_W = 1688f, INFO_H = 810f, INFO_PAD = 60f;
@@ -92,7 +109,9 @@ final class EditorPage {
     private final java.util.Map<File, PudInfo> unsavedFacts = new java.util.HashMap<File, PudInfo>();
     private int selected;
     private float scroll;
-    private int pressedRow = -1, pressedButton = -1;
+    /** The list shown: the player's own maps, or the game folder's maps (read only). */
+    private int kind = KIND_MAPS;
+    private int pressedRow = -1, pressedButton = -1, pressedKind = -1;
     private float downY, downScroll;
     private boolean inList, dragging, heldOpened;
     private Bitmap buttonPlain, buttonMarked;
@@ -113,9 +132,15 @@ final class EditorPage {
     private PlayersSheet players;
     private FaultSheet faults;
     private BalanceSheet balance;
+    /** The number sheet of a mine's or a patch's amount (owner decision 94, E1), or null. */
+    private NumberSheet number;
     private boolean leaveAfterSave;
     /** A line shown in the bar in place of the map's name until the map is next changed, or null. */
     private String barNotice;
+    /** The map Edit Map opens when the engine's export it waits for is over, or null. */
+    private File editAfterExport;
+    /** The key of the export installed in MapRules, or null (one for the process). */
+    private static String installedKey;
 
     /** Read the folder of the player's own maps again. */
     void open(Activity a, SkinKit k, Shell s) {
@@ -128,7 +153,35 @@ final class EditorPage {
         mapSheet = null;
         confirm = null;
         confirmThen = null;
+        installExport();
         load(null);
+    }
+
+    // ----- the engine's export (E13): the tables units are placed by -----
+
+    private File exportFile() { return new File(activity.getFilesDir(), "editor/export.json"); }
+    private File exportKeyFile() { return new File(activity.getFilesDir(), "editor/export.key"); }
+
+    /**
+     * Put the kept export into the rules when it was made for the app and mods of now; tables
+     * of another key are refused (DESIGN 31.7), the built-in rules hold until the next export.
+     */
+    private void installExport() {
+        final String key = shell.engineKey();
+        if (key.equals(installedKey) && MapRules.engine() != null) {
+            return;
+        }
+        EngineRuns.Tables t = null;
+        if (key.equals(GameLaunch.readText(exportKeyFile()))) {
+            t = EngineRuns.readExport(GameLaunch.readText(exportFile()), null);
+        }
+        MapRules.useEngine(t);
+        installedKey = (t != null) ? key : null;
+    }
+
+    /** True when no export was asked for the app and mods of now (a failed one counts as asked). */
+    private boolean exportOwed() {
+        return !shell.engineKey().equals(GameLaunch.readText(exportKeyFile()));
     }
 
     /** Read the list; `keep` stays the chosen map when it is still there. */
@@ -136,6 +189,14 @@ final class EditorPage {
         maps.clear();
         drafts.clear();
         unsavedFacts.clear();
+        if (keep != null && MapStore.isOwn(activity, keep)) {
+            // A map of the player's own was made, copied or left: the list of My maps shows it.
+            kind = KIND_MAPS;
+        }
+        if (kind == KIND_GAME) {
+            loadGame();
+            return;
+        }
         final File dir = MapStore.directory(activity);
         final java.util.TreeSet<File> all = new java.util.TreeSet<File>();
         final File[] files = dir.listFiles();
@@ -183,6 +244,36 @@ final class EditorPage {
         }
     }
 
+    /** The game folder's maps (E4): its own first, then those of its sub-folders, each in name order (as MapList). */
+    private void loadGame() {
+        final String folder = GateActivity.rememberedFolder(activity);
+        if (folder != null) {
+            collectGame(new File(folder, "Data/Maps"), 0);
+        }
+        selected = Math.max(0, Math.min(maps.size() - 1, selected));
+    }
+
+    private void collectGame(File dir, int depth) {
+        final File[] files = dir.listFiles();
+        if (files == null || depth > 3) {
+            return;
+        }
+        java.util.Arrays.sort(files);
+        for (File f : files) {
+            if (f.isFile() && f.getName().toLowerCase().endsWith(".pud")) {
+                maps.add(f);
+                drafts.add(false);
+            }
+        }
+        for (File f : files) {
+            if (f.isDirectory()) {
+                collectGame(f, depth + 1);
+            }
+        }
+    }
+
+    private boolean gameList() { return kind == KIND_GAME; }
+
     private File chosen() {
         return (selected >= 0 && selected < maps.size()) ? maps.get(selected) : null;
     }
@@ -196,7 +287,7 @@ final class EditorPage {
     boolean canvasOpen() { return canvas != null; }
 
     private boolean sheetOpen() {
-        return newSheet != null || randomSheet != null || mapSheet != null || confirm != null;
+        return newSheet != null || randomSheet != null || mapSheet != null || confirm != null || rulesSheet != null;
     }
 
     /** Put the sheet of the random map away; its worker stops and what it still makes is dropped. */
@@ -236,11 +327,21 @@ final class EditorPage {
     /** Android Back: closes a sheet, or leaves the map view; false when the plain page is shown. */
     boolean back() {
         if (canvas != null) {
+            if (!over() && canvas.dropPending()) {
+                return true;
+            }
+            if (players != null && players.closeList()) {
+                // Back closes the controller list first, then the Players sheet (owner decision 93, 1A).
+                canvas.invalidate();
+                shell.redraw();
+                return true;
+            }
             if (over()) {
                 leave = null;
                 players = null;
                 faults = null;
                 balance = null;
+                number = null;
                 canvas.invalidate();
             } else {
                 askLeave();
@@ -253,6 +354,7 @@ final class EditorPage {
             mapSheet = null;
             confirm = null;
             confirmThen = null;
+            rulesSheet = null;
             return true;
         }
         return false;
@@ -311,7 +413,9 @@ final class EditorPage {
         }
     }
 
-    private boolean over() { return leave != null || players != null || faults != null || balance != null; }
+    private boolean over() {
+        return leave != null || players != null || faults != null || balance != null || number != null;
+    }
 
     /**
      * Save the map when the checks find nothing; else show what they found.
@@ -319,7 +423,9 @@ final class EditorPage {
      * @return true when the map file was written
      */
     private boolean save(boolean leaving) {
-        final List<MapRules.Fault> found = MapRules.check(canvas.model());
+        // Faults, and when none blocks, the warnings of the map as it plays (they never block).
+        // ... and what would stop the game's own loader on the bytes to be written (Session 2026-10-19 d).
+        final List<MapRules.Fault> found = MapRules.review(canvas.model(), work.pud().bytes());
         if (found.isEmpty()) {
             canvas.save();
             return !canvas.trouble();
@@ -337,7 +443,7 @@ final class EditorPage {
      */
     private void test() {
         canvas.rest();
-        final List<MapRules.Fault> found = MapRules.check(canvas.model());
+        final List<MapRules.Fault> found = MapRules.check(canvas.model(), work.pud().bytes());
         if (MapRules.blocked(found)) {
             faults = new FaultSheet(found, true);
             leaveAfterSave = false;
@@ -358,6 +464,20 @@ final class EditorPage {
             shell.error();
             return;
         }
+        // The game's own check of the file first (E17, DESIGN 31.7: run on Test); the test game
+        // follows when it is over (afterEngineRun).
+        android.util.Log.i("WargusHD", "LAUNCHER editor validate " + shown.getName());
+        barNotice = null;
+        if (!shell.engineRun("validate", pud, shown)) {
+            pud.delete();
+            barNotice = kit.own("The game could not check the map.");
+            shell.error();
+        }
+    }
+
+    /** Start the test game on the file the game has checked. */
+    private void startTest() {
+        final File pud = MapStore.testFile(activity);
         android.util.Log.i("WargusHD", "LAUNCHER editor test " + shown.getName());
         barNotice = null;
         if (!shell.test(pud, shown)) {
@@ -387,10 +507,96 @@ final class EditorPage {
         }
     }
 
+    /**
+     * One of the engine's runs is over (E13 / E17). `result` is its result.json (null when it left
+     * none), `part` its export.json or validate.json (null when there is none), `token` the
+     * run's. An export is kept for the key it was asked for and put into the rules; a check
+     * shows its lines, remarks with Show, and offers Test; a run that did not finish is said as
+     * a line that blocks.
+     */
+    void afterEngineRun(String mode, File map, String result, String part, String token) {
+        if (activity == null) {
+            return;
+        }
+        final String failure = EngineRuns.failure(result, token);
+        if ("export".equals(mode)) {
+            final File wanted = editAfterExport;
+            editAfterExport = null;
+            final EngineRuns.Tables t = (failure == null) ? EngineRuns.readExport(part, token) : null;
+            // Asked for this key, read or not: a failed export is not asked for again until the
+            // app or the mods change.
+            final File keep = exportFile();
+            if (t == null || !GameLaunch.writeText(keep, part)) {
+                keep.delete();
+            }
+            GameLaunch.writeText(exportKeyFile(), shell.engineKey());
+            installedKey = null;
+            installExport();
+            android.util.Log.i("WargusHD", "LAUNCHER editor export "
+                + ((t != null) ? t.unitCount() + " types, stamp " + t.stamp : "failed " + failure));
+            if (t == null) {
+                tell(kit.own("The game's tables were not read"),
+                     kit.own("The editor places units by its own rules ({0}).",
+                             (failure != null) ? failure : "unreadable"));
+            } else if (wanted != null && canvas == null && wanted.isFile()) {
+                show(wanted);
+            }
+            return;
+        }
+        if (canvas == null && map != null && (map.isFile() || WorkingCopy.journalOf(map).isFile())) {
+            show(map);
+        }
+        if (canvas == null) {
+            MapStore.testFile(activity).delete();
+            return;
+        }
+        List<MapRules.Fault> found = (failure == null) ? EngineRuns.readValidate(part, token) : null;
+        if (found == null) {
+            found = new ArrayList<MapRules.Fault>();
+            found.add(EngineRuns.runFault((failure != null) ? failure : "no-report"));
+        }
+        android.util.Log.i("WargusHD", "LAUNCHER editor validate over, " + found.size() + " lines"
+            + ((failure != null) ? ", " + failure : ""));
+        if (found.isEmpty()) {
+            // Not from inside the shell's resume.
+            shell.later(new Runnable() {
+                @Override
+                public void run() {
+                    if (canvas != null && !over()) {
+                        startTest();
+                    }
+                }
+            }, 0L);
+            return;
+        }
+        if (MapRules.blocked(found)) {
+            MapStore.testFile(activity).delete();
+        }
+        faults = new FaultSheet(found, true);
+        leaveAfterSave = false;
+        shell.error();
+        canvas.invalidate();
+    }
+
     /** A finger was lifted over the sheet that lies on the map view. */
     private void overUp(float x, float y) {
         if (leave != null) {
             leaveUp(x, y);
+        } else if (number != null) {
+            final int answer = number.up(x, y, kit);
+            if (answer == NumberSheet.NONE) {
+                return;
+            }
+            shell.click();
+            if (answer == NumberSheet.OK) {
+                final int data = MapRules.typedAmount(number.digits());
+                number = null;
+                canvas.typeAmount(data);
+            } else if (answer == NumberSheet.CANCEL) {
+                number = null;
+            }
+            canvas.invalidate();
+            shell.redraw();
         } else if (players != null) {
             final int answer = players.up(x, y, kit, canvas.model());
             if (answer == PlayersSheet.NONE) {
@@ -399,7 +605,7 @@ final class EditorPage {
             shell.click();
             if (answer == PlayersSheet.CLOSE) {
                 players = null;
-            } else {
+            } else if (answer == PlayersSheet.CHANGE) {
                 canvas.apply(players.step);
             }
             canvas.invalidate();
@@ -421,8 +627,14 @@ final class EditorPage {
             faults = null;
             final boolean leaving = leaveAfterSave;
             leaveAfterSave = false;
+            if (sheet.forTest() && answer != FaultSheet.SAVE) {
+                // The file written for a test that does not go on.
+                MapStore.testFile(activity).delete();
+            }
             if (answer == FaultSheet.SHOW) {
                 canvas.show(sheet.showX, sheet.showY);
+            } else if (answer == FaultSheet.SAVE && sheet.forTest()) {
+                startTest();
             } else if (answer == FaultSheet.SAVE) {
                 canvas.save();
                 if (leaving && !canvas.trouble()) {
@@ -445,6 +657,8 @@ final class EditorPage {
     private void drawOver(Canvas c) {
         if (leave != null) {
             leave.draw(c, kit);
+        } else if (number != null) {
+            number.draw(c, kit);
         } else if (players != null) {
             players.draw(c, kit, canvas.model());
         } else if (faults != null) {
@@ -461,6 +675,7 @@ final class EditorPage {
         players = null;
         faults = null;
         balance = null;
+        number = null;
         leaveAfterSave = false;
         barNotice = null;
         final ViewGroup parent = (ViewGroup) canvas.getParent();
@@ -552,6 +767,31 @@ final class EditorPage {
             @Override
             public int colour(int slot) {
                 return Profiles.COLORS[slot & 7];
+            }
+
+            @Override
+            public void notice(long millis, String english, Object... values) {
+                final String line = kit.own(english, values);
+                barNotice = line;
+                shell.redraw();
+                shell.later(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (line.equals(barNotice)) {
+                            barNotice = null;
+                            shell.redraw();
+                        }
+                    }
+                }, millis);
+            }
+
+            @Override
+            public void amount(String title, long current) {
+                if (!EditorPage.this.over()) {
+                    number = new NumberSheet(title, current);
+                    canvas.invalidate();
+                    shell.redraw();
+                }
             }
 
             @Override
@@ -691,13 +931,43 @@ final class EditorPage {
         if (button == NEW) {
             shell.click();
             newSheet = new NewMapSheet();
-        } else if (map != null && button == DUPLICATE && map.isFile()) {
+        } else if (map != null && button == DUPLICATE && map.isFile() && !gameList()) {
             shell.click();
             duplicate(map);
+        } else if (map != null && button == EDIT && gameList()) {
+            if (factsOf(map).width > 0) {
+                shell.click();
+                editGameMap(map);
+            }
         } else if (map != null && button == EDIT) {
             shell.click();
-            show(map);
+            edit(map);
         }
+    }
+
+    /** Open one of the player's own maps in the map view. */
+    private void edit(File map) {
+        // Once for each app version and mod set the engine's tables are read first (E13).
+        if (exportOwed() && shell.engineRun("export", null, null)) {
+            editAfterExport = map;
+            return;
+        }
+        show(map);
+    }
+
+    /**
+     * Edit Map on a map of the game folder (E4): copy it into My maps first, then open the copy.
+     * The game folder is only read (LAW 18.3).
+     */
+    private void editGameMap(File map) {
+        final File copy = net.wargushd.game.editor.GameMapCopy.copy(map, MapStore.directory(activity));
+        if (copy == null) {
+            tell(kit.own("The map was not copied"), kit.own("The map could not be written."));
+            return;
+        }
+        android.util.Log.i("WargusHD", "LAUNCHER editor game map copied " + map.getName() + " -> " + copy.getName());
+        load(copy);
+        edit(copy);
     }
 
     /** A finger was lifted over the open sheet. */
@@ -771,6 +1041,11 @@ final class EditorPage {
             } else if (map != null && answer == MapSheet.REMOVE) {
                 askRemove(map);
             }
+        } else if (rulesSheet != null) {
+            if (rulesSheet.up(x, y, kit) != EditorRulesSheet.NONE) {
+                shell.click();
+                rulesSheet = null;
+            }
         } else if (confirm != null) {
             final int answer = confirm.up(x, y, kit);
             if (answer == ConfirmSheet.NONE) {
@@ -784,6 +1059,276 @@ final class EditorPage {
                 then.run();
             }
         }
+    }
+
+    // ----- the map's property rows right of the picture (owner decision 89, 7A) -----
+    // Five rows 824 x 120 at a pitch of 138 from y 324 beside the 690 picture, in place of the facts:
+    // Name, Description, Tileset, Size, Rules (LAUNCHER_LAYOUT_TABLES.md 6.17). The key at cap 28
+    // above the value at cap 40; a "v" on the rows that open something; Tileset and Size shown only
+    // (a darker field, no "v": re-tiling and resizing an existing map are not designed).
+    private static final float PROP_X = 2860f, PROP_Y = 324f, PROP_W = 824f, PROP_H = 120f, PROP_PITCH = 138f;
+    private static final float PROP_IN = 24f, PROP_KEY_DOWN = 20f, PROP_VALUE_DOWN = 68f, CAP_KEY = 28f, CAP_VALUE = 40f;
+    private static final float PROP_MARK_X = 3620f, PROP_MARK_W = 60f, CAP_PROP_MARK = 30f;
+    private static final float UNDER_Y = 1036f, CAP_UNDER = 30f;
+    private static final float PL_Y = 1122f, PL_H = 1014f, PL_GAP = 24f, PL_HEAD_Y = 52f;
+    private static final int PROP_FILL = 0x78000000, PROP_FILL_FIXED = 0x33000000;
+    private static final int PROP_NAME = 0, PROP_DESCRIPTION = 1, PROP_TILESET = 2, PROP_SIZE = 3, PROP_RULES = 4;
+    private static final String[] PROP_KEY = { "Name", "Description", "Tileset", "Size", "Rules" };
+    private int pressedProp = -1;
+    private EditorRulesSheet rulesSheet;
+    /** The descriptions of the maps, read once a version of the file or of its working copy. */
+    private final java.util.Map<String, String> descriptions = new java.util.HashMap<String, String>();
+
+    private static boolean editable(int row) { return row == PROP_NAME || row == PROP_DESCRIPTION || row == PROP_RULES; }
+
+    /** The description of a map as it is shown: that of its working copy for a draft. */
+    private String descriptionOf(File map, boolean draft) {
+        final File from = draft ? WorkingCopy.journalOf(map) : map;
+        final String key = from.getPath() + "|" + from.length() + "|" + from.lastModified();
+        String d = descriptions.get(key);
+        if (d == null) {
+            try {
+                final WorkingCopy w = draft ? WorkingCopy.peek(map) : null;
+                d = (w != null) ? w.model().description() : PudFile.read(map).model().description();
+            } catch (java.io.IOException | RuntimeException e) {
+                d = "";
+            }
+            if (descriptions.size() > 64) {
+                descriptions.clear();
+            }
+            descriptions.put(key, d);
+        }
+        return d;
+    }
+
+    private void drawRows(Canvas c, File map, PudInfo facts, boolean draft) {
+        final boolean read = facts.width > 0;
+        final String[] value = {
+            nameOf(map),
+            read ? descriptionOf(map, draft) : "",
+            (read && facts.tileset >= 0) ? LanSettings.tilesetName(kit, facts.tileset) : "",
+            read ? facts.width + " x " + facts.height : "",
+            // Where a preset is kept in a .pud is not designed; every map is Standard melee in stage 1a.
+            kit.own("Standard melee"),
+        };
+        for (int i = 0; i < PROP_KEY.length; ++i) {
+            final float y = PROP_Y + i * PROP_PITCH;
+            // A map of the game folder is shown only: no row opens anything (E4).
+            final boolean live = !gameList() && editable(i) && (read || i == PROP_NAME);
+            kit.fill(c, PROP_X, y, PROP_W, PROP_H, (editable(i) && !gameList()) ? PROP_FILL : PROP_FILL_FIXED, 10f);
+            kit.textTop(c, kit.own(PROP_KEY[i]), PROP_X + PROP_IN, y + PROP_KEY_DOWN, CAP_KEY, INK_MUTED, true);
+            final float vw = PROP_MARK_X - PROP_X - 2f * PROP_IN;
+            kit.textTop(c, kit.fit(value[i], CAP_VALUE, vw), PROP_X + PROP_IN, y + PROP_VALUE_DOWN, CAP_VALUE,
+                        (i == PROP_NAME) ? GOLD : editable(i) ? INK : INK_MUTED, true);
+            if (live) {
+                kit.textCentre(c, "v", PROP_MARK_X, y, PROP_MARK_W, PROP_H, CAP_PROP_MARK, GOLD, false);
+            }
+        }
+    }
+
+    /** The property row at a point, or -1; only the rows that open something. */
+    private int propAt(float x, float y) {
+        final File map = chosen();
+        if (map == null || gameList() || x < PROP_X || x >= PROP_X + PROP_W || y < PROP_Y) {
+            return -1;
+        }
+        final int i = (int) Math.floor((y - PROP_Y) / PROP_PITCH);
+        if (i < 0 || i >= PROP_KEY.length || y - PROP_Y - i * PROP_PITCH >= PROP_H || !editable(i)) {
+            return -1;
+        }
+        return (i == PROP_NAME || factsOf(map).width > 0) ? i : -1;
+    }
+
+    private void propTap(int row) {
+        final File map = chosen();
+        if (map == null) {
+            return;
+        }
+        shell.click();
+        if (row == PROP_NAME) {
+            // As Rename of the row's sheet.
+            shell.askName(kit.own("Rename map"), nameOf(map), new Named() {
+                @Override
+                public void named(String name) {
+                    rename(map, name);
+                }
+            });
+        } else if (row == PROP_DESCRIPTION) {
+            final boolean draft = selected < drafts.size() && drafts.get(selected);
+            shell.askName(kit.own("Description"), descriptionOf(map, draft), new Named() {
+                @Override
+                public void named(String text) {
+                    describe(map, text);
+                }
+            });
+        } else if (row == PROP_RULES) {
+            rulesSheet = new EditorRulesSheet();
+        }
+    }
+
+    /**
+     * The map's description changed, as a step of its working copy: a draft keeps it as one more
+     * unsaved change; a map without a draft is written at once (the maps page has no Save) and
+     * keeps no working copy.
+     */
+    private void describe(File map, String text) {
+        final String t = (text == null) ? "" : text.trim();
+        final boolean hadDraft = WorkingCopy.journalOf(map).isFile();
+        try {
+            final WorkingCopy w = WorkingCopy.open(map);
+            try {
+                w.apply(w.model().changeHead(t, w.model().tileset()));
+                if (!hadDraft) {
+                    w.save();
+                }
+            } finally {
+                if (hadDraft) {
+                    w.keep();
+                } else {
+                    w.discard();
+                }
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            tell(kit.own("The map was not changed"), kit.own("The map could not be written."));
+            return;
+        }
+        load(map);
+    }
+
+    // ----- the Players rows of the panel (owner decision 94, E3 = option A) -----
+    // Read only: colour, "Player n", the controller's word, the race - only the slots that are not
+    // Nobody, at most as many as fit (six at a pitch of 138 in the 1014 panel); below them
+    // "Edit in the map's Players". Rects of table 6.17 pl0..: row [2080, 1236, 1640, 132], colour
+    // 96 at [2104, +18], name [2230, 300] cap 44, controller [2550, +12, 590, 108], race
+    // [3176, +12, 520, 108]; the two fields drawn as the shown-only property rows (darker, no mark).
+    private static final float PL_ROW_X = 2080f, PL_ROW_W = 1640f, PL_ROWS_DOWN = 114f, PL_ROW_H = 132f, PL_PITCH = 138f;
+    private static final float PL_SWATCH_X = 2104f, PL_SWATCH = 96f, PL_NAME_X = 2230f, PL_NAME_W = 300f;
+    private static final float PL_KEY_X = 2550f, PL_KEY_W = 590f, PL_RACE_X = 3176f, PL_RACE_W = 520f;
+    private static final float PL_FIELD_DOWN = 12f, PL_FIELD_H = 108f, PL_NOTE_GAP = 24f, CAP_NOTE = 30f;
+    /** The rows the panel shows at most (E3: six fit at pitch 138). */
+    private static final int PL_ROWS_MOST = 6;
+    /** By the file's (or working copy's) path, length and time: the eight slots' owner and race, or null. */
+    private final java.util.Map<String, int[][]> slotFacts = new java.util.HashMap<String, int[][]>();
+
+    /** The owners and races of a map's eight player slots, from its working copy for a draft; null when unread. */
+    private int[][] slotsOf(File map, boolean draft) {
+        final File from = draft ? WorkingCopy.journalOf(map) : map;
+        final String key = from.getPath() + "|" + from.length() + "|" + from.lastModified();
+        if (slotFacts.containsKey(key)) {
+            return slotFacts.get(key);
+        }
+        int[][] out = null;
+        try {
+            final WorkingCopy w = draft ? WorkingCopy.peek(map) : null;
+            final MapModel m = (w != null) ? w.model() : PudFile.read(map).model();
+            out = new int[3][];
+            out[0] = MapRules.playerRows(m, MapRules.PLAYERS);
+            out[1] = new int[MapRules.PLAYERS];
+            out[2] = new int[MapRules.PLAYERS];
+            for (int s = 0; s < MapRules.PLAYERS; ++s) {
+                out[1][s] = m.slot(MapModel.FIELD_OWNER, s);
+                out[2][s] = m.slot(MapModel.FIELD_RACE, s);
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            out = null;
+        }
+        if (slotFacts.size() > 64) {
+            slotFacts.clear();
+        }
+        slotFacts.put(key, out);
+        return out;
+    }
+
+    private String raceWord(int race) {
+        return (race == MapModel.RACE_HUMAN) ? kit.string("customscenario_race_human", "Human")
+            : (race == MapModel.RACE_ORC) ? kit.string("customscenario_race_orc", "Orc") : kit.own("Neutral");
+    }
+
+    private void drawPlayerRows(Canvas c, File map, boolean draft, float plH) {
+        final int[][] slots = slotsOf(map, draft);
+        if (slots == null) {
+            return;
+        }
+        // As many rows as the panel holds above the note, at most six.
+        final float room = plH - PL_ROWS_DOWN - (PL_NOTE_GAP + CAP_NOTE + PL_NOTE_GAP);
+        final int fit = (room < PL_ROW_H) ? 0 : 1 + (int) Math.floor((room - PL_ROW_H) / PL_PITCH);
+        // slots[0]: every slot not Nobody, in order (MapRules.playerRows); the first that fit are shown.
+        final int[] rows = java.util.Arrays.copyOf(slots[0], Math.min(slots[0].length, Math.min(PL_ROWS_MOST, fit)));
+        float bottom = PL_Y + PL_ROWS_DOWN;
+        for (int r = 0; r < rows.length; ++r) {
+            final int s = rows[r];
+            final float y = PL_Y + PL_ROWS_DOWN + r * PL_PITCH;
+            kit.fill(c, PL_ROW_X, y, PL_ROW_W, PL_ROW_H, ROW_FAINT, 10f);
+            final float sy = y + (PL_ROW_H - PL_SWATCH) / 2f;
+            kit.fill(c, PL_SWATCH_X, sy, PL_SWATCH, PL_SWATCH, Profiles.COLORS[s & 7], 8f);
+            kit.outline(c, PL_SWATCH_X, sy, PL_SWATCH, PL_SWATCH, LINE, 8f);
+            kit.textMiddle(c, kit.fit(kit.own("Player") + " " + (s + 1), CAP_BODY, PL_NAME_W), PL_NAME_X, y, PL_ROW_H,
+                           CAP_BODY, INK, true);
+            final float fy = y + PL_FIELD_DOWN;
+            kit.fill(c, PL_KEY_X, fy, PL_KEY_W, PL_FIELD_H, PROP_FILL_FIXED, 10f);
+            kit.textCentre(c, kit.fit(PlayersSheet.ownerWord(kit, slots[1][s]), CAP_MID, PL_KEY_W - 24f), PL_KEY_X, fy,
+                           PL_KEY_W, PL_FIELD_H, CAP_MID, INK_MUTED, true);
+            kit.fill(c, PL_RACE_X, fy, PL_RACE_W, PL_FIELD_H, PROP_FILL_FIXED, 10f);
+            kit.textCentre(c, kit.fit(raceWord(slots[2][s]), CAP_MID, PL_RACE_W - 24f), PL_RACE_X, fy, PL_RACE_W,
+                           PL_FIELD_H, CAP_MID, INK_MUTED, true);
+            bottom = y + PL_ROW_H;
+        }
+        if (fit > 0 || rows.length > 0) {
+            kit.textTop(c, kit.fit(kit.own("Edit in the map's Players"), CAP_NOTE, INFO_W - 2f * INFO_PAD),
+                        INFO_X + INFO_PAD, bottom + PL_NOTE_GAP, CAP_NOTE, INK_MUTED, true);
+        }
+    }
+
+    // ----- the picture of a draft (owner decision 88, 4A) -----
+
+    /** The Draft corner: a triangle of this side in the picture's top right, its word turned along the cut. */
+    private static final float CORNER = 260f, CORNER_TEXT_IN = 70f, CORNER_TEXT_DOWN = 90f, CAP_CORNER = 34f;
+    private static final int CORNER_FILL = 0xFFFF7A3D, CORNER_INK = 0xFF111111;
+    private final android.graphics.Paint cornerPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+    private final android.graphics.Path cornerPath = new android.graphics.Path();
+    /** Pictures of drafts made from their working copies, kept by the journal's path, length and time. */
+    private final java.util.Map<String, Bitmap> draftPictures = new java.util.HashMap<String, Bitmap>();
+
+    /** The picture of a map's working copy as it stands; null when it cannot be made. */
+    private Bitmap draftPicture(String folder, File map) {
+        final File journal = WorkingCopy.journalOf(map);
+        final String key = journal.getPath() + "|" + journal.length() + "|" + journal.lastModified();
+        if (draftPictures.containsKey(key)) {
+            return draftPictures.get(key);
+        }
+        // One picture a map: the older one of the same journal goes.
+        for (java.util.Iterator<java.util.Map.Entry<String, Bitmap>> it = draftPictures.entrySet().iterator(); it.hasNext();) {
+            final java.util.Map.Entry<String, Bitmap> e = it.next();
+            if (e.getKey().startsWith(journal.getPath() + "|")) {
+                if (e.getValue() != null) {
+                    e.getValue().recycle();
+                }
+                it.remove();
+            }
+        }
+        final WorkingCopy w = WorkingCopy.peek(map);
+        final Bitmap made = (w == null || folder == null) ? null
+            : MapPreview.of(new File(folder), Provision.dataDir(activity), w.model());
+        draftPictures.put(key, made);
+        return made;
+    }
+
+    /** The orange Draft corner at the top right (x, y) of a picture. */
+    private void draftCorner(Canvas c, float x, float y) {
+        final float u = kit.unit;
+        cornerPath.reset();
+        cornerPath.moveTo((x - CORNER) * u, y * u);
+        cornerPath.lineTo(x * u, y * u);
+        cornerPath.lineTo(x * u, (y + CORNER) * u);
+        cornerPath.close();
+        cornerPaint.setColor(CORNER_FILL);
+        c.drawPath(cornerPath, cornerPaint);
+        final float cx = x - CORNER_TEXT_IN, cy = y + CORNER_TEXT_DOWN;
+        c.save();
+        c.rotate(45f, cx * u, cy * u);
+        kit.textCentre(c, kit.fit(kit.own("Draft"), CAP_CORNER, CORNER * 0.7f), cx - CORNER * 0.35f, cy - CAP_CORNER,
+                       CORNER * 0.7f, 2f * CAP_CORNER, CAP_CORNER, CORNER_INK, false);
+        c.restore();
     }
 
     // ----- drawing -----
@@ -844,11 +1389,15 @@ final class EditorPage {
             buttonMarked = kit.atlasFrame("Modern_Widgets_Orc", "large_active", 1008, 126);
         }
         kit.textTop(c, kit.own("Map Editor"), X0, TITLE_Y, CAP_TITLE, INK_TITLE, false);
+        drawKinds(c);
 
         final float h = listH();
         panel(c, X0, LIST_Y, LIST_W, h);
         if (maps.isEmpty()) {
-            kit.textTop(c, kit.fit(kit.own("No maps of your own yet."), CAP_MID, LIST_W - 2f * INFO_PAD),
+            final String empty = !gameList() ? kit.own("No maps of your own yet.")
+                : (GateActivity.rememberedFolder(activity) == null) ? kit.own("Choose the game folder in Options, Game Files.")
+                : kit.own("No maps in the game folder.");
+            kit.textTop(c, kit.fit(empty, CAP_MID, LIST_W - 2f * INFO_PAD),
                         X0 + INFO_PAD, LIST_Y + 66f, CAP_MID, INK_MUTED, true);
         }
         scroll = Math.max(0f, Math.min(maxScroll(), scroll));
@@ -884,48 +1433,50 @@ final class EditorPage {
         if (map != null) {
             final float px = INFO_X + INFO_PAD, py = INFO_Y + INFO_PAD;
             final String folder = GateActivity.rememberedFolder(activity);
-            final Bitmap preview = MapPreview.of(folder != null ? new File(folder) : null,
-                                                 Provision.dataDir(activity), map);
+            final boolean draft = selected < drafts.size() && drafts.get(selected);
+            final Bitmap preview = draft ? draftPicture(folder, map)
+                : MapPreview.of(folder != null ? new File(folder) : null, Provision.dataDir(activity), map);
             if (preview != null) {
                 final float s = Math.min(PICTURE / preview.getWidth(), PICTURE / preview.getHeight());
                 final float pw = preview.getWidth() * s, ph = preview.getHeight() * s;
                 kit.pictureSharp(c, preview, px + (PICTURE - pw) / 2f, py + (PICTURE - ph) / 2f, pw, ph);
                 kit.outline(c, px + (PICTURE - pw) / 2f, py + (PICTURE - ph) / 2f, pw, ph, LINE, 0f);
+                if (draft) {
+                    draftCorner(c, px + (PICTURE + pw) / 2f, py + (PICTURE - ph) / 2f);
+                }
             } else {
                 kit.outline(c, px, py, PICTURE, PICTURE, LINE, 0f);
             }
-            final float tx = px + PICTURE + INFO_PAD, tw = INFO_X + INFO_W - INFO_PAD - tx;
             final PudInfo facts = factsOf(map);
-            kit.textTop(c, kit.fit(nameOf(map), CAP_BODY, tw), tx, py + 6f, CAP_BODY, GOLD, true);
-            float ty = py + 6f + LINE_PITCH * 1.2f;
-            if (facts.width > 0 && facts.height > 0) {
-                kit.textTop(c, facts.width + " x " + facts.height, tx, ty, CAP_MID, INK, true);
-                ty += LINE_PITCH;
+            drawRows(c, map, facts, draft);
+            // Under the picture: the draft's state, or that the file is not a map (owner decision 89, 7A).
+            final String under = (facts.width <= 0) ? kit.own("This file could not be read as a map.")
+                : !draft ? null : kit.own(map.isFile() ? "Draft: has changes that are not saved" : "Draft: not saved yet");
+            if (under != null) {
+                kit.textTop(c, kit.fit(under, CAP_UNDER, INFO_W - 2f * INFO_PAD), px, UNDER_Y, CAP_UNDER,
+                            (facts.width <= 0) ? INK_MUTED : GOLD, true);
             }
-            if (facts.tileset >= 0) {
-                kit.textTop(c, kit.fit(LanSettings.tilesetName(kit, facts.tileset), CAP_MID, tw), tx, ty, CAP_MID, INK,
+            // The Players panel below (table 6.17 pl): its header; "up to N players" moved here from the facts.
+            final float plH = Math.min(PL_H, buttonY() - PL_GAP - PL_Y);
+            if (plH > PL_HEAD_Y + CAP_MID) {
+                panel(c, INFO_X, PL_Y, INFO_W, plH);
+                final String players = (facts.players > 0) ? kit.own("Players - up to {0}", facts.players)
+                                                           : kit.own("No players yet");
+                kit.textTop(c, kit.fit(players, CAP_MID, INFO_W - 2f * INFO_PAD), px, PL_Y + PL_HEAD_Y, CAP_MID, GOLD,
                             true);
-                ty += LINE_PITCH;
+                if (facts.width > 0) {
+                    drawPlayerRows(c, map, draft, plH);
+                }
             }
-            final String players = (facts.players > 0) ? kit.own("up to {0} players", facts.players)
-                                                       : kit.own("No players yet");
-            kit.textTop(c, kit.fit(players, CAP_MID, tw), tx, ty, CAP_MID, INK_MUTED, true);
-            ty += LINE_PITCH;
-            if (selected < drafts.size() && drafts.get(selected)) {
-                kit.textTop(c, kit.fit(kit.own(map.isFile() ? "Draft: has changes that are not saved"
-                                                            : "Draft: not saved yet"), CAP_MID, tw),
-                            tx, ty, CAP_MID, GOLD, true);
-                ty += LINE_PITCH;
-            }
-            if (facts.width <= 0) {
-                kit.textTop(c, kit.fit(kit.own("This file could not be read as a map."), CAP_MID, tw), tx, ty, CAP_MID,
-                            INK_MUTED, true);
-            }
+        }
+        if (rulesSheet != null) {
+            rulesSheet.draw(c, kit);
         }
 
         final float by = buttonY();
         for (int i = 0; i < 3; ++i) {
-            final boolean live = i == NEW || (map != null && (i != DUPLICATE || map.isFile()));
+            final boolean live = i == NEW || (map != null && (gameList() ? i == EDIT && factsOf(map).width > 0
+                                                                         : (i != DUPLICATE || map.isFile())));
             kit.nine(c, (i == EDIT && live) ? buttonMarked : buttonPlain, BUTTON_X[i], by, BUTTON_W, BUTTON_H, 14);
             kit.textCentre(c, kit.own(BUTTON_WORD[i]), BUTTON_X[i], by, BUTTON_W, BUTTON_H, CAP_BODY,
                            !live ? INK_MUTED : (i == EDIT) ? GOLD : INK, true);
@@ -946,6 +1497,36 @@ final class EditorPage {
     }
 
     // ----- touches -----
+
+    /** The live segment at a point (Maps, Game maps), or -1; Campaigns is not live yet. */
+    private int kindAt(float x, float y) {
+        final int i = LanKit.segmentAt(x, y, KIND_WORD.length, X0, KIND_Y, LIST_W, KIND_H);
+        return (i == KIND_CAMPAIGNS) ? -1 : i;
+    }
+
+    private void chooseKind(int k) {
+        if (k == kind) {
+            return;
+        }
+        shell.click();
+        kind = k;
+        selected = 0;
+        scroll = 0f;
+        load(null);
+    }
+
+    /** The segment above the list: Maps, Campaigns (not live: stage 3), Game maps. */
+    private void drawKinds(Canvas c) {
+        LanKit.well(c, kit, X0, KIND_Y, LIST_W, KIND_H);
+        final float segW = LIST_W / KIND_WORD.length;
+        for (int i = 0; i < KIND_WORD.length; ++i) {
+            final float sx = X0 + segW * i + KIND_IN, sw = segW - 2f * KIND_IN, sh = KIND_H - 2f * KIND_IN;
+            final boolean on = i == kind;
+            kit.fill(c, sx, KIND_Y + KIND_IN, sw, sh, on ? GOLD : LanKit.SEG_FAINT, 10f);
+            kit.textCentre(c, kit.fit(kit.own(KIND_WORD[i]), CAP_BODY, sw - 24f), sx, KIND_Y + KIND_IN, sw, sh, CAP_BODY,
+                           on ? LanKit.INK_ON_GOLD : (i == KIND_CAMPAIGNS) ? LanKit.INK_DISABLED : INK, !on);
+        }
+    }
 
     private int rowAt(float x, float y) {
         if (x < ROW_X || x >= ROW_X + ROW_W || y < LIST_Y || y >= LIST_Y + listH()) {
@@ -970,7 +1551,8 @@ final class EditorPage {
     private final Runnable held = new Runnable() {
         @Override
         public void run() {
-            if (canvas == null && !sheetOpen() && inList && !dragging && pressedRow >= 0 && pressedRow < maps.size()) {
+            if (canvas == null && !sheetOpen() && !gameList() && inList && !dragging && pressedRow >= 0
+                && pressedRow < maps.size()) {
                 selected = pressedRow;
                 pressedRow = -1;
                 mapSheet = new MapSheet(nameOf(maps.get(selected)), "One of your maps");
@@ -1036,11 +1618,13 @@ final class EditorPage {
                 downScroll = scroll;
                 pressedRow = inList ? rowAt(x, y) : -1;
                 pressedButton = buttonAt(x, y);
+                pressedProp = propAt(x, y);
+                pressedKind = kindAt(x, y);
                 shell.forget(held);
                 if (pressedRow >= 0) {
                     shell.later(held, HOLD_MILLIS);
                 }
-                return inList || pressedButton >= 0;
+                return inList || pressedButton >= 0 || pressedProp >= 0 || pressedKind >= 0;
             case MotionEvent.ACTION_MOVE:
                 if (inList) {
                     if (Math.abs(y - downY) > 16f) {
@@ -1052,10 +1636,18 @@ final class EditorPage {
                         scroll = Math.max(0f, Math.min(maxScroll(), downScroll - (y - downY)));
                     }
                 }
-                return inList || pressedButton >= 0;
+                return inList || pressedButton >= 0 || pressedProp >= 0 || pressedKind >= 0;
             case MotionEvent.ACTION_UP: {
                 shell.forget(held);
-                final boolean was = inList || pressedButton >= 0;
+                final boolean was = inList || pressedButton >= 0 || pressedProp >= 0 || pressedKind >= 0;
+                if (pressedKind >= 0 && kindAt(x, y) == pressedKind) {
+                    chooseKind(pressedKind);
+                }
+                pressedKind = -1;
+                if (pressedProp >= 0 && propAt(x, y) == pressedProp) {
+                    propTap(pressedProp);
+                }
+                pressedProp = -1;
                 final int row = (inList && !dragging) ? rowAt(x, y) : -1;
                 if (row >= 0 && row == pressedRow && row != selected) {
                     selected = row;
@@ -1074,6 +1666,8 @@ final class EditorPage {
                 shell.forget(held);
                 pressedRow = -1;
                 pressedButton = -1;
+                pressedProp = -1;
+                pressedKind = -1;
                 inList = false;
                 dragging = false;
                 return false;

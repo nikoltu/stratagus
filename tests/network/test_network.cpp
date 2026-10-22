@@ -49,10 +49,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <tuple>
+#include <vector>
 
 void FillCustomValue(CNetworkCommand *obj)
 {
@@ -1070,6 +1072,7 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 		CHECK(FindHostIndexBy(thirdHost) == 3);
 		CHECK(Hosts[4].IsValid() == false);
 		CHECK(NetworkTestMeshProbeMask() == 0);
+		CHECK(NetworkClientUnreachedPeers() == 2); // host slots 2 and 3; not the server, not itself
 
 		// it probes the two other clients, not the server, and answers the config without a peer
 		NetworkProcessClientRequest();
@@ -1097,6 +1100,7 @@ TEST_CASE_FIXTURE(NetworkInit, "client start: the table after the config, the pr
 		otherSocket.Send(localHost, probeAck.data(), probeAck.size());
 		REQUIRE(MeshNetwork::EngineReads());
 		CHECK(NetworkTestMeshProbeMask() == 0x0004);
+		CHECK(NetworkClientUnreachedPeers() == 1); // host slot 3 still silent
 
 		// the next answers carry the peer; the one which answered is not probed again
 		const unsigned long start = GetTicks();
@@ -2588,4 +2592,149 @@ TEST_CASE_FIXTURE(InGameNetworkWithSockets, "no model: the pause button does not
 	NetworkExecPause(0);
 	CHECK(NetworkIsPaused() == false);
 	CHECK(GamePaused == false);
+}
+
+// ----- NET-LAG-DISCARDED: the room's lag is the game's lag -----
+
+TEST_CASE("lag: a single-player game runs with 1, a network game with the set-up lag, bounded")
+{
+	CHECK(CNetworkParameter::GameLag(false, 30, 1) == 1);
+	CHECK(CNetworkParameter::GameLag(true, CNetworkParameter::defaultLag, 1) == 10);
+	CHECK(CNetworkParameter::GameLag(true, 24, 1) == 24);
+	CHECK(CNetworkParameter::GameLag(true, 0, 1) == 2);   // at least two updates
+	CHECK(CNetworkParameter::GameLag(true, 3, 2) == 4);
+	CHECK(CNetworkParameter::GameLag(true, 1000, 1) == CNetworkParameter::kMaxLag);
+	CHECK(CNetworkParameter::GameLag(true, 5, 0) == 5);   // no update rate counts as 1
+}
+
+TEST_CASE("lag: the welcome carries the host's set-up lag, not the lag of his last game")
+{
+	const unsigned int savedSetup = CNetworkParameter::Instance.SetupLag;
+	const unsigned int savedLag = CNetworkParameter::Instance.NetworkLag;
+	CNetworkParameter::Instance.SetupLag = 24;
+	CNetworkParameter::Instance.NetworkLag = 1; // a single-player game ran before in this process
+	const CInitMessage_Welcome sent;
+	const auto buf = sent.Serialize();
+	CInitMessage_Welcome got;
+	got.Deserialize(buf.data());
+	CHECK(got.Lag == 24);
+	CNetworkParameter::Instance.SetupLag = savedSetup;
+	CNetworkParameter::Instance.NetworkLag = savedLag;
+}
+
+TEST_CASE_FIXTURE(InGameNetworkWithSockets, "lag: a network game starts with the set-up lag")
+{
+	REQUIRE(IsNetworkGame());
+	CHECK(CNetworkParameter::Instance.NetworkLag == CNetworkParameter::defaultLag);
+	const unsigned int savedSetup = CNetworkParameter::Instance.SetupLag;
+	CNetworkParameter::Instance.SetupLag = 24;
+	GameCycle = 0;
+	NetworkOnStartGame();
+	CHECK(CNetworkParameter::Instance.NetworkLag == 24);
+	CNetworkParameter::Instance.SetupLag = savedSetup;
+	NetworkOnStartGame();
+	NetworkTestMeshStop();
+	CHECK(CNetworkParameter::Instance.NetworkLag == CNetworkParameter::defaultLag);
+	GameCycle = 20;
+}
+
+// ----- NET-CONTENT-ID: the content two devices compare in the hello -----
+
+namespace
+{
+struct ContentTree {
+	fs::path root;
+	ContentTree()
+	{
+		root = fs::temp_directory_path() / ("wargushd_content_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+		fs::create_directories(root / "scripts" / "human");
+		Write("scripts/stratagus_extra.lua", "a = 1\n");
+		Write("scripts/human/units.lua", "DefineUnitType(\"unit-footman\", {})\n");
+		Write("Data/Rez/unitdata.dat", std::string("\x01\x02\x03", 3));
+	}
+	~ContentTree() { std::error_code ec; fs::remove_all(root, ec); }
+	void Write(const std::string &rel, const std::string &bytes)
+	{
+		fs::create_directories((root / rel).parent_path());
+		std::ofstream(root / rel, std::ios::binary) << bytes;
+	}
+	std::vector<std::pair<std::string, fs::path>> Data() const
+	{
+		std::vector<std::pair<std::string, fs::path>> d;
+		for (const std::string &name : NetworkContentDataFiles()) {
+			const fs::path p = root / name;
+			d.emplace_back(name, fs::exists(p) ? p : fs::path());
+		}
+		return d;
+	}
+	uint32_t Id() const { return NetworkContentIdOf(root / "scripts", Data()); }
+};
+} // namespace
+
+TEST_CASE("content id: equal for equal trees, changed by one byte of a script or of the game data")
+{
+	ContentTree a;
+	ContentTree b;
+	CHECK(a.Id() == b.Id());
+	const uint32_t base = a.Id();
+
+	a.Write("scripts/human/units.lua", "DefineUnitType(\"unit-footman\", {}) \n"); // one byte more
+	CHECK(a.Id() != base);
+	a.Write("scripts/human/units.lua", "DefineUnitType(\"unit-footman\", {})\n");
+	CHECK(a.Id() == base);
+
+	a.Write("Data/Rez/unitdata.dat", std::string("\x01\x02\x04", 3));
+	CHECK(a.Id() != base);
+	a.Write("Data/Rez/unitdata.dat", std::string("\x01\x02\x03", 3));
+	CHECK(a.Id() == base);
+
+	a.Write("Data/Rez/ai.bin", "x"); // a game-data file one device has and the other has not
+	CHECK(a.Id() != base);
+}
+
+TEST_CASE("content id: a script's name counts, the directory listing order does not")
+{
+	ContentTree a;
+	const uint32_t base = a.Id();
+	a.Write("scripts/zz_new.lua", "");
+	CHECK(a.Id() != base);
+	std::error_code ec;
+	fs::remove(a.root / "scripts" / "zz_new.lua", ec);
+	CHECK(a.Id() == base);
+	fs::rename(a.root / "scripts" / "stratagus_extra.lua", a.root / "scripts" / "other_name.lua", ec);
+	CHECK(a.Id() != base);
+	CHECK(NetworkContentIdOf(fs::path(), {}) == NetworkContentIdOf(a.root / "missing", {}));
+}
+
+TEST_CASE("content id: the hello carries the content version and a mismatch is refused")
+{
+	NetworkContentVersionReset();
+	const CInitMessage_Hello hello("me");
+	CHECK(hello.Version == NetworkContentVersion());
+	const CInitMessage_LuaFilesMismatch refusal;
+	CHECK(refusal.Version == NetworkContentVersion());
+}
+
+// GATE-ENGINE-FILES: the launcher's gate (GameFiles.REQUIRED) asks for every game-data file the
+// engine plays by and the LAN content id hashes, so a folder without one is refused at the gate
+// instead of being played by other rules in silence.
+#include <iterator>
+TEST_CASE("gate files: GameFiles.REQUIRED names every file of the LAN content id")
+{
+	const fs::path here = fs::path(__FILE__);
+	const fs::path java = here.parent_path().parent_path().parent_path() / "android" / "app" / "src" / "main"
+	                      / "java" / "net" / "wargushd" / "game" / "GameFiles.java";
+	std::ifstream in(java, std::ios::binary);
+	REQUIRE_MESSAGE(in.good(), "GameFiles.java not found at " << java.string());
+	const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	const size_t begin = text.find("REQUIRED = {");
+	REQUIRE(begin != std::string::npos);
+	const size_t end = text.find("};", begin);
+	REQUIRE(end != std::string::npos);
+	const std::string required = text.substr(begin, end - begin);
+	CHECK(NetworkContentDataFiles().size() == 3);
+	for (const std::string &name : NetworkContentDataFiles()) {
+		INFO(name);
+		CHECK(required.find("\"" + name + "\",") != std::string::npos);
+	}
 }

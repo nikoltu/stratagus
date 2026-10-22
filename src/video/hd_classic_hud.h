@@ -394,7 +394,14 @@ constexpr int TooltipBoxTopFromBottom = 76;
 constexpr int TooltipBoxCutLeft = 7;
 constexpr int TooltipBoxCutRight = 8;
 constexpr int TooltipBoxCutY = 7;
-constexpr int TooltipBoxLineRGB[3] = {67, 66, 60};
+// Run 59 (4 captures, 2 grounds: wasteland dirt dark and light, winter snow; ground 4..160, 1992
+// line pixels, joint fit rms 0.31..0.42): the line is NOT opaque. It is a cream-white
+// (241, 243, 221) laid over the bare map at alpha 0.272..0.277 (70 of 255); the black fill is not
+// under it. A one-pixel ring just outside the line is darkened: black at alpha about 0.15..0.25
+// (51 of 255 taken). The opaque (67, 66, 60) of o11_55 was this blend over a dark ground.
+constexpr int TooltipBoxLineRGB[3] = {241, 243, 221};
+constexpr int TooltipBoxLineAlpha = 70;
+constexpr int TooltipBoxRingAlpha = 51;
 constexpr int TooltipBoxFills = 2;
 constexpr int TooltipBoxLines = 12;
 struct TooltipBox {
@@ -459,6 +466,50 @@ constexpr TooltipBox tooltipBox(int logicalH, int lines = 1)
 	         {x3, y1, 1, y2 - y1 + 1}, {x2, y2, x3 - x2 + 1, 1}, {x2, y2, 1, y3 - y2 + 1},
 	         {x1, y3, x2 - x1 + 1, 1}, {x1, y2, 1, y3 - y2 + 1}, {x0, y2, x1 - x0 + 1, 1},
 	         {x0, y1, 1, y2 - y1 + 1}, {x0, y1, x1 - x0 + 1, 1}, {x1, y0, 1, y1 - y0 + 1}}};
+}
+/// The box's parts for drawing translucent (run 59): no pixel is in two rects, so nothing is
+/// blended twice. `inner`: the black, inside the line only (3 rects, the middle one whole and the
+/// two side strips). `line`: the line (12 rects, the rows take the corners). `ring`: the
+/// darkened ring one pixel outside the line, the same twelve-cornered shape grown by one.
+struct TooltipBoxBlend {
+	Rect inner[3];
+	Rect line[TooltipBoxLines];
+	Rect ring[TooltipBoxLines];
+};
+/// The outline of the twelve-cornered shape of the columns x0 < x1 < x2 < x3 and the rows
+/// y0 < y1 < y2 < y3, one pixel thick, in rects that do not overlap.
+constexpr void tooltipOutline(Rect *out, int x0, int x1, int x2, int x3, int y0, int y1, int y2, int y3)
+{
+	out[0] = {x1, y0, x2 - x1 + 1, 1};          // top
+	out[1] = {x2, y0 + 1, 1, y1 - y0 - 1};      // top-right cut, down
+	out[2] = {x2, y1, x3 - x2 + 1, 1};          // top-right cut, across
+	out[3] = {x3, y1 + 1, 1, y2 - y1 - 1};      // right
+	out[4] = {x2, y2, x3 - x2 + 1, 1};          // bottom-right cut, across
+	out[5] = {x2, y2 + 1, 1, y3 - y2 - 1};      // bottom-right cut, down
+	out[6] = {x1, y3, x2 - x1 + 1, 1};          // bottom
+	out[7] = {x1, y2 + 1, 1, y3 - y2 - 1};      // bottom-left cut, down
+	out[8] = {x0, y2, x1 - x0 + 1, 1};          // bottom-left cut, across
+	out[9] = {x0, y1 + 1, 1, y2 - y1 - 1};      // left
+	out[10] = {x0, y1, x1 - x0 + 1, 1};         // top-left cut, across
+	out[11] = {x1, y0 + 1, 1, y1 - y0 - 1};     // top-left cut, down
+}
+constexpr TooltipBoxBlend tooltipBoxBlend(int logicalH, int lines = 1)
+{
+	const int x0 = TooltipBoxX;
+	const int x1 = x0 + TooltipBoxCutLeft;
+	const int x2 = x0 + TooltipBoxW - 1 - TooltipBoxCutRight;
+	const int x3 = x0 + TooltipBoxW - 1;
+	const int y3 = logicalH - TooltipBoxTopFromBottom + TooltipBoxH - 1;
+	const int y0 = y3 - tooltipBoxHeight(lines) + 1;
+	const int y1 = y0 + TooltipBoxCutY;
+	const int y2 = y3 - TooltipBoxCutY;
+	TooltipBoxBlend b{};
+	b.inner[0] = {x1 + 1, y0 + 1, x2 - x1 - 1, y3 - y0 - 1};
+	b.inner[1] = {x0 + 1, y1 + 1, x1 - x0, y2 - y1 - 1};
+	b.inner[2] = {x2, y1 + 1, x3 - x2, y2 - y1 - 1};
+	tooltipOutline(b.line, x0, x1, x2, x3, y0, y1, y2, y3);
+	tooltipOutline(b.ring, x0 - 1, x1 - 1, x2 + 1, x3 + 1, y0 - 1, y1 - 1, y2 + 1, y3 + 1);
+	return b;
 }
 // Info panel, as measured (o11_16, o11_84): name centred about x 114 (rows 186..193), "Level N"
 // under it (201..208), the hit point figure centred on x 31 (rows 220..224), stat lines with the
@@ -587,6 +638,8 @@ extern int ClassicGroupCellAt(int screenX, int screenY);
 extern int ClassicPassengerCellAt(int screenX, int screenY);
 /// The message line of the classic view. (src/ui/ui.cpp)
 extern void DrawClassicMessage(std::string_view text);
+/// The screen rect DrawClassicMessage gives the text: false when it draws nothing. (src/ui/ui.cpp)
+extern bool ClassicMessageRect(std::string_view text, int &x, int &y, int &w, int &h);
 /// Line n (0 the first) of the objectives block of the classic view. (src/ui/ui.cpp)
 extern void DrawClassicObjective(int n, std::string_view text);
 

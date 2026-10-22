@@ -35,14 +35,46 @@
 #include <string>
 #include "animation.h"
 
+/**
+**  How a wait reacts to Haste / Slow, after the wait opcodes of the original's unit scripts.
+**  The Lua verb names the kind; the plain "wait" never changes.
+*/
+enum class EAnimWaitKind {
+	Fixed,     /// "wait": opcode 1, never scaled
+	HasteSlow, /// "wait-haste-slow": opcode 7, halved by Haste, doubled by Slow
+	Haste,     /// "wait-haste": opcode 8, halved by Haste only
+	Slow,      /// "wait-slow": opcode 9, doubled by Slow only
+	Loaded     /// "wait-loaded": opcode 12, +1 while carrying a load, then as opcode 7
+};
+
+/**
+**  Scale one wait by its kind.
+**
+**  @param kind         the kind of the wait
+**  @param wait         the wait in cycles
+**  @param speedSign    > 0 hasted, < 0 slowed, 0 neither
+**  @param carriesLoad  the unit carries a load (only read by EAnimWaitKind::Loaded)
+**
+**  @return the scaled wait; a halved wait is at least 1
+*/
+int ScaleAnimationWait(EAnimWaitKind kind, int wait, int speedSign, bool carriesLoad);
+
+/// The Haste / Slow sign of a unit: 1 hasted, -1 slowed, 0 neither (or both)
+int AnimationWaitSpeedSign(const CUnit &unit);
+
 class CAnimation_Wait : public CAnimation
 {
 public:
+	explicit CAnimation_Wait(EAnimWaitKind kind = EAnimWaitKind::Fixed) : kind(kind) {}
+
 	void Action(CUnit &unit, int &move, int scale) const override;
 	void Init(std::string_view s, lua_State *l) override;
 
+	EAnimWaitKind GetKind() const { return kind; }
+
 private:
 	std::string wait;
+	EAnimWaitKind kind;
 };
 
 //@}

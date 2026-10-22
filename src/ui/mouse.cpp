@@ -53,6 +53,7 @@
 #include "sound.h"
 #include "spells.h"
 #include "stratagus.h"
+#include "target_cursor.h"
 #include "tileset.h"
 #include "translate.h"
 #include "ui.h"
@@ -775,6 +776,17 @@ static void HandleMouseOn(const PixelPos screenPos)
 	// outside the box nothing does. The Menu button is user button 0 (the Game Menu), at the
 	// classic button's place.
 	if (ClassicHudActive()) {
+		// The F5 slot at its classic place: the area of the scripts' F5 button (UI.MenuButton /
+		// UI.NetworkMenuButton), the same press and release path as in the Remastered view.
+		if (ClassicF5SlotContains(screenPos)) {
+			const bool network = IsNetworkGame();
+			if ((network ? UI.NetworkMenuButton.X : UI.MenuButton.X) != -1) {
+				ButtonAreaUnderCursor = ButtonArea::Menu;
+				ButtonUnderCursor = network ? ButtonUnderNetworkMenu : ButtonUnderMenu;
+				CursorOn = ECursorOn::Button;
+				return;
+			}
+		}
 		if (!UI.UserButtons.empty() && UI.UserButtons[0].Button.X != -1
 			&& ClassicMenuButtonContains(screenPos)) {
 			ButtonAreaUnderCursor = ButtonArea::User;
@@ -1359,25 +1371,21 @@ void UIHandleMouseMove(const PixelPos &cursorPos)
 	//  Selecting target.
 	if (CursorState == CursorStates::Select) {
 		if (CursorOn == ECursorOn::Map || CursorOn == ECursorOn::Minimap) {
+			// A button's own cursor wins; else the crosshair coloured by what is under it, as
+			// the original (target_cursor.h, run 70).
 			if (CustomCursor.length() && CursorByIdent(CustomCursor)) {
 				GameCursor = CursorByIdent(CustomCursor);
 			} else {
-				GameCursor = UI.YellowHair.Cursor;
-			}
-			if (UnitUnderCursor != nullptr && !UnitUnderCursor->Type->BoolFlag[DECORATION_INDEX].value) {
-				if (UnitUnderCursor->Player == ThisPlayer ||
-					ThisPlayer->IsAllied(*UnitUnderCursor)) {
-					if (CustomCursor.length() && CursorByIdent(CustomCursor)) {
-						GameCursor = CursorByIdent(CustomCursor);
-					} else {
-						GameCursor = UI.YellowHair.Cursor;
-					}
-				} else if (UnitUnderCursor->Player->Index != PlayerNumNeutral) {
-					if (CustomCursor.length() && CursorByIdent(CustomCursor)) {
-						GameCursor = CursorByIdent(CustomCursor);
-					} else {
-						GameCursor = UI.YellowHair.Cursor;
-					}
+				const bool unit = UnitUnderCursor != nullptr
+					&& !UnitUnderCursor->Type->BoolFlag[DECORATION_INDEX].value;
+				const targetcursor::Pick pick = targetcursor::pick(true, unit,
+					unit && (UnitUnderCursor->Player == ThisPlayer || ThisPlayer->IsAllied(*UnitUnderCursor)),
+					unit && UnitUnderCursor->Player->Index == PlayerNumNeutral);
+				GameCursor = pick == targetcursor::Pick::Green ? UI.GreenHair.Cursor
+				           : pick == targetcursor::Pick::Red ? UI.RedHair.Cursor
+				           : UI.YellowHair.Cursor;
+				if (GameCursor == nullptr) {
+					GameCursor = UI.YellowHair.Cursor;
 				}
 			}
 			if (CursorOn == ECursorOn::Minimap && (MouseButtons & RightButton)) {
@@ -1390,13 +1398,9 @@ void UIHandleMouseMove(const PixelPos &cursorPos)
 		return;
 	}
 
-	//  Cursor pointing.
+	//  Cursor pointing: the plain pointer over units too - the original has no hover cursor
+	//  (target_cursor.h, run 70), so the old magnifier is not set here.
 	if (CursorOn == ECursorOn::Map) {
-		//  Map
-		if (UnitUnderCursor != nullptr && !UnitUnderCursor->Type->BoolFlag[DECORATION_INDEX].value
-			&& (UnitUnderCursor->IsVisible(*ThisPlayer) || ReplayRevealMap)) {
-			GameCursor = UI.Glass.Cursor;
-		}
 		return;
 	}
 
@@ -2274,6 +2278,13 @@ void UIHandleButtonDown(unsigned button)
 		}
 	}
 
+	// The message line over the map (owner decision 71): a tap on a message with an event centres
+	// the view there and is not a map tap. Only in the plain pointer state, never while building.
+	if (CursorOn == ECursorOn::Map && CursorState == CursorStates::Point && !CursorBuilding
+		&& (MouseButtons & LeftButton) && CenterOnTappedMessage(CursorScreenPos)) {
+		return;
+	}
+
 	//  Cursor is on the map area
 	if (CursorOn == ECursorOn::Map) {
 		UIHandleButtonDown_OnMap(button);
@@ -2328,11 +2339,10 @@ void UIHandleButtonUp(unsigned button)
 			GameMenuButtonClicked = false;
 			if (ButtonAreaUnderCursor == ButtonArea::Menu) {
 				if (ButtonUnderCursor == ButtonUnderMenu || ButtonUnderCursor == ButtonUnderNetworkMenu) {
-					// FIXME: Not if, in input mode.
-					if (!IsNetworkGame()) {
-						GamePaused = true;
-						UI.StatusLine.Set(_("Game Paused"));
-					}
+					// WargusHD: this area is the HUD's F5 slot, the classic / Remastered switch;
+					// the game keeps running through a switch (l41 -> l42). No pause here: a
+					// script callback that opens a window pauses through the window
+					// (WargusHD_InGameWindow).
 					if (ButtonUnderCursor == ButtonUnderMenu) {
 						if (UI.MenuButton.Callback) {
 							UI.MenuButton.Callback->action(gcn::ActionEvent{nullptr, ""});
@@ -2505,7 +2515,11 @@ void UIHandleButtonUp(unsigned button)
 					PlayUnitSound(*Selected[0], EUnitVoice::Building);
 				} else if (Selected[0]->Burning) {
 					// FIXME: use GameSounds.Burning
-					PlayGameSound(SoundForName("burning").get(), MaxSampleVolume);
+					// Options -> Sound "Building Sound" off: a burning building is silent when
+					// selected too (UNMEASURED: plain meaning of the caption).
+					if (Preference.BuildingSound || !Selected[0]->Type->Building) {
+						PlayGameSound(SoundForName("burning").get(), MaxSampleVolume);
+					}
 				} else if (Selected[0]->Player == ThisPlayer || ThisPlayer->IsTeamed(*Selected[0])
 						   || Selected[0]->Player->Type == PlayerTypes::PlayerNeutral) {
 					PlayUnitSound(*Selected[0], EUnitVoice::Selected);
@@ -2514,21 +2528,8 @@ void UIHandleButtonUp(unsigned button)
 				}
 				// M666-4: the original prints nothing at the bottom of the map view when a unit is
 				// selected (captures s01 i03 u02 u05 hs00 k24 c25 b02 b03 t11).
-				// Preference.NoStatusLineTooltips is the HUD's existing "no hint line" switch
-				// (scripts/ui.lua, HUD-003); the classic line stays for a UI that keeps hints.
-				if (Selected[0]->Player == ThisPlayer && !Preference.NoStatusLineTooltips) {
-					char buf[64];
-					if (Selected[0]->Player->UnitTypesCount[Selected[0]->Type->Slot] > 1) {
-						snprintf(buf, sizeof(buf), _("You have ~<%d~> %ss"),
-								 Selected[0]->Player->UnitTypesCount[Selected[0]->Type->Slot],
-								 Selected[0]->Type->Name.c_str());
-					} else {
-						snprintf(buf, sizeof(buf), _("You have ~<%d~> %s(s)"),
-								 Selected[0]->Player->UnitTypesCount[Selected[0]->Type->Slot],
-								 Selected[0]->Type->Name.c_str());
-					}
-					UI.StatusLine.Set(buf);
-				}
+				// STATUS-PLURAL: nor with button popups off -- its string table (enUS.json) has no
+				// "You have N <unit>" line at all, so the count line is not made in any HUD.
 			}
 		}
 

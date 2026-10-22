@@ -38,6 +38,7 @@
 #include "wc2strings.h"
 
 #include "unit.h"
+#include "unit_cull_extent.h"
 
 #include "action/action_attack.h"
 #include "actions.h"
@@ -52,9 +53,11 @@
 #include "luacallback.h"
 #include "map.h"
 #include "missile.h"
+#include "missile_cadence.h"
 #include "network.h"
 #include "pathfinder.h"
 #include "player.h"
+#include "pud.h"
 #include "script.h"
 #include "settings.h"
 #include "sound.h"
@@ -420,6 +423,7 @@ void CUnit::Init()
 	ranges::fill(IndividualUpgrades, false);
 	IX = 0;
 	IY = 0;
+	IdleBob = IdleBobState();
 	Direction = 0;
 	CurrentResource = 0;
 	ResourcesHeld = 0;
@@ -449,6 +453,8 @@ void CUnit::Init()
 	MapFixed = 0;
 	HomePos = Vec2i(-1, -1);
 	HomeRole = 0;
+	LastAttacker = nullptr;
+	LastAttackerCycle = 0;
 	ranges::fill(VisCount, 0);
 	memset(&Seen, 0, sizeof(Seen));
 	Variable.clear();
@@ -467,6 +473,29 @@ void CUnit::Init()
 	AutoCastSpell.clear();
 	SpellCoolDownTimers.clear();
 	Goal = nullptr;
+}
+
+/**
+**  Take a unit that is being destroyed out of the selection, the team selections and the
+**  cursor, as CUnit::Remove does for a unit that leaves the map. Its cell of the selection
+**  grid is left empty, as for a unit that dies on the map.
+*/
+void LeaveSelectionOnRelease(CUnit &unit)
+{
+	if (unit.Selected) {
+		SelectionCellUnitDied(unit);
+		if (::Selected.size() == 1) {
+			CancelBuildingMode();
+		}
+		UnSelectUnit(unit);
+		SelectionChanged();
+	}
+	if (unit.TeamSelected) {
+		UnSelectUnit(unit);
+	}
+	if (UnitUnderCursor == &unit) {
+		UnitUnderCursor = nullptr;
+	}
 }
 
 /**
@@ -497,6 +526,14 @@ void CUnit::Release(bool final)
 		// Are more references remaining?
 		Destroyed = 1; // mark as destroyed
 
+		// A worker inside a mine or a depot stays selected (DeselectInMine off), and
+		// DestroyAllInside / the removed-unit path of LetUnitDie release it without passing
+		// through Remove. Nothing may keep pointing at a destroyed unit: its orders are
+		// cleared below and the info panel reads them every frame.
+		if (!final) {
+			LeaveSelectionOnRelease(*this);
+		}
+
 		if (Container && !final) {
 			if (Boarded) {
 				Container->BoardCount--;
@@ -507,6 +544,12 @@ void CUnit::Release(bool final)
 
 		while (!Resource.AssignedWorkers.empty()) {
 			Resource.AssignedWorkers.back()->DeAssignWorkerFromMine(*this);
+		}
+		// A destroyed unit remembers no attacker: two units remembering each other would
+		// otherwise hold each other's slot for ever. The game's end clears it with the orders
+		// (CUnitManager::Init).
+		if (!final) {
+			LastAttacker = nullptr;
 		}
 
 		if (--Refs > 0) {
@@ -654,6 +697,17 @@ bool CUnit::RestoreOrder()
 		this->SavedOrder = nullptr;
 		return false;
 	}
+	// A remembered patrol / attack-move in its cool-down stays saved: the unit stands, the memory is
+	// kept. An attack-move ended within 1 tile of its point is forgotten.
+	switch (this->SavedOrder->ReissueReady(*this, GameCycle)) {
+		case wc2ai::Reissue::Ready:
+			break;
+		case wc2ai::Reissue::Wait:
+			return false;
+		case wc2ai::Reissue::Forget:
+			this->SavedOrder = nullptr;
+			return false;
+	}
 
 	// Cannot delete this->Orders[0] since it is generally that order
 	// which call this method.
@@ -662,6 +716,22 @@ bool CUnit::RestoreOrder()
 	//copy
 	this->Orders.insert(this->Orders.begin() + 1, std::move(this->SavedOrder));
 	return true;
+}
+
+/**
+**  A remembered patrol or attack-move in the saved order: kept while the unit stands, so the end of
+**  its next fight or cast runs the re-issue check.
+*/
+bool CUnit::SavedOrderIsMemory() const
+{
+	if (this->SavedOrder == nullptr) {
+		return false;
+	}
+	if (this->SavedOrder->Action == UnitAction::Patrol) {
+		return true;
+	}
+	return this->SavedOrder->Action == UnitAction::Attack
+	    && static_cast<const COrder_Attack &>(*this->SavedOrder).IsRememberedAttackMove();
 }
 
 /**
@@ -852,6 +922,32 @@ void MapMarkUnitSight(CUnit &unit)
 }
 
 /**
+**  FOW-SAVE (work/FOW_BUG.md): the sight of one unit inside a container, after a saved game is
+**  read, marked exactly as MapUnmarkUnitSight will take it away when the unit comes out: from the
+**  first container's tiles, with the container's range, and with the shape CFieldOfView::Refresh
+**  picks from unit.Container (a building lights from its middle, EVIDENCE-SIGHT-001). The save's
+**  "host-info" marked it while the file was read, before the container's own record had set
+**  unit.Container: the unit then lit as a one-tile unit from the container's top-left tile, and
+**  leaving the container took away a shape it never gave (own building tiles fall to explored).
+**  Only the unit itself, not its passengers: each of them is a removed inside unit of its own.
+*/
+void MapMarkInsideUnitSightAfterLoad(CUnit &unit)
+{
+	if (!unit.Container || !unit.Removed || !unit.Type || !unit.Player) {
+		return;
+	}
+	const CUnit *container = GetFirstContainer(unit);
+	Assert(container->Type);
+	const int range = unit.Container->CurrentSightRange;
+	MapSight(*unit.Player, unit, container->tilePos, container->Type->TileWidth,
+	         container->Type->TileHeight, range, MapMarkTileSight);
+	if (unit.Type->BoolFlag[DETECTCLOAK_INDEX].value) {
+		MapSight(*unit.Player, unit, container->tilePos, container->Type->TileWidth,
+		         container->Type->TileHeight, range, MapMarkTileDetectCloak);
+	}
+}
+
+/**
 **  Unmark on vision table the Sight of the unit
 **  (and units inside for transporter)
 **
@@ -899,7 +995,10 @@ void MapRefreshUnitsSight(const Vec2i &tilePos, const bool resetSight /*= false*
 			continue;
 		}
 		for (CUnit *const unit : player.GetUnits()) {
-			if (!unit->Destroyed) {
+			// FOW-BUG2: a unit inside a container is (un)marked by its container's
+			// MapMarkUnitSightRec; doing it here too counted it twice (the second unmark is lost
+			// on tiles at 1, the second mark is not: a stray +1 that never fogs).
+			if (!unit->Destroyed && !unit->Container) {
 				const auto dist = unit->Container ? unit->Container->MapDistanceTo(tilePos)
 												  : unit->MapDistanceTo(tilePos);
 				if (dist <= unit->CurrentSightRange) {
@@ -924,7 +1023,8 @@ void MapRefreshUnitsSight(const Vec2i &tilePos, const bool resetSight /*= false*
 void MapRefreshUnitsSight(const bool resetSight /*= false*/)
 {
 	for (CUnit *const unit : UnitManager->GetUnits()) {
-		if (!unit->Destroyed) {
+		// FOW-BUG2: inside units go with their container (MapMarkUnitSightRec), see above.
+		if (!unit->Destroyed && !unit->Container) {
 			if (resetSight) {
 				MapUnmarkUnitSight(*unit);
 			} else {
@@ -1375,6 +1475,10 @@ void UnitLost(CUnit &unit)
 				int m = DefaultIncomes[i];
 
 				for (const CUnit* punit : player.GetUnits()) {
+					// Only finished buildings count (the original's building counts, 0x89CB80).
+					if (punit->CurrentAction() == UnitAction::Built) {
+						continue;
+					}
 					m = std::max(m, punit->Type->Stats[player.Index].ImproveIncomes[i]);
 				}
 				player.Incomes[i] = m;
@@ -1388,13 +1492,8 @@ void UnitLost(CUnit &unit)
 		});
 		if (lost_town_hall) {
 			player.LostMainFacilityTimer = GameCycle + (30 * CYCLES_PER_SECOND); //30 seconds until being revealed
-			for (int j = 0; j < NumPlayers; ++j) {
-				if (player.Index != j && Players[j].Type != PlayerTypes::PlayerNobody) {
-					Players[j].Notify(_("%s has lost their last base, and will be revealed in thirty seconds!"), player.Name.c_str());
-				} else {
-					Players[j].Notify("%s", _("You have lost your last base, and will be revealed in thirty seconds!"));
-				}
-			}
+			// U-16: no line. The game's string table (Data/Strings/enUS.json) has no text for
+			// this event; the rule itself is unchanged.
 		}
 	}
 
@@ -1611,6 +1710,24 @@ void UnitGoesOutOfFog(CUnit &unit, const CPlayer &player)
 }
 
 /**
+**  LOAD-CRASH-3473 (work/LOAD_CRASH_3473.md): after a saved game is read and every unit stands,
+**  a unit ThisPlayer knows, that is drawn under fog and that ThisPlayer cannot see now, but whose
+**  remembered look was never filled (it never went under fog for ThisPlayer before the save), gets
+**  its look filled from its present state: the state the player last saw. Without it the fog
+**  draw had no type (Seen.Type == nullptr) and the first frame after the load crashed.
+*/
+void UnitFillMissingSeenAfterLoad(CUnit &unit)
+{
+	if (!ThisPlayer || !unit.Type || unit.Destroyed || unit.Removed || unit.Seen.Type
+	    || !unit.Type->BoolFlag[VISIBLEUNDERFOG_INDEX].value
+	    || !(unit.Seen.ByPlayer & (1 << ThisPlayer->Index)) || unit.IsVisible(*ThisPlayer)
+	    || unit.Orders.empty()) {
+		return;
+	}
+	UnitFillSeenValues(unit);
+}
+
+/**
 **  Recalculates a units visibility count. This happens really often,
 **  Like every time a unit moves. It's really fast though, since we
 **  have per-tile counts.
@@ -1760,7 +1877,30 @@ bool CUnit::IsVisibleInViewport(const CViewport &vp) const
 
 	if (x + Type->Width < vpTopLeftMapPos.x || x > vpBottomRightMapPos.x
 		|| y + Type->Height < vpTopLeftMapPos.y || y > vpBottomRightMapPos.y) {
-		return false;
+		// CULL-HD-EXTENT (SCALE_ZOOM diff 07): the classic cell is outside, but the HD canvas, the
+		// selection rectangle or the health bar may reach in. Only units at the view's edge ring
+		// get here (FindAndSortUnits selects 2 tiles round the view), so the extra work is small.
+		unitcull::Input in;
+		in.tileW = Type->TileWidth;
+		in.tileH = Type->TileHeight;
+		in.tilePxX = PixelTileSize.x;
+		in.tilePxY = PixelTileSize.y;
+		in.width = Type->Width;
+		in.height = Type->Height;
+		in.offX = Type->Offset.x;
+		in.offY = Type->Offset.y;
+		in.spriteW = Type->Sprite ? Type->Sprite->Width : 0;
+		in.spriteH = Type->Sprite ? Type->Sprite->Height : 0;
+		in.boxW = Type->BoxWidth;
+		in.boxH = Type->BoxHeight;
+		in.boxOffX = Type->BoxOffset.x;
+		in.boxOffY = Type->BoxOffset.y;
+		GetHDUnitCanvas(*Type, in.canvasW, in.canvasH);
+		if (!unitcull::Touches(unitcull::Extent(in), tilePos.x * PixelTileSize.x + IX,
+		                       tilePos.y * PixelTileSize.y + IY, vpTopLeftMapPos.x, vpTopLeftMapPos.y,
+		                       vpBottomRightMapPos.x, vpBottomRightMapPos.y)) {
+			return false;
+		}
 	}
 
 	if (!ThisPlayer) {
@@ -1782,7 +1922,9 @@ bool CUnit::IsVisibleInViewport(const CViewport &vp) const
 		// Unit has to be 'discovered'
 		// Destroyed units ARE visible under fog of war, if we haven't seen them like that.
 		if (!Destroyed || !(Seen.Destroyed & (1 << ThisPlayer->Index))) {
-			return (Type->BoolFlag[VISIBLEUNDERFOG_INDEX].value && (Seen.ByPlayer & (1 << ThisPlayer->Index)));
+			// LOAD-CRASH-3473: drawn under fog from its remembered look only, so it needs one.
+			return (Type->BoolFlag[VISIBLEUNDERFOG_INDEX].value && (Seen.ByPlayer & (1 << ThisPlayer->Index))
+			        && Seen.Type != nullptr);
 		} else {
 			return false;
 		}
@@ -2533,7 +2675,7 @@ void LetUnitDie(CUnit &unit, bool suicide)
 	// Catapults,... explodes.
 	//
 	if (type->ExplodeWhenKilled) {
-		const PixelPos pixelPos = unit.GetMapPixelPosCenter();
+		const PixelPos pixelPos = unit.GetMapPixelPosCenter() - PixelPos(0, UnitExplosionLift(PixelTileSize.y));
 
 		MakeMissile(*type->Explosion.Missile, pixelPos, pixelPos);
 	}
@@ -2543,7 +2685,7 @@ void LetUnitDie(CUnit &unit, bool suicide)
 		type->OnDeath(UnitNumber(unit), pixelPos.x, pixelPos.y);
 	}
 	if (suicide) {
-		const PixelPos pixelPos = unit.GetMapPixelPosCenter();
+		const PixelPos pixelPos = unit.GetMapPixelPosCenter() - PixelPos(0, UnitExplosionLift(PixelTileSize.y));
 
 		MakeMissile(*type->Missile.Missile, pixelPos, pixelPos);
 	}
@@ -2566,6 +2708,8 @@ void LetUnitDie(CUnit &unit, bool suicide)
 	unit.Remove(nullptr);
 	UnitLost(unit);
 	UnitClearOrders(unit);
+	// Death forgets what the unit would have gone back to (the patrol memory, 0x4D7CDD).
+	unit.SavedOrder = nullptr;
 
 	// A computer player the original's script runs goes all out when it is down to its last
 	// buildings.
@@ -3039,17 +3183,59 @@ static void HitUnit_ChangeVariable(CUnit &target, const Missile &missile)
 
 static void HitUnit_Burning(CUnit &target)
 {
-	const int f = (100 * target.Variable[HP_INDEX].Value) / target.Variable[HP_INDEX].Max;
-	MissileType *fire = MissileBurningBuilding(f);
+	MissileType *fire = MissileBurningBuilding(target.Variable[HP_INDEX].Value, target.Variable[HP_INDEX].Max);
 
 	if (fire) {
 		const PixelPos targetPixelCenter = target.GetMapPixelPosCenter();
-		const PixelDiff offset(0, -PixelTileSize.y);
+		// The fire's centre stands BurningFlameLift above the footprint centre (missile_cadence.h);
+		// MissileFire::Action keeps that centre when the fire changes size.
+		const PixelDiff offset(0, -BurningFlameLift(target.Type->TileHeight, PixelTileSize.y));
 		Missile *missile = MakeMissile(*fire, targetPixelCenter + offset, targetPixelCenter + offset);
 
 		missile->SourceUnit = &target;
 		target.Burning = 1;
 	}
+}
+
+/**
+**  The unit's remembered attacker while it lives. A dying or destroyed one is forgotten here
+**  (the original's clear at 0x49560A / 0x495869, where its idle reaction finds it dead).
+**
+**  @param unit  Unit that may remember an attacker.
+**
+**  @return      The living remembered attacker, or nullptr.
+*/
+CUnit *RememberedAttacker(CUnit &unit)
+{
+	if (unit.LastAttacker && !unit.LastAttacker->IsAlive()) {
+		unit.LastAttacker = nullptr;
+	}
+	// A building that does not attack keeps the mark only until shortly after the hit (run 72:
+	// 5 farms, 13 / 13 hits cleared 1-3 frames later; the minimum, 1 cycle, is taken).
+	if (unit.LastAttacker && unit.Type->Building && !unit.Type->CanAttack
+		&& GameCycle >= unit.LastAttackerCycle + BuildingAttackerHoldCycles) {
+		unit.LastAttacker = nullptr;
+	}
+	return unit.LastAttacker.get();
+}
+
+/**
+**  The memory gate of a hit (0x495C90): while the victim remembers a living attacker nothing is
+**  stored; else the attacker is remembered.
+**
+**  @param victim    Unit that is hit.
+**  @param attacker  Unit that hits.
+**
+**  @return          true when the attacker was stored (the hit may call friends).
+*/
+bool RememberAttacker(CUnit &victim, CUnit &attacker)
+{
+	if (RememberedAttacker(victim) != nullptr) {
+		return false;
+	}
+	victim.LastAttacker = &attacker;
+	victim.LastAttackerCycle = GameCycle;
+	return true;
 }
 
 static void HitUnit_RunAway(CUnit &target, const CUnit &attacker)
@@ -3061,6 +3247,42 @@ static void HitUnit_RunAway(CUnit &target, const CUnit &attacker)
 	} else {
 		CommandMove(target, pos, EFlushMode::Off); /// Run away to pos
 	}
+}
+
+/**
+**  A worker, caster or Dwarf / Sapper of a player run by its original script reacts to a blow as
+**  the original's computer (0x495600): only when idle; a worker hit by a worker fights back, the
+**  others run about four tiles along the line of the blow. Other units are not handled here.
+**
+**  @return  true when the unit is one of these kinds (handled, even if it does nothing).
+*/
+static bool HitUnit_Wc2Reaction(CUnit &target, CUnit &attacker)
+{
+	if (!target.Player->AiEnabled || !Wc2AiRuns(target.Player->Index) || !target.CanMove()) {
+		return false;
+	}
+	constexpr int numbered = 0x1A; // the original's land units up to the White Mage
+	const int number = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, numbered, target.Type->Ident);
+	if (!wc2ai::FleeKind(number)) {
+		return false;
+	}
+	if (target.CurrentAction() != UnitAction::Still) {
+		return true; // a busy computer unit of these kinds carries on
+	}
+	const int attackerNumber = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, numbered, attacker.Type->Ident);
+	const bool workers = (number == 0x02 || number == 0x03) && (attackerNumber == 0x02 || attackerNumber == 0x03);
+	if (workers && CanTarget(*target.Type, *attacker.Type)) {
+		CommandAttack(target, attacker.tilePos, &attacker, EFlushMode::On);
+		return true;
+	}
+	const int randX = SyncRand(8);
+	const int randY = SyncRand(8);
+	const wc2ai::Place place = wc2ai::FleePoint(target.tilePos.x, target.tilePos.y,
+	                                            wc2ai::Direction8(attacker.Direction), randX, randY,
+	                                            Map.Info.MapWidth, Map.Info.MapHeight);
+	CommandMove(target, Vec2i(place.x, place.y), EFlushMode::On);
+	target.LastAttacker = nullptr; // the flee point forgets the attacker (0x4956C4-0x4957C3)
+	return true;
 }
 
 /**
@@ -3158,6 +3380,8 @@ static void HomeLeashPointPass(CUnit &unit)
 
 	switch (Role2Action(far, attacking, idle, enemy != nullptr)) {
 		case Role2::BackToPoint:
+			// The role-2 return forgets the attacker (PASSIVE_AI :178, unconditional there).
+			unit.LastAttacker = nullptr;
 			// Already on its way there: the order stands.
 			if (unit.CurrentAction() == UnitAction::Attack && unit.CurrentOrder()->GetGoalPos() == unit.HomePos) {
 				break;
@@ -3230,6 +3454,8 @@ void UnitsHomeLeashPass(const std::vector<CUnit *> &units)
 		                             unit.Type->ReactRangeComputer)) {
 			continue;
 		}
+		// The leash's walk home (idle, or the strength retreat) forgets the attacker (PASSIVE_AI :158).
+		unit.LastAttacker = nullptr;
 		// Already walking home: the order stands.
 		if (unit.CurrentAction() == UnitAction::Move && unit.CurrentOrder()->GetGoalPos() == unit.HomePos) {
 			continue;
@@ -3250,7 +3476,8 @@ static void HitUnit_CallIdleFriends(CUnit &attacker, CUnit &target)
 {
 	const PlayerTypes owner = target.Player->Type;
 
-	if (owner != PlayerTypes::PlayerComputer && owner != PlayerTypes::PlayerPerson) {
+	// The original's order (0x495C90): a living remembered attacker ends it first.
+	if (RememberedAttacker(target) != nullptr) {
 		return;
 	}
 	if (attacker.Player == target.Player || !target.IsEnemy(attacker)) {
@@ -3258,6 +3485,10 @@ static void HitUnit_CallIdleFriends(CUnit &attacker, CUnit &target)
 	}
 	// A person's units do not answer a building.
 	if (owner == PlayerTypes::PlayerPerson && attacker.Type->Building) {
+		return;
+	}
+	RememberAttacker(target, attacker);
+	if (owner != PlayerTypes::PlayerComputer && owner != PlayerTypes::PlayerPerson) {
 		return;
 	}
 	const bool computer = owner == PlayerTypes::PlayerComputer;
@@ -3279,6 +3510,11 @@ static void HitUnit_CallIdleFriends(CUnit &attacker, CUnit &target)
 		}
 		// A unit in a force of the player's script is called by its force.
 		if (computer && unit.GroupId != 0) {
+			continue;
+		}
+		// One that remembers a living attacker of its own is busy with it (0x495C90 [s+0x54]); a
+		// dead one is forgotten here, as the idle unit's own reaction would have done (0x49560A).
+		if (RememberedAttacker(unit) != nullptr) {
 			continue;
 		}
 		if (!HelpCallReaches(computer, ship, unit.MapFixed != 0, unit.tilePos.x, unit.tilePos.y,
@@ -3379,7 +3615,18 @@ static void HitUnit_AttackBack(CUnit &attacker, CUnit &target)
 			case UnitAction::Defend:
 			case UnitAction::Patrol:
 			{
-				const Vec2i posToAttack = (attacker.IsVisibleAsGoal(*target.Player))
+				// A fighter of a slot run by the original's script takes the best of its attacker and the
+				// units in its idle search range (DECODE_B8 item 5, 0x495830); the attacker itself keeps
+				// the attack-move below.
+				CUnit *goal = nullptr;
+				if (target.Player->AiEnabled && Wc2AiRuns(target.Player->Index)) {
+					goal = AttackUnitsInIdleRangeOrAttacker(target, attacker);
+					if (goal == &attacker) {
+						goal = nullptr;
+					}
+				}
+				const Vec2i posToAttack = goal != nullptr ? goal->tilePos
+				                        : (attacker.IsVisibleAsGoal(*target.Player))
 				                            ? attacker.tilePos
 				                            : GetRndPosInDirection(target.tilePos,
 				                                                   attacker.tilePos,
@@ -3407,7 +3654,7 @@ static void HitUnit_AttackBack(CUnit &attacker, CUnit &target)
 				}
 				target.UnderAttack =
 					underAttack; /// allow target to ignore non aggressive targets while searching attacker
-				CommandAttack(target, posToAttack, nullptr, EFlushMode::On);
+				CommandAttack(target, posToAttack, goal, EFlushMode::On);
 
 				if (savedOrder != nullptr) {
 					target.SavedOrder = std::move(savedOrder);
@@ -3525,7 +3772,8 @@ void HitUnit(CUnit *attacker, CUnit &target, int damage, const Missile *missile)
 
 	HitUnit_ShowImpactMissile(target);
 
-	if (type->Building && !target.Burning) {
+	// Only a finished building burns (the original's per-tick fire pass asks for one).
+	if (type->Building && !target.Burning && target.CurrentAction() != UnitAction::Built) {
 		HitUnit_Burning(target);
 	}
 
@@ -3541,6 +3789,10 @@ void HitUnit(CUnit *attacker, CUnit &target, int damage, const Missile *missile)
 	}
 
 	if (!attacker) {
+		return;
+	}
+
+	if (HitUnit_Wc2Reaction(target, *attacker)) {
 		return;
 	}
 

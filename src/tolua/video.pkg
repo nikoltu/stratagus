@@ -56,8 +56,10 @@ int HudCanvasStep(void);
 
 tolua_readonly CVideo Video;
 
-// Classic view: presentation-only switch between the Remastered and the classic art.
-void SetClassicView(bool on);
+// Classic view: presentation-only switch between the Remastered and the classic art. The
+// Lua name goes through RequestClassicView (ui.h): refused in the big map mode or without the
+// classic HUD art; returns the view now shown.
+bool RequestClassicView @ SetClassicView(bool on);
 bool IsClassicView(void);
 void ToggleFullScreen(void);
 

@@ -482,6 +482,21 @@ static const char * codepoint_from_0x400_to_ascii[] = {
 // default to codepage 437
 int FontCodePage = 437;
 
+/// FONT-LT: the slots 0x80.. of a FontCodePageHdSheet sheet, in slot order, with the ASCII a
+/// code page without them draws instead. FontBaker.java (SheetLayout) bakes the same list.
+static const struct {
+	int codepoint;
+	const char *ascii;
+} HdSheetSlots[] = {
+	{0x0104, "A"}, {0x0105, "a"}, {0x010C, "C"}, {0x010D, "c"}, {0x0118, "E"}, {0x0119, "e"},
+	{0x0116, "E"}, {0x0117, "e"}, {0x012E, "I"}, {0x012F, "i"}, {0x0160, "S"}, {0x0161, "s"},
+	{0x0172, "U"}, {0x0173, "u"}, {0x016A, "U"}, {0x016B, "u"}, {0x017D, "Z"}, {0x017E, "z"},
+	{0x2013, "-"}, {0x2014, "-"}, {0x2018, "'"}, {0x2019, "'"}, {0x201A, ","}, {0x201C, "\""},
+	{0x201D, "\""}, {0x201E, "\""}, {0x2026, "..."},
+	{0x0141, "L"}, {0x0142, "l"}, {0x20AC, "EUR"},
+};
+static constexpr int HdSheetFirstSlot = 0x80;
+
 /**
 ** Convert a Unicode codepoint to a codepage index, based on the
 ** convert table to work with Stratagus char. This maps Unicode
@@ -494,13 +509,27 @@ int FontCodePage = 437;
 ** @param subst out variable for a char pointer with a substitution string if the codepage doesn't support the char
 ** @return the equivalent codepage index; 0 if a substitution string is set; or '?' if codepoint is unsupported.
 */
-static unsigned char codepoint_to_codepage_index(int codepoint, const char **subst)
+static unsigned char codepoint_to_codepage_index(int codepoint, const char **subst, int page)
 {
 	Assert(codepoint >= 0x80);
 
+	// FONT-LT: letters and marks of the HD sheets' extra slots; elsewhere their ASCII stand-in.
+	for (size_t i = 0; i < sizeof(HdSheetSlots) / sizeof(HdSheetSlots[0]); ++i) {
+		if (HdSheetSlots[i].codepoint == codepoint) {
+			if (page == FontCodePageHdSheet) {
+				return static_cast<unsigned char>(HdSheetFirstSlot + i);
+			}
+			*subst = HdSheetSlots[i].ascii;
+			return 0;
+		}
+	}
+	if (page == FontCodePageHdSheet && 0xa0 <= codepoint && codepoint <= 0xff) {
+		return codepoint;   // Latin-1, as the sheet is laid out
+	}
+
 	switch (codepoint) {
 		case 0x192: // index for this letter in cp437 is 0x9f
-			return (FontCodePage == 437) ? 0x9f : 'f';
+			return (page == 437) ? 0x9f : 'f';
 		case 0x2502: return 0xb3;
 		case 0x2591: return 0xb0;
 		case 0x2592: return 0xb1;
@@ -509,7 +538,7 @@ static unsigned char codepoint_to_codepage_index(int codepoint, const char **sub
 			if (0xa0 <= codepoint && codepoint < 0xa0 + sizeof(codepoint_to_cp437)) {
 				unsigned char cpChar = 0;
 				// western European
-				switch (FontCodePage) {
+				switch (page) {
 					case 437: cpChar = codepoint_to_cp437[codepoint - 0xa0]; break;
 					case 1252: return codepoint;
 					default: break;
@@ -523,12 +552,12 @@ static unsigned char codepoint_to_codepage_index(int codepoint, const char **sub
 				if (0x0400 <= codepoint && codepoint < 0x0400 + sizeof(codepoint_to_cp866)) {
 					// Cyrillic
 					unsigned char cpChar = 0;
-					switch (FontCodePage) {
+					switch (page) {
 						case 866: cpChar = codepoint_to_cp866[codepoint - 0x0400]; break;
 						default: break;
 					}
 					if (cpChar == 0) {
-						*subst = codepoint_from_0xa0_to_ascii[codepoint - 0x0400];
+						*subst = codepoint_from_0x400_to_ascii[codepoint - 0x0400];
 						return 0;
 					}
 					return cpChar;
@@ -538,11 +567,51 @@ static unsigned char codepoint_to_codepage_index(int codepoint, const char **sub
 	}
 
 	ErrorPrint("Can't convert codepoint to codepage %d: '%c' d=%d (0x%04x)\r\n",
-	           FontCodePage,
+	           page,
 	           codepoint,
 	           codepoint,
 	           codepoint);
 	return '?';
+}
+
+int FontDecodeUTF8(std::string_view s, size_t &pos)
+{
+	if (pos >= s.size()) {
+		return -1;
+	}
+	const unsigned char c = static_cast<unsigned char>(s[pos]);
+	int codepoint;
+	size_t count;
+	if (c < 0x80) {
+		++pos;
+		return c;
+	} else if ((c & 0xE0) == 0xC0) {
+		codepoint = c & 0x1F;
+		count = 1;
+	} else if ((c & 0xF0) == 0xE0) {
+		codepoint = c & 0x0F;
+		count = 2;
+	} else if ((c & 0xF8) == 0xF0) {
+		codepoint = c & 0x07;
+		count = 3;
+	} else {
+		++pos;            // a continuation byte or an obsolete 5/6-byte lead: broken
+		return -1;
+	}
+	if (pos + count >= s.size()) {
+		++pos;            // cut off at the end of the text
+		return -1;
+	}
+	for (size_t i = 1; i <= count; ++i) {
+		const unsigned char cc = static_cast<unsigned char>(s[pos + i]);
+		if ((cc & 0xC0) != 0x80) {
+			++pos;        // broken: resume at the next byte, which may start a good character
+			return -1;
+		}
+		codepoint = (codepoint << 6) | (cc & 0x3F);
+	}
+	pos += count + 1;
+	return codepoint;
 }
 
 /**
@@ -554,81 +623,231 @@ static unsigned char codepoint_to_codepage_index(int codepoint, const char **sub
 **  When the subpos is 0 after a call, the utf8 character was completely processed, otherwise
 **  more codepoint indices are needed to substitute the utf8 char.
 **
-**  @return 0 on failure, else the codepage index to print next for the current utf8 character
+**  FONT-CJK: a character the face's glyph map holds is drawn from its slot after 255 before
+**  the code page is asked. A broken UTF-8 sequence draws '?' and the text goes on (it used to
+**  end the text there).
+**
+**  @return 0 at the end of the text, else the sheet index to print next for the current character
 */
-static int CodepageIndexFromUTF8(const char text[], const size_t len, size_t &pos, size_t &subpos)
+static int CodepageIndexFromUTF8(std::string_view text, size_t &pos, size_t &subpos,
+                                 int page = FontCodePage, const FontGlyphMap *map = nullptr)
 {
 	// end of string
-	if (pos >= len) {
+	if (pos >= text.size()) {
 		return 0;
 	}
-
-	int codepoint;
-	int count;
-	int postUtf8CharPos = pos;
-	char c = text[postUtf8CharPos++];
-
-	// ascii
-	if (!(c & 0x80)) {
-		pos = postUtf8CharPos;
-		if (c < 32) {
-			return '?';
-		}
-		return c;
-	} else if ((c & 0xE0) == 0xC0) {
-		codepoint = (c & 0x1F);
-		count = 1;
-	} else if ((c & 0xF0) == 0xE0) {
-		codepoint = (c & 0x0F);
-		count = 2;
-	} else if ((c & 0xF8) == 0xF0) {
-		codepoint = (c & 0x07);
-		count = 3;
-	} else if ((c & 0xFC) == 0xF8) {
-		codepoint = (c & 0x03);
-		count = 4;
-	} else if ((c & 0xFE) == 0xFC) {
-		codepoint = (c & 0x01);
-		count = 5;
-	} else {
+	size_t post = pos;
+	const int codepoint = FontDecodeUTF8(text, post);
+	if (codepoint < 0) {
 		ErrorPrint("Invalid utf8\n");
-		pos = postUtf8CharPos;
-		return 0;
+		pos = post;
+		subpos = 0;
+		return '?';
 	}
-
-	while (count--) {
-		c = text[postUtf8CharPos++];
-		if ((c & 0xC0) != 0x80) {
-			ErrorPrint("Invalid utf8\n");
-			pos = postUtf8CharPos;
-			return 0;
+	if (codepoint < 0x80) {
+		pos = post;
+		return codepoint < 32 ? '?' : codepoint;
+	}
+	if (map != nullptr && subpos == 0) {
+		const auto it = map->find(codepoint);
+		if (it != map->end()) {
+			pos = post;
+			return it->second;
 		}
-		codepoint <<= 6;
-		codepoint |= (c & 0x3F);
 	}
 
-	const char *subst;
-	const unsigned char cpIdx = codepoint_to_codepage_index(codepoint, &subst);
+	const char *subst = nullptr;
+	const unsigned char cpIdx = codepoint_to_codepage_index(codepoint, &subst, page);
 	if (cpIdx) {
-		pos = postUtf8CharPos;
+		pos = post;
 		return cpIdx;
-	} else {
-		const unsigned char idx = subst[subpos++];
-		if (subpos >= strlen(subst)) {
-			// replacement processed, advance past this utf8 codepoint
-			pos = postUtf8CharPos;
-			subpos = 0;
+	}
+	const unsigned char idx = subst[subpos++];
+	if (subpos >= strlen(subst)) {
+		// replacement processed, advance past this utf8 codepoint
+		pos = post;
+		subpos = 0;
+	}
+	return idx;
+}
+
+static int CodepageIndexFromUTF8(const char text[], const size_t len, size_t &pos, size_t &subpos,
+                                 int page = FontCodePage, const FontGlyphMap *map = nullptr)
+{
+	return CodepageIndexFromUTF8(std::string_view(text, len), pos, subpos, page, map);
+}
+
+std::vector<int> FontCodepageIndices(std::string_view utf8, int page, const FontGlyphMap *map)
+{
+	std::vector<int> out;
+	size_t pos = 0;
+	size_t subpos = 0;
+	while (const int idx = CodepageIndexFromUTF8(utf8, pos, subpos, page, map)) {
+		out.push_back(idx);
+	}
+	return out;
+}
+
+int ParseFontGlyphMap(std::string_view text, FontGlyphMap &out)
+{
+	out.clear();
+	int slot = FontGlyphMapFirstSlot;
+	size_t at = 0;
+	while (at < text.size()) {
+		size_t end = text.find('\n', at);
+		if (end == std::string_view::npos) {
+			end = text.size();
 		}
-		return idx;
+		std::string_view line = text.substr(at, end - at);
+		at = end + 1;
+		while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+			line.remove_suffix(1);
+		}
+		while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+			line.remove_prefix(1);
+		}
+		long cp = 0;
+		bool ok = !line.empty() && line.size() <= 7;
+		for (char ch : line) {
+			if (ch < '0' || ch > '9') {
+				ok = false;
+				break;
+			}
+			cp = cp * 10 + (ch - '0');
+		}
+		if (ok && cp > 0x7F && cp <= 0x10FFFF) {
+			out.emplace(static_cast<int>(cp), slot);   // the first slot of a repeated character wins
+		}
+		++slot;
+	}
+	return static_cast<int>(out.size());
+}
+
+bool FontIsCJKBreakChar(int cp)
+{
+	// Hangul is not here: Korean is written with spaces between words (koKR.json: 9155 spaces
+	// in 43064 characters), so it breaks at its spaces like a Latin text.
+	return (0x2E80 <= cp && cp <= 0x2FDF)     // CJK radicals, Kangxi radicals
+	    || (0x3000 <= cp && cp <= 0x303F)     // CJK symbols and punctuation
+	    || (0x3040 <= cp && cp <= 0x30FF)     // hiragana, katakana
+	    || (0x3100 <= cp && cp <= 0x312F)     // bopomofo
+	    || (0x31F0 <= cp && cp <= 0x31FF)     // katakana phonetic extensions
+	    || (0x3400 <= cp && cp <= 0x4DBF)     // CJK extension A
+	    || (0x4E00 <= cp && cp <= 0x9FFF)     // CJK unified ideographs
+	    || (0xF900 <= cp && cp <= 0xFAFF)     // CJK compatibility ideographs
+	    || (0xFF00 <= cp && cp <= 0xFFEF)     // half-width and full-width forms
+	    || (0x20000 <= cp && cp <= 0x3FFFF);  // CJK extensions B..
+}
+
+bool FontNoLineStart(int cp)
+{
+	switch (cp) {
+		case '!': case ')': case ',': case '.': case ':': case ';': case '?': case ']': case '}':
+		case 0x2019: case 0x201D: case 0x2025: case 0x2026:                  // right quotes, .. ...
+		case 0x3001: case 0x3002: case 0x3005: case 0x3009: case 0x300B:     // ideographic comma, stop ...
+		case 0x300D: case 0x300F: case 0x3011: case 0x3015: case 0x3017:     // closing brackets
+		case 0x3019: case 0x301B: case 0x301C: case 0x301E: case 0x303B:
+		case 0x3041: case 0x3043: case 0x3045: case 0x3047: case 0x3049:     // small hiragana
+		case 0x3063: case 0x3083: case 0x3085: case 0x3087: case 0x308E:
+		case 0x3095: case 0x3096: case 0x309D: case 0x309E:
+		case 0x30A1: case 0x30A3: case 0x30A5: case 0x30A7: case 0x30A9:     // small katakana
+		case 0x30C3: case 0x30E3: case 0x30E5: case 0x30E7: case 0x30EE:
+		case 0x30F5: case 0x30F6: case 0x30FB: case 0x30FC: case 0x30FD: case 0x30FE:  // middle dot, long mark
+		case 0xFF01: case 0xFF09: case 0xFF0C: case 0xFF0E: case 0xFF1A:     // full-width ! ) , . :
+		case 0xFF1B: case 0xFF1F: case 0xFF3D: case 0xFF5D: case 0xFF5E:     // full-width ; ? ] } ~
+		case 0xFF61: case 0xFF63: case 0xFF64: case 0xFF65:                  // half-width stop, bracket, comma, dot
+			return true;
+		default:
+			return false;
 	}
 }
 
-/**
-**  Get the next codepage index to render from a utf8 encoded string
-*/
-static int CodepageIndexFromUTF8(std::string_view text, size_t &pos, size_t &subpos)
+bool FontNoLineEnd(int cp)
 {
-	return CodepageIndexFromUTF8(text.data(), text.size(), pos, subpos);
+	switch (cp) {
+		case '(': case '[': case '{':
+		case 0x2018: case 0x201C:                                            // left quotes
+		case 0x3008: case 0x300A: case 0x300C: case 0x300E: case 0x3010:     // opening brackets
+		case 0x3014: case 0x3016: case 0x3018: case 0x301A: case 0x301D:
+		case 0xFF08: case 0xFF3B: case 0xFF5B: case 0xFF62:                  // full-width ( [ {, half-width bracket
+			return true;
+		default:
+			return false;
+	}
+}
+
+/// FONT-CJK: may a line break between the characters a and b (neither a space)?
+static bool FontMayBreakBetween(int a, int b)
+{
+	if (a == '~' || b == '~') {
+		return false;     // never split a ~colour~ code from the text it colours
+	}
+	if (!FontIsCJKBreakChar(a) && !FontIsCJKBreakChar(b)) {
+		return false;
+	}
+	return !FontNoLineStart(b) && !FontNoLineEnd(a);
+}
+
+size_t FontLineBreak(std::string_view s, unsigned int maxWidth,
+                     const std::function<int(std::string_view)> &width, size_t &next)
+{
+	const size_t nl = s.find('\n');
+	const size_t hard = (nl == std::string_view::npos) ? s.size() : nl;
+	// The whole first line fits (the engine's old rule: narrower than the limit).
+	if (maxWidth == 0 || (unsigned int) width(s.substr(0, hard)) < maxWidth) {
+		next = (hard < s.size()) ? hard + 1 : s.size();
+		return hard;
+	}
+	// Every place the line may end before `hard`: at a space (the space is dropped) or between
+	// two characters where a CJK text may break. Keep the last one that fits, and the first one
+	// in case none does.
+	const std::string_view line = s.substr(0, hard);
+	size_t bestLen = std::string_view::npos, bestNext = 0;
+	size_t firstLen = std::string_view::npos, firstNext = 0;
+	size_t pos = 0;
+	int prev = -1;
+	while (pos < hard) {
+		const size_t at = pos;
+		const int cp = FontDecodeUTF8(line, pos);
+		size_t len = std::string_view::npos, after = 0;
+		if (cp == ' ') {
+			if (at > 0) {
+				len = at;
+				after = at + 1;
+			}
+		} else if (at > 0 && prev != ' ' && FontMayBreakBetween(prev, cp)) {
+			len = at;
+			after = at;
+		}
+		prev = cp;
+		if (len == std::string_view::npos) {
+			continue;
+		}
+		if (firstLen == std::string_view::npos) {
+			firstLen = len;
+			firstNext = after;
+		}
+		if ((unsigned int) width(s.substr(0, len)) > maxWidth) {
+			break;        // every later place is wider still
+		}
+		bestLen = len;
+		bestNext = after;
+	}
+	if (bestLen != std::string_view::npos) {
+		next = bestNext;
+		return bestLen;
+	}
+	if (firstLen != std::string_view::npos) {
+		next = firstNext;  // the first word is too wide: it stands alone, the text goes on
+		return firstLen;
+	}
+	next = (hard < s.size()) ? hard + 1 : s.size();
+	return hard;           // one unbreakable word up to the newline
+}
+
+int CFont::GetCodePage() const
+{
+	return CodePage != 0 ? CodePage : FontCodePage;
 }
 
 /// HUD-GUTTER: the width of the text code "~_": one unit of the classic 640x480 HUD, which is
@@ -684,14 +903,24 @@ bool CFont::IsLoaded() const
 int CFont::Width(const int number) const
 {
 	DynamicLoad();
+	return FontNumberWidth(number, this->CharWidth, this->LetterSpacing);
+}
 
-	const auto s = FormatNumber(number);
+/// FONT-WIDTH: before, the bounds test was inverted (`c - 32 <= size` -> space), so every digit
+/// was measured as a SPACE. Now each character of the formatted number gives its own width.
+int FontNumberWidth(const int number, const std::vector<char> &charWidth, const int letterSpacing)
+{
+	if (charWidth.empty()) {
+		return 0;
+	}
+	const std::string s = FormatNumber(number);
 	int width = 0;
-	for (auto c : s) {
-		if (c - 32 <= this->CharWidth.size()) {
-			c = 32;
+	for (const unsigned char c : s) {
+		size_t index = c >= 32 ? size_t(c - 32) : 0;
+		if (index >= charWidth.size()) {
+			index = 0;   // the space
 		}
-		width += this->CharWidth[c - 32] + this->LetterSpacing;
+		width += charWidth[index] + letterSpacing;
 	}
 	return width;
 }
@@ -712,7 +941,8 @@ int CFont::Width(std::string_view text) const
 	size_t subpos = 0;
 
 	DynamicLoad();
-	while ((utf8 = CodepageIndexFromUTF8(text, pos, subpos))) {
+	const int page = GetCodePage();
+	while ((utf8 = CodepageIndexFromUTF8(text, pos, subpos, page, &this->GlyphMap))) {
 		if (utf8 == '~' && !subpos) {
 			if (text[pos] == '|') {
 				++pos;
@@ -892,7 +1122,8 @@ int CLabel::DoDrawText(int x, int y, std::string_view text, const CFontColor *fc
 		LastTextColor = remembered;
 	}
 
-	while (int utf8 = CodepageIndexFromUTF8(text.data(), text.size(), pos, subpos)) {
+	const int page = font->GetCodePage();
+	while (int utf8 = CodepageIndexFromUTF8(text.data(), text.size(), pos, subpos, page, &font->GetGlyphMap())) {
 		bool tab = false;
 		if (utf8 == '\t') {
 			tab = true;
@@ -1089,6 +1320,20 @@ static int strchrlen(std::string_view s, char c, unsigned int maxlen, const CFon
 	}
 	return res;
 }
+/**
+**  FONT-CJK: one line of `s` and where the rest begins: with a face, FontLineBreak (spaces,
+**  newlines, breaks between CJK characters); without one, the old byte count.
+*/
+static size_t LineFontBreak(std::string_view s, unsigned int maxlen, const CFont *font, size_t &next)
+{
+	if (!font) {
+		const int res = strchrlen(s, '\n', maxlen, nullptr);
+		const size_t len = (res < 0) ? s.size() : std::min<size_t>(res, s.size());
+		next = std::min(len + 1, s.size());
+		return len;
+	}
+	return FontLineBreak(s, maxlen, [font](std::string_view t) { return font->Width(t); }, next);
+}
 
 /**
 **  Return the 'line' line of the string 's'.
@@ -1102,19 +1347,26 @@ static int strchrlen(std::string_view s, char c, unsigned int maxlen, const CFon
 */
 std::string_view GetLineFont(unsigned int line, std::string_view s, unsigned int maxlen, const CFont *font)
 {
-	unsigned int res;
-
 	Assert(0 < line);
 
+	size_t next = 0;
 	for (unsigned int i = 1; i < line; ++i) {
-		res = strchrlen(s, '\n', maxlen, font);
-		if (!res || res >= s.size()) {
+		const size_t len = LineFontBreak(s, maxlen, font, next);
+		// As before: an empty line, or a line that took the rest of the text, ends it.
+		if (len == 0 || next >= s.size()) {
 			return "";
 		}
-		s = s.substr(res + 1);
+		s = s.substr(next);
 	}
-	res = strchrlen(s, '\n', maxlen, font);
-	return s.substr(0, res);
+	return s.substr(0, LineFontBreak(s, maxlen, font, next));
+}
+
+std::string CFont::WrapLine(int line, const std::string &text, int maxWidth) const
+{
+	if (line <= 0) {
+		return "";
+	}
+	return std::string(GetLineFont(line, text, std::max(0, maxWidth), this));
 }
 
 
@@ -1183,6 +1435,48 @@ double CFont::AuthoredScale() const
 	}
 	const double byW = (double) Video.Width / (double) this->AuthoredWidth;
 	return std::min(byW, byH);
+}
+
+/// FONT-CJK: the sheet's map file `<stem>.map` (made with the sheet, on the device, from the
+/// game folder's own face): the characters of the slots after 255. No file -> no map, as before.
+void CFont::LoadGlyphMap()
+{
+	this->GlyphMap.clear();
+	if (!this->G) {
+		return;
+	}
+	fs::path rel = this->G->File;
+	rel.replace_extension(".map");
+	const fs::path resolved = LibraryFileName(rel.string());
+	FILE *f = fopen(resolved.string().c_str(), "rb");
+	if (!f) {
+		return;
+	}
+	std::string text;
+	char buf[4096];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+		text.append(buf, n);
+	}
+	fclose(f);
+	ParseFontGlyphMap(text, this->GlyphMap);
+	// A slot the sheet does not have would draw the space: drop it, and say so once.
+	const int last = this->G->NumFrames + 32;   // sheet index of the first missing frame
+	size_t dropped = 0;
+	for (auto it = this->GlyphMap.begin(); it != this->GlyphMap.end();) {
+		if (it->second >= last) {
+			it = this->GlyphMap.erase(it);
+			++dropped;
+		} else {
+			++it;
+		}
+	}
+	if (dropped) {
+		ErrorPrint("Font map '%s': %zu characters past the sheet's %d glyphs; dropped\n",
+		           resolved.string().c_str(), dropped, this->G->NumFrames);
+	}
+	LogPrint("FONTS map %s: %zu characters after slot 255\n", rel.string().c_str(),
+	         this->GlyphMap.size());
 }
 
 void CFont::LoadAdvanceTable()
@@ -1256,6 +1550,7 @@ void CFont::Load()
 		// ink-extent heuristic. Measured: continuous BLQ55 reproduces the original's line to 1.4%,
 		// while ink extents + a fixed 1px gap run ~3% wide even after the space is corrected.
 		this->LoadAdvanceTable();
+		this->LoadGlyphMap();
 	}
 }
 

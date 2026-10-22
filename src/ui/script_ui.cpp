@@ -723,7 +723,10 @@ static int CclDefineViewports(lua_State *l)
 			UI.Viewports[i].MapPos.y = LuaToNumber(l, j + 1, 2);
 			const int slot = LuaToNumber(l, j + 1, 3);
 			if (slot != -1) {
-				UI.Viewports[i].Unit = &UnitManager->GetSlotUnit(slot);
+				UI.Viewports[i].Unit = UnitManager->FindSlotUnit(slot);
+				if (UI.Viewports[i].Unit == nullptr) {
+					LuaError(l, "viewport unit %d: no such unit slot", slot);
+				}
 			}
 			++i;
 		} else {
@@ -1431,6 +1434,24 @@ static int CclGetPortraitIconScale(lua_State *l)
 }
 
 /**
+**  HUD-RESOURCE-WORD: SetResourceDisplayName(ident, text) - the word the info panel shows for the
+**  resource `ident` ("gold", "wood", "oil"); nil or "" clears it (the identifier is shown).
+**  Returns false when no resource has that identifier.
+*/
+extern bool SetResourceDisplayName(std::string_view ident, const std::string &text); // mainscr.cpp
+static int CclSetResourceDisplayName(lua_State *l)
+{
+	const int args = lua_gettop(l);
+	if (args < 1 || args > 2) {
+		LuaError(l, "incorrect argument");
+	}
+	const std::string ident{LuaToString(l, 1)};
+	const std::string text = (args == 2 && !lua_isnil(l, 2)) ? std::string(LuaToString(l, 2)) : std::string();
+	lua_pushboolean(l, SetResourceDisplayName(ident, text));
+	return 1;
+}
+
+/**
 **  Register CCL features for UI.
 */
 void UserInterfaceCclRegister()
@@ -1468,6 +1489,7 @@ void UserInterfaceCclRegister()
 	lua_register(Lua, "ShowTitleScreens", CclShowTitleScreens);
 
 	lua_register(Lua, "DefinePanelContents", CclDefinePanelContents);
+	lua_register(Lua, "SetResourceDisplayName", CclSetResourceDisplayName);
 	lua_register(Lua, "DefinePopup", CclDefinePopup);
 	lua_register(Lua, "DefineViewports", CclDefineViewports);
 	lua_register(Lua, "SetSavedMapPosition", CclSetSavedMapPosition);

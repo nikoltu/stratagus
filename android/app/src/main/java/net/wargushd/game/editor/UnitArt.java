@@ -67,27 +67,91 @@ final class UnitArt {
         }
     }
 
-    /** The picture of a unit type on a tileset, or null when any part of the way to it is missing. */
-    static Picture load(File gameFolder, String mapJson, int type, int tileset) {
+    /**
+     * What one loading run keeps between pictures (Session 2026-10-19 d): the atlas texts read
+     * and the one sheet opened last, so that the pictures of one atlas, asked one after the other
+     * as the palette's groups are, open it once. Used by one thread at a time.
+     */
+    static final class Sheets {
+        private final File dir;
+        private final java.util.HashMap<String, String> texts = new java.util.HashMap<String, String>();
+        private String openName;
+        private BitmapRegionDecoder open;
+
+        Sheets(File gameFolder) { dir = new File(gameFolder, "Data/Art/hd/unit"); }
+
+        /** The text of ATLAS.json, or null; kept for the run. */
+        String text(String atlas) {
+            if (!texts.containsKey(atlas)) {
+                texts.put(atlas, UnitArt.text(new File(dir, atlas + ".json")));
+            }
+            return texts.get(atlas);
+        }
+
+        /** One rect of ATLAS.png, decoded alone at REDUCE; null when it cannot be. */
+        @SuppressWarnings("deprecation")
+        Bitmap region(String atlas, int[] at) {
+            try {
+                if (!atlas.equals(openName)) {
+                    closeSheet();
+                    final File png = new File(dir, atlas + ".png");
+                    if (!png.isFile()) {
+                        return null;
+                    }
+                    open = BitmapRegionDecoder.newInstance(png.getPath(), false);
+                    openName = atlas;
+                }
+                if (open == null || at[0] < 0 || at[1] < 0 || at[0] + at[2] > open.getWidth()
+                    || at[1] + at[3] > open.getHeight()) {
+                    return null;
+                }
+                final BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inSampleSize = REDUCE;
+                o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                return open.decodeRegion(new Rect(at[0], at[1], at[0] + at[2], at[1] + at[3]), o);
+            } catch (java.io.IOException e) {
+                return null;
+            }
+        }
+
+        private void closeSheet() {
+            if (open != null) {
+                open.recycle();
+            }
+            open = null;
+            openName = null;
+        }
+
+        /** Free the open sheet and the texts; the next picture reads them again. */
+        void close() {
+            closeSheet();
+            texts.clear();
+        }
+    }
+
+    /**
+     * The picture of a unit type on a tileset, or null when any part of the way to it is
+     * missing. Frame 0 of the type's family, found as the engine finds it (UnitFrames.frameOf).
+     */
+    static Picture load(Sheets sheets, String mapJson, int type, int tileset) {
         try {
             final String[] entry = UnitFrames.entry(mapJson, UnitFrames.file(type, tileset));
             if (entry == null) {
                 return null;
             }
-            final File dir = new File(gameFolder, "Data/Art/hd/unit");
             final Picture p = new Picture();
-            p.bodyAt = UnitFrames.frame(text(new File(dir, entry[0] + "_sprites.json")), entry[1] + "_0");
+            p.bodyAt = UnitFrames.frameOf(sheets.text(entry[0] + "_sprites"), entry[1], 0, "", tileset);
             if (p.bodyAt == null) {
                 return null;
             }
-            p.body = region(new File(dir, entry[0] + "_sprites.png"), p.bodyAt);
+            p.body = sheets.region(entry[0] + "_sprites", p.bodyAt);
             if (p.body == null) {
                 return null;
             }
             // The mask is there for some units only.
-            p.maskAt = UnitFrames.frame(text(new File(dir, entry[0] + "_masks.json")), entry[1] + "_0_team");
+            p.maskAt = UnitFrames.frameOf(sheets.text(entry[0] + "_masks"), entry[1], 0, "_team", tileset);
             if (p.maskAt != null) {
-                final Bitmap lit = region(new File(dir, entry[0] + "_masks.png"), p.maskAt);
+                final Bitmap lit = sheets.region(entry[0] + "_masks", p.maskAt);
                 p.mask = (lit == null) ? null : opacity(lit);
             }
             return p;
@@ -95,32 +159,6 @@ final class UnitArt {
             return null;
         } catch (OutOfMemoryError e) {
             return null;
-        }
-    }
-
-    /** One rect of a sheet, decoded alone. */
-    @SuppressWarnings("deprecation")
-    private static Bitmap region(File png, int[] at) {
-        if (!png.isFile()) {
-            return null;
-        }
-        BitmapRegionDecoder sheet = null;
-        try {
-            sheet = BitmapRegionDecoder.newInstance(png.getPath(), false);
-            if (sheet == null || at[0] < 0 || at[1] < 0 || at[0] + at[2] > sheet.getWidth()
-                || at[1] + at[3] > sheet.getHeight()) {
-                return null;
-            }
-            final BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inSampleSize = REDUCE;
-            o.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            return sheet.decodeRegion(new Rect(at[0], at[1], at[0] + at[2], at[1] + at[3]), o);
-        } catch (java.io.IOException e) {
-            return null;
-        } finally {
-            if (sheet != null) {
-                sheet.recycle();
-            }
         }
     }
 

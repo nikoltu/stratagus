@@ -407,6 +407,7 @@ void Exit(int err)
 		StopGame(GameExit);
 		return;
 	}
+	WaitForSaveGame(); // never quit under a save write (Android ends without destructors)
 	GameCycle = 0;
 	StopMusic();
 	QuitSound();

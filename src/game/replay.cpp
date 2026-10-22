@@ -266,16 +266,17 @@ static void SaveFullLog(CFile &file)
 
 	file.printf("\n");
 	file.printf("ReplayLog( {\n");
-	file.printf("  Comment1 = \"%s\",\n", CurrentReplay->Comment1.c_str());
-	file.printf("  Comment2 = \"%s\",\n", CurrentReplay->Comment2.c_str());
-	file.printf("  Date = \"%s\",\n", CurrentReplay->Date.c_str());
-	file.printf("  Map = \"%s\",\n", CurrentReplay->Map.c_str());
-	file.printf("  MapPath = \"%s\",\n", CurrentReplay->MapPath.c_str());
+	// Names and the map's description are free text (audit EA-403): escaped for the Lua literal.
+	file.printf("  Comment1 = \"%s\",\n", EscapeLuaString(CurrentReplay->Comment1).c_str());
+	file.printf("  Comment2 = \"%s\",\n", EscapeLuaString(CurrentReplay->Comment2).c_str());
+	file.printf("  Date = \"%s\",\n", EscapeLuaString(CurrentReplay->Date).c_str());
+	file.printf("  Map = \"%s\",\n", EscapeLuaString(CurrentReplay->Map).c_str());
+	file.printf("  MapPath = \"%s\",\n", EscapeLuaString(CurrentReplay->MapPath).c_str());
 	file.printf("  MapId = %u,\n", CurrentReplay->MapId);
 	file.printf("  LocalPlayer = %d,\n", CurrentReplay->LocalPlayer);
 	file.printf("  Players = {\n");
 	for (int i = 0; i < PlayerMax; ++i) {
-		file.printf("\t{ Name = \"%s\", ", CurrentReplay->PlayerNames[i].c_str());
+		file.printf("\t{ Name = \"%s\", ", EscapeLuaString(CurrentReplay->PlayerNames[i]).c_str());
 		CurrentReplay->ReplaySettings.Presets[i].Save([&] (std::string field) {
 			file.printf("%s, ", field.c_str());
 		});
@@ -356,8 +357,8 @@ void CommandLog(const char *action,
 
 		LogFile = std::make_unique<CFile>();
 		if (LogFile->open(path.string().c_str(), CL_OPEN_WRITE) == -1) {
-			// don't retry for each command
-			CommandLogDisabled = false;
+			// don't retry for each command (CleanReplayLog switches it on again for the next game)
+			CommandLogDisabled = true;
 			LogFile = nullptr;
 			return;
 		}
@@ -600,6 +601,12 @@ bool IsReplayGame()
 */
 void SaveReplayList(CFile &file)
 {
+	// No replay object exists while the command log is off (-l, or its file could not be opened):
+	// the save then carries no ReplayLog block instead of ending the process (audit EA-408). A save
+	// without the block loads with the log off (LoadGame).
+	if (!CurrentReplay) {
+		return;
+	}
 	SaveFullLog(file);
 }
 

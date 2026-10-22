@@ -41,6 +41,7 @@
 #include "fov.h"
 #include "iolib.h"
 #include "player.h"
+#include "script.h"
 #include "tileset.h"
 #include "unit.h"
 #include "unit_manager.h"
@@ -373,6 +374,7 @@ void CMap::Clean(const bool isHardClean /* = false*/)
 	this->ClassicTileAtlasFrameForTile.clear();
 	this->ClassicFogFrames.clear();
 	this->ClassicFogDitherFrames.clear();
+	ReleaseHDWater(); // the animated water's masks, noise and targets (map_water.cpp)
 
 	FlagRevealMap = MapRevealModes::cHidden;
 	ReplayRevealMap = false;
@@ -401,7 +403,7 @@ void CMap::Save(CFile &file) const
 	file.printf("LoadTileModels(\"%s\")\n\n", this->TileModelsFileName.string().c_str());
 	file.printf("StratagusMap(\n");
 	file.printf("  \"version\", \"%s\",\n", VERSION);
-	file.printf("  \"description\", \"%s\",\n", this->Info.Description.c_str());
+	file.printf("  \"description\", \"%s\",\n", EscapeLuaString(this->Info.Description).c_str());
 	file.printf("  \"the-map\", {\n");
 	file.printf("  \"size\", {%d, %d},\n", this->Info.MapWidth, this->Info.MapHeight);
 	file.printf("  \"%s\",\n", this->NoFogOfWar ? "no-fog-of-war" : "fog-of-war");
@@ -413,11 +415,7 @@ void CMap::Save(CFile &file) const
 			const CMapField &mf = *this->Field(w, h);
 
 			mf.Save(file);
-			if (w & 1) {
-				file.printf(",\n");
-			} else {
-				file.printf(", ");
-			}
+			file.write((w & 1) ? std::string_view(",\n") : std::string_view(", "));
 		}
 	}
 	file.printf("}})\n");

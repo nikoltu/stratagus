@@ -29,7 +29,29 @@ final class MapPreview {
     };
     private static final int FIRST_MEGATILE = 16;
 
-    private static final HashMap<String, Bitmap> KNOWN = new HashMap<String, Bitmap>();
+    /** Pictures made, and the maps whose picture could not be made; read without the lock. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Bitmap> KNOWN =
+        new java.util.concurrent.ConcurrentHashMap<String, Bitmap>();
+    private static final java.util.concurrent.ConcurrentHashMap<String, Boolean> FAILED =
+        new java.util.concurrent.ConcurrentHashMap<String, Boolean>();
+
+    private static String key(File pud) {
+        return pud.getPath() + "|" + pud.length() + "|" + pud.lastModified();
+    }
+
+    /**
+     * Whether the picture of a map has been made (or found impossible) already, so that
+     * {@link #known} answers for it. Never reads the map: for the main thread.
+     */
+    static boolean isKnown(File pud) {
+        final String key = key(pud);
+        return KNOWN.containsKey(key) || FAILED.containsKey(key);
+    }
+
+    /** The picture of a map if it has been made already, else null. Never reads the map. */
+    static Bitmap known(File pud) {
+        return (pud != null) ? KNOWN.get(key(pud)) : null;
+    }
     private static final HashMap<Integer, int[]> TABLES = new HashMap<Integer, int[]>();
     private static final HashMap<String, int[]> COLOURS = new HashMap<String, int[]>();
 
@@ -41,8 +63,8 @@ final class MapPreview {
         if (gameFolder == null || pud == null) {
             return null;
         }
-        final String key = pud.getPath() + "|" + pud.length() + "|" + pud.lastModified();
-        if (KNOWN.containsKey(key)) {
+        final String key = key(pud);
+        if (KNOWN.containsKey(key) || FAILED.containsKey(key)) {
             return KNOWN.get(key);
         }
         Bitmap made = null;
@@ -53,7 +75,11 @@ final class MapPreview {
         } catch (OutOfMemoryError e) {
             made = null;
         }
-        KNOWN.put(key, made);
+        if (made != null) {
+            KNOWN.put(key, made);
+        } else {
+            FAILED.put(key, Boolean.TRUE);
+        }
         return made;
     }
 

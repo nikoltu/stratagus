@@ -6,10 +6,14 @@ import android.graphics.Canvas;
 /**
  * The profile sheet, opened from the profile chip: the portrait in the profile's colour,
  * the name and the eight colours at the left; statistics, campaign progress and the
- * profile's actions at the right.
+ * profile's actions at the right. The name is edited in place: a tap on it gives RENAME and the
+ * shell types into `editor` (owner's board 2B, 2026-10-18; the Rename sheet is gone).
  */
 final class ProfileSheet {
     static final int NONE = 0, CLOSE = 1, COLOR = 2, PORTRAIT = 3, NEW = 4, RENAME = 5, SWITCH = 6;
+    /** While the name is typed: its text, the sheet raised to TOP_EDITING clear of the keyboard. */
+    NameSheet editor;
+    private static final float TOP_EDITING = 60f, NAME_FIELD_DY = 648f, NAME_FIELD_H = 110f, CAP_NAME = 52f;
 
     // Layout, logical units: the kit's modal sheet, centred, inner padding 96.
     private static final float W = 2400f, H = 1560f, PAD = 96f;
@@ -24,17 +28,17 @@ final class ProfileSheet {
 
     /** The rows of the statistics block, in the design's order. */
     private static final String[] STATS = {
-        "Games played", "Victories", "Defeats", "Units trained", "Buildings built", "Kills",
+        "Games played", "Victories", "Defeats", "Units", "Buildings built", "Kills",
         "Razings", "Total score", "Best rank",
     };
     /** The game's own text for a row, where it has one of that meaning. */
     private static final String[] STATS_KEYS = {
-        null, null, null, null, null, "victorydefeat_kills", "victorydefeat_razings", null, null,
+        null, null, null, "victorydefeat_units", null, "victorydefeat_kills", "victorydefeat_razings", null, null,
     };
     private static final String[] PROGRESS = {
         "Tides - Orc", "Tides - Human", "Dark Portal - Orc", "Dark Portal - Human",
     };
-    private static final String[] ACTIONS = { "Switch", "New", "Rename", "Close" };
+    private static final String[] ACTIONS = { "Switch", "New", "Close" };
 
     private Bitmap frame, buttonPlain, buttonMarked, face;
     private int faceSlot = -1, faceColor = -1;
@@ -42,13 +46,13 @@ final class ProfileSheet {
     int pickedColor;
 
     private float x() { return (Screen.CANVAS_W - W) / 2f; }
-    private float y(SkinKit kit) { return kit.height / 2f - H / 2f; }
+    private float y(SkinKit kit) { return (editor != null) ? TOP_EDITING : kit.height / 2f - H / 2f; }
     private float px() { return x() + PAD; }
     private float py(SkinKit kit) { return y(kit) + PAD; }
     private float sx() { return px() + FACE_W + 120f; }
     private float sw() { return x() + W - PAD - sx(); }
     private float actionY(SkinKit kit) { return y(kit) + H - PAD - BUTTON_H; }
-    private float actionW() { return (sw() - 3f * GAP) / 4f; }
+    private float actionW() { return (sw() - 2f * GAP) / 3f; }
     private float swatchX(int i) { return px() + SWATCH_DX * (i % 4); }
     private float swatchY(SkinKit kit, int i) { return py(kit) + 960f + SWATCH_DY * (i / 4); }
 
@@ -102,7 +106,11 @@ final class ProfileSheet {
         final float px = px(), py = py(kit);
         kit.nine(c, frame, px - 12f, py - 12f, FACE_W + 24f, FACE_H + 23.5f, 25);
         kit.picture(c, face, px, py, FACE_W, FACE_H);
-        kit.textTop(c, kit.fit(p.name, CAP_TITLE, FACE_W), px, py + 672f, CAP_TITLE, INK, true);
+        if (editor != null) {
+            editor.drawField(c, kit, px, py + NAME_FIELD_DY, FACE_W, NAME_FIELD_H, CAP_NAME);
+        } else {
+            kit.textTop(c, kit.fit(p.name, CAP_TITLE, FACE_W), px, py + 672f, CAP_TITLE, INK, true);
+        }
         kit.nine(c, buttonPlain, px, py + 780f, FACE_W, BUTTON_H, 14);
         kit.textCentre(c, kit.own("Change Portrait"), px, py + 780f, FACE_W, BUTTON_H, CAP_BODY, INK, true);
         for (int i = 0; i < Profiles.COLORS.length; ++i) {
@@ -164,8 +172,11 @@ final class ProfileSheet {
         if (in(x, y, px(), py(kit) + 780f, FACE_W, BUTTON_H)) {
             return PORTRAIT;
         }
+        if (in(x, y, px(), py(kit) + NAME_FIELD_DY, FACE_W, NAME_FIELD_H)) {
+            return RENAME;
+        }
         final float aw = actionW();
-        if (in(x, y, sx() + (aw + GAP) * 3f, actionY(kit), aw, BUTTON_H)) {
+        if (in(x, y, sx() + (aw + GAP) * 2f, actionY(kit), aw, BUTTON_H)) {
             return CLOSE;
         }
         if (in(x, y, sx(), actionY(kit), aw, BUTTON_H)) {
@@ -173,9 +184,6 @@ final class ProfileSheet {
         }
         if (in(x, y, sx() + (aw + GAP) * 1f, actionY(kit), aw, BUTTON_H)) {
             return NEW;
-        }
-        if (in(x, y, sx() + (aw + GAP) * 2f, actionY(kit), aw, BUTTON_H)) {
-            return RENAME;
         }
         return NONE;
     }

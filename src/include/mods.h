@@ -56,6 +56,9 @@ extern fs::path ModsLocate(std::string_view file);
 extern long ModsFileSize(std::string_view file);
 /// Parse a mod's JSON file; false if it is absent, too large or malformed
 extern bool ModsReadJson(std::string_view file, content::JsonValue &out);
+/// The "mods/<id>/sounds/units/<name>" an enabled mod gives in place of the game's sound file
+/// `file` (matched by its last name part, exact case); empty when no enabled mod replaces it
+extern std::string ModsUnitSound(std::string_view file);
 
 /// Register the script functions
 extern void ModsCclRegister();

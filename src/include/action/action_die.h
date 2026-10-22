@@ -52,6 +52,12 @@ public:
 	{
 		UpdatePathFinderData_NotCalled(input);
 	}
+
+	/// Frames the Death has run so far (the flyer's shadow uses it)
+	int GetDeathFrame() const { return DeathFrame; }
+
+private:
+	int DeathFrame = 0;
 };
 
 //@}

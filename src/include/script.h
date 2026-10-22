@@ -502,6 +502,8 @@ extern bool CclInConfigFile;        /// True while config file parsing
 ----------------------------------------------------------------------------*/
 
 extern std::string_view LuaToString(lua_State *l, int narg);
+/// The text escaped for the inside of a double-quoted Lua literal (backslash, quote, CR, LF, NUL).
+extern std::string EscapeLuaString(std::string_view text);
 extern int LuaToNumber(lua_State *l, int narg);
 extern float LuaToFloat(lua_State *l, int narg);
 extern unsigned int LuaToUnsignedNumber(lua_State *l, int narg);

@@ -131,6 +131,9 @@ public:
 	{
 		write(Format(format, args...));
 	}
+
+	/// A file opened with CL_WRITE_MEMORY: hand over what was written (the file stays open, empty).
+	std::string TakeText();
 private:
 	class PImpl;
 	std::unique_ptr<PImpl> pimpl;
@@ -140,6 +143,9 @@ private:
 #define CL_OPEN_WRITE 0x2
 #define CL_WRITE_GZ 0x4
 #define CL_WRITE_BZ2 0x8
+/// Write into memory, not to disk (the name is ignored): the save text is built this way on
+/// the game thread and compressed and written elsewhere.
+#define CL_WRITE_MEMORY 0x10
 
 /*----------------------------------------------------------------------------
 --  Functions

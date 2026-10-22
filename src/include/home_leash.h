@@ -61,6 +61,9 @@ constexpr int HelpCallRange(bool computerSlot, bool struckIsShip)
 	return computerSlot ? 13 : (struckIsShip ? 4 : 2);
 }
 
+/// Cycles a building that does not attack remembers its attacker after the hit (run 72: 1-3)
+constexpr unsigned long BuildingAttackerHoldCycles = 1;
+
 /// Farthest a unit fixed by the map may stand from the struck one to be called
 constexpr int HelpCallFixedRange = 4;
 

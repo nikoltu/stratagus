@@ -1817,6 +1817,9 @@ void CGraphic::DrawFrameClipCustomMod(unsigned frame, int x, int y,
 */
 void CPlayerColorGraphic::LoadTeamMask(const std::string &baseFile)
 {
+	if (NoClassicFile) {
+		return; // CLASSIC-SHEET-LOOKUPS: the HD atlas has its own team masks
+	}
 	std::string maskFile = baseFile;
 	const auto dot = maskFile.rfind(".png");
 	if (dot == std::string::npos) {
@@ -2490,6 +2493,9 @@ void CGraphic::Load(bool grayscale)
 		}
 	}
 
+	if (!mSurface && NoClassicFile) {
+		mSurface = MakePlaceholderSurface(Width, Height); // CLASSIC-SHEET-LOOKUPS: the HD atlas draws it
+	}
 	fs::path name;
 	if (!mSurface) {
 		name = LibraryFileName(File.string());

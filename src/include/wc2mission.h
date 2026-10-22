@@ -61,6 +61,9 @@ std::string MissionStartActionsOfCode(const std::string &code, uint32_t va, uint
                                       uint32_t listBase = 0, uint32_t entry = 0);
 uint32_t MissionSpellStateBaseOfCode(const std::string &code);
 
+/// For the host tests: the unit ident a unit-allow bit gates for one race (nullptr: bit unmapped).
+const char *MissionUnitAllowIdent(int bit, bool orc);
+
 /// The generic arrival rule (ids 0x200 and 0x04) as the original's evaluator tests it: 2 = won,
 /// 1 = lost (it can no longer be met), 0 = neither. `param` is the mission's parameter (the number
 /// of units to bring; bit 0x1000: one of them must be a hero), `arrived` the units counted on the
@@ -113,6 +116,11 @@ void SaveMissionRuleState(CFile &file);
 
 /// Drop the rules (game teardown).
 void ClearMissionRules();
+
+/// The REGM section of a map's PUD file (one 16-bit region word per tile, row by row) and the
+/// map's size; false when the map has no PUD or no REGM section of its size.
+bool ReadPudRegionMap(const std::filesystem::path &mapPath, int &width, int &height,
+                      std::vector<uint16_t> &words);
 
 /// Register the Lua side (GetMissionRules, MissionRuleOutcome).
 void WC2MissionCclRegister();

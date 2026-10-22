@@ -69,7 +69,13 @@ public:
 	CUnit *lastCreatedUnit();
 
 	// Following is mainly for scripting
+	/// The unit in slot `index`. The index must be a slot that exists (asserted); engine code
+	/// that holds a known valid slot number uses this one.
 	CUnit &GetSlotUnit(int index) const;
+	/// The unit in slot `index`, or nullptr when no such slot exists. For numbers that come
+	/// from scripts, save files or other outside input. The unit may be a released one.
+	CUnit *FindSlotUnit(int index) const;
+	bool IsSlotIndex(int index) const { return index >= 0 && static_cast<size_t>(index) < unitSlots.size(); }
 	unsigned int GetUsedSlotCount() const;
 
 private:

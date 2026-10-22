@@ -39,8 +39,11 @@ final class Profiles {
     static final class Profile {
         String id;
         String name;
-        /** Slot in the portrait atlas. */
+        /** Slot in the portrait atlas; for a random portrait, the one drawn in this run. */
         int portrait;
+        /** The gallery's Random (design 22.2, adopted Q22 "random each start"): a new portrait
+         *  is drawn once per launcher process, as the owner's other launcher does. */
+        boolean portraitRandom;
         /** 0..7, index into COLORS. */
         int color;
         long created;
@@ -61,7 +64,8 @@ final class Profiles {
                 .put("games", games).put("victories", victories).put("defeats", defeats)
                 .put("units", units).put("buildings", buildings).put("kills", kills)
                 .put("razings", razings).put("score", score)
-                .put("bestRank", bestRank).put("bestRankOrc", bestRankOrc);
+                .put("bestRank", bestRank).put("bestRankOrc", bestRankOrc)
+                .put("portraitMode", portraitRandom ? "random" : "fixed");
         }
 
         static Profile fromJson(JSONObject o) {
@@ -82,7 +86,38 @@ final class Profiles {
             p.score = o.optLong("score", 0L);
             p.bestRank = o.optInt("bestRank", 0);
             p.bestRankOrc = o.optBoolean("bestRankOrc", false);
+            p.portraitRandom = "random".equals(o.optString("portraitMode", "fixed"));
+            if (p.portraitRandom) {
+                p.portrait = rolled(p.id);
+            }
             return p;
+        }
+    }
+
+    /** This process's draw of each random portrait, by profile id. */
+    private static final java.util.HashMap<String, Integer> ROLLED = new java.util.HashMap<String, Integer>();
+
+    /** The portrait drawn for a random profile in this process; drawn at the first ask. */
+    private static synchronized int rolled(String id) {
+        Integer slot = ROLLED.get(id);
+        if (slot == null) {
+            slot = GallerySheet.SLOTS[new java.util.Random().nextInt(GallerySheet.SLOTS.length)];
+            ROLLED.put(id, slot);
+        }
+        return slot;
+    }
+
+    /**
+     * The gallery's answer: a fixed portrait forgets this run's draw; a random one keeps the
+     * portrait shown at OK as this run's draw, so nothing changes until the next start.
+     */
+    static synchronized void chose(Profile p, int slot, boolean random) {
+        p.portrait = slot;
+        p.portraitRandom = random;
+        if (random) {
+            ROLLED.put(p.id, slot);
+        } else {
+            ROLLED.remove(p.id);
         }
     }
 

@@ -67,6 +67,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <map>
+#include <set>
 #include <memory>
 
 /*----------------------------------------------------------------------------
@@ -388,9 +389,10 @@ bool ClassicHudActive()
 /**
 **  Classic view switched: put the rects of the present view and rebuild what depends on them.
 **
-**  The world keeps its place on the screen (the original: the Town Hall's selection box stays at
-**  the same client x through a switch, captures o11_85 / o11_86): the map pixel under the new
-**  view's top-left corner is the one that was drawn there before, as far as the map's edges allow.
+**  The view keeps its top row and its left column: the map pixel at the new view's top-left
+**  corner is the one at the old view's top-left corner, as far as the map's edges allow. The
+**  original keeps the top row (run 56: 7 of 7 toggles, within 0.6 tile) but puts the classic view
+**  at the map's right edge (6 of 6) - a defect, not copied (CLASSIC_CALIB56.md).
 */
 void ApplyClassicViewLayout()
 {
@@ -420,8 +422,6 @@ void ApplyClassicViewLayout()
 	CursorOn = ECursorOn::Unknown;
 
 	const CViewport &old = UI.Viewports[0];
-	const PixelPos oldTopLeft = old.GetTopLeftPos();
-	const float oldZoom = old.Zoom > 0.0f ? old.Zoom : 1.0f;
 	const PixelPos oldMapPixel = Map.TilePosToMapPixelPos_TopLeft(old.MapPos) + old.Offset;
 
 	if (IsClassicView()) {
@@ -435,11 +435,7 @@ void ApplyClassicViewLayout()
 	}
 	SetViewportMode(UI.ViewportMode);
 
-	CViewport &vp = UI.Viewports[0];
-	const PixelPos newTopLeft = vp.GetTopLeftPos();
-	vp.Set(Vec2i(0, 0),
-	       PixelDiff(oldMapPixel.x + (int) std::lround((newTopLeft.x - oldTopLeft.x) / oldZoom),
-	                 oldMapPixel.y + (int) std::lround((newTopLeft.y - oldTopLeft.y) / oldZoom)));
+	UI.Viewports[0].Set(Vec2i(0, 0), PixelDiff(oldMapPixel.x, oldMapPixel.y));
 
 	// The minimap's surfaces and tables are made for its size.
 	UI.Minimap.Destroy();
@@ -509,6 +505,71 @@ bool ClassicPauseButtonContains(int screenX, int screenY)
 		   && classichud::contains(classichud::PauseFace, bx, by);
 }
 
+bool ClassicF5SlotContains(const PixelPos &screenPos)
+{
+	int bx;
+	int by;
+	return ClassicLayoutOn
+		   && hdatlas::classicFromScreen(ClassicBoxOnScreen(), screenPos.x, screenPos.y, bx, by)
+		   && classichud::contains(classichud::F5Face, bx, by);
+}
+
+/// The art the classic HUD cannot be drawn without: the frames of both races and the widget
+/// atlas (header buttons, bars, cells). Portrait-face is not among them: without it the cells
+/// show the Remastered icons (DrawClassicPicture). Read once each (ClassicHudAtlas keeps the
+/// result, a failure included).
+static bool ClassicHudArtReadable(std::string &missing)
+{
+	static const char *const needed[] = {
+		"Data/Art/classic/HUD/BG_Human.json",
+		"Data/Art/classic/HUD/BG_Orc.json",
+		"Data/skins/Classic_HUD_Widgets.json",
+	};
+	for (const char *path : needed) {
+		if (ClassicHudAtlas(path) == nullptr) {
+			missing = path;
+			return false;
+		}
+	}
+	return true;
+}
+
+bool RequestClassicView(bool on)
+{
+	if (on == IsClassicView()) {
+		return on;
+	}
+	// The big map mode keeps its own copy of the map area (ApplyClassicViewLayout): no switch
+	// either way while it is on, so the flag and the layout never part.
+	if (BigMapMode) {
+		ErrorPrint("ClassicView: not switched in the big map mode\n");
+		return IsClassicView();
+	}
+	if (on) {
+		if (!TheRenderer) {
+			ErrorPrint("ClassicView: no renderer yet, the view stays Remastered\n");
+			return false;
+		}
+		std::string missing;
+		if (!ClassicHudArtReadable(missing)) {
+			static bool told = false;
+			if (!told) {
+				told = true;
+				ErrorPrint("ClassicView: '%s' is not in the game folder, the view stays Remastered\n",
+				           missing.c_str());
+			}
+			return false;
+		}
+	}
+	SetClassicView(on);
+	return IsClassicView();
+}
+
+void UiToggleClassicView()
+{
+	RequestClassicView(!IsClassicView());
+}
+
 static SDL_Rect ClassicScreenRect(const hdatlas::ClassicScreen &box, const classichud::Rect &r)
 {
 	const hdatlas::ClassicRect s = hdatlas::classicToScreen(box, r.x, r.y, r.w, r.h);
@@ -563,22 +624,19 @@ static void DrawClassicPicture(const hdatlas::ClassicScreen &box, const CIcon &i
                                const classichud::Rect &dst, int srcX = 0,
                                int srcW = classichud::PictureW)
 {
-	const CAtlasGraphic *faces = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-face.json");
-	if (faces == nullptr || !icon.G) {
+	if (!icon.G) {
 		return;
 	}
+	const CAtlasGraphic *faces = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-face.json");
 	const std::string path = icon.G->File.generic_string();
 	const char *set = path.find("/winter/") != std::string::npos ? "ice"
 	                  : path.find("/wasteland/") != std::string::npos ? "swamp"
 	                  : path.find("/swamp/") != std::string::npos ? "xswamp" : "forest";
 	std::string name = std::string(set) + "_" + std::to_string(icon.Frame);
-	int frame = faces->FrameByName(name.c_str());
-	if (frame < 0) {
+	int frame = faces != nullptr ? faces->FrameByName(name.c_str()) : -1;
+	if (faces != nullptr && frame < 0) {
 		name = "forest_" + std::to_string(icon.Frame);
 		frame = faces->FrameByName(name.c_str());
-	}
-	if (frame < 0) {
-		return;
 	}
 	const SDL_Rect shown = ClassicScreenRect(box, dst);
 	// The whole picture's rect; a window of it is cut out by the clip rect (the pattern of
@@ -599,14 +657,25 @@ static void DrawClassicPicture(const hdatlas::ClassicScreen &box, const CIcon &i
 	if (window) {
 		SDL_RenderSetClipRect(TheRenderer, &shown);
 	}
-	faces->DrawAtlasFramePart(frame, classichud::PictureW, classichud::PictureH, r);
-	if (playerColor >= 0 && playerColor < (int) PlayerColorsRGB.size()
-		&& !PlayerColorsRGB[playerColor].empty()) {
-		if (const CAtlasGraphic *masks = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-mask.json")) {
-			const int mask = masks->FrameByName((name + "_team").c_str());
-			if (mask >= 0) {
-				const CColor &c = PlayerColorsRGB[playerColor][0];
-				masks->DrawAtlasFrameClipScaled(mask, r.x, r.y, r.w, r.h, false, c.R, c.G, c.B);
+	if (faces == nullptr || frame < 0) {
+		// No classic picture for this icon in the game folder: the Remastered icon in the
+		// picture's rect (no team colour on it), logged once per picture (spec section 5, rules).
+		static std::set<std::string> told;
+		if (told.insert(name).second) {
+			ErrorPrint("Classic HUD: no classic picture '%s', the Remastered icon '%s' is shown\n",
+			           name.c_str(), icon.GetIdent().c_str());
+		}
+		icon.G->DrawFrameClipTexDst(icon.Frame, r);
+	} else {
+		faces->DrawAtlasFramePart(frame, classichud::PictureW, classichud::PictureH, r);
+		if (playerColor >= 0 && playerColor < (int) PlayerColorsRGB.size()
+			&& !PlayerColorsRGB[playerColor].empty()) {
+			if (const CAtlasGraphic *masks = ClassicHudAtlas("Data/Art/classic/HUD/Portrait-mask.json")) {
+				const int mask = masks->FrameByName((name + "_team").c_str());
+				if (mask >= 0) {
+					const CColor &c = PlayerColorsRGB[playerColor][0];
+					masks->DrawAtlasFrameClipScaled(mask, r.x, r.y, r.w, r.h, false, c.R, c.G, c.B);
+				}
 			}
 		}
 	}
@@ -779,8 +848,13 @@ static void DrawClassicHudWidgets(const hdatlas::ClassicScreen &box, const std::
 			}
 		}
 	}
-	widgets->DrawAtlasFramePart(widgets->FrameByName("f5"), classichud::F5Face.w,
-	                            classichud::F5Face.h, ClassicScreenRect(box, classichud::F5Face));
+	// The slot's frame: `f5_active` while it is held down (the engine's pressed state of the
+	// menu-button area, which the slot uses: mouse.cpp), else `f5`.
+	const bool f5Held = GameMenuButtonClicked && ButtonAreaUnderCursor == ButtonArea::Menu
+	                    && (ButtonUnderCursor == ButtonUnderMenu || ButtonUnderCursor == ButtonUnderNetworkMenu);
+	widgets->DrawAtlasFramePart(widgets->FrameByName(classichud::faceName("f5", f5Held).c_str()),
+	                            classichud::F5Face.w, classichud::F5Face.h,
+	                            ClassicScreenRect(box, classichud::F5Face));
 	widgets->DrawAtlasFramePart(
 		widgets->FrameByName(classichud::faceName("hud_" + race + "_small", ClassicUserButtonHeld(1)).c_str()),
 		classichud::PauseFace.w, classichud::PauseFace.h, ClassicScreenRect(box, classichud::PauseFace));
@@ -1034,13 +1108,10 @@ static void DrawClassicTooltip(const hdatlas::ClassicScreen &box, const ButtonAc
 		line[lines++] = part;
 	}
 
-	// The box: black at a third over the map (its two rects overlap: the middle one whole, of
-	// the wide one the two side strips), then the line.
-	const classichud::TooltipBox parts = classichud::tooltipBox(box.lh, lines);
-	const classichud::Rect &mid = parts.fill[0];
-	const classichud::Rect &wide = parts.fill[1];
-	const classichud::Rect fills[3] = {mid, {wide.x, wide.y, mid.x - wide.x, wide.h},
-	                                   {mid.x + mid.w, wide.y, wide.x + wide.w - mid.x - mid.w, wide.h}};
+	// The box (run 59): black at a third inside the line, the line a translucent cream-white
+	// over the bare map, and a dark ring one pixel outside it. All three are blended, and no
+	// pixel is in two of their rects.
+	const classichud::TooltipBoxBlend parts = classichud::tooltipBoxBlend(box.lh, lines);
 	Uint8 oldR;
 	Uint8 oldG;
 	Uint8 oldB;
@@ -1050,18 +1121,24 @@ static void DrawClassicTooltip(const hdatlas::ClassicScreen &box, const ButtonAc
 	SDL_GetRenderDrawBlendMode(TheRenderer, &oldMode);
 	SDL_SetRenderDrawBlendMode(TheRenderer, SDL_BLENDMODE_BLEND);
 	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, (Uint8) classichud::TooltipBoxAlpha);
-	for (const classichud::Rect &r : fills) {
+	for (const classichud::Rect &r : parts.inner) {
 		const SDL_Rect dst = ClassicScreenRect(box, r);
 		SDL_RenderFillRect(TheRenderer, &dst);
 	}
-	SDL_SetRenderDrawBlendMode(TheRenderer, oldMode);
+	SDL_SetRenderDrawColor(TheRenderer, 0, 0, 0, (Uint8) classichud::TooltipBoxRingAlpha);
+	for (const classichud::Rect &r : parts.ring) {
+		const SDL_Rect dst = ClassicScreenRect(box, r);
+		SDL_RenderFillRect(TheRenderer, &dst);
+	}
 	SDL_SetRenderDrawColor(TheRenderer, (Uint8) classichud::TooltipBoxLineRGB[0],
 	                       (Uint8) classichud::TooltipBoxLineRGB[1],
-	                       (Uint8) classichud::TooltipBoxLineRGB[2], 255);
+	                       (Uint8) classichud::TooltipBoxLineRGB[2],
+	                       (Uint8) classichud::TooltipBoxLineAlpha);
 	for (const classichud::Rect &r : parts.line) {
 		const SDL_Rect dst = ClassicScreenRect(box, r);
 		SDL_RenderFillRect(TheRenderer, &dst);
 	}
+	SDL_SetRenderDrawBlendMode(TheRenderer, oldMode);
 	SDL_SetRenderDrawColor(TheRenderer, oldR, oldG, oldB, oldA);
 
 	const SDL_Color yellow = {(Uint8) classichud::TooltipYellowRGB[0], (Uint8) classichud::TooltipYellowRGB[1],
@@ -1223,6 +1300,25 @@ void DrawClassicMessage(std::string_view text)
 	                classichud::TextAlign::Left, text, &yellow);
 }
 
+bool ClassicMessageRect(std::string_view text, int &x, int &y, int &w, int &h)
+{
+	if (!ClassicLayoutOn || text.empty()) {
+		return false;
+	}
+	const hdatlas::ClassicScreen box = ClassicBoxOnScreen();
+	double scale = 1.0;
+	const CFont *font = ClassicTextFace(classichud::TextCap, box, scale);
+	if (font == nullptr || scale <= 0.0) {
+		return false;
+	}
+	// As DrawClassicText places a left-aligned text.
+	x = (int) std::lround(box.box.x + classichud::MessageX * (double) box.s);
+	y = (int) std::lround(box.box.y + classichud::messageMidY(box.lh) * box.s - font->Height() * scale / 2.0);
+	w = (int) std::lround(font->Width(text) * scale);
+	h = (int) std::lround(font->Height() * scale);
+	return w > 0 && h > 0;
+}
+
 void DrawClassicObjective(int n, std::string_view text)
 {
 	if (!ClassicLayoutOn || !TheRenderer || text.empty()) {
@@ -1256,7 +1352,7 @@ void DrawClassicHud()
 	raceCap[0] = (char) toupper((unsigned char) raceCap[0]);
 	if (const CAtlasGraphic *frame = ClassicHudAtlas("Data/Art/classic/HUD/BG_" + raceCap + ".json")) {
 		hdatlas::ClassicHudPiece pieces[hdatlas::ClassicHudPieceMax];
-		const int count = hdatlas::classicHudFramePieces(box.lw, box.lh, pieces);
+		const int count = hdatlas::classicHudFramePieces(box.lw, box.lh, pieces, !Selected.empty());
 		for (int i = 0; i < count; ++i) {
 			const hdatlas::ClassicHudPiece &p = pieces[i];
 			const hdatlas::ClassicRect r = hdatlas::classicToScreen(box, p.x, p.y, p.w, p.h);

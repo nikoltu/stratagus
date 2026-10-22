@@ -76,6 +76,7 @@ private:
 	int TTL = -1;                   /// Missile TTL.
 	int Delay = 0;                  /// Missile original delay.
 	int State = 0;                  /// Missile state at the start.
+	int FreeTileRefund = -1;        /// >= 0: only on a free tile (RuneTileTaken), else this mana back
 	bool UseUnitVar = false;        /// Use the caster's damage parameters
 	SpellActionMissileLocation StartPoint{ELocBaseType::Caster}; /// Start point description.
 	SpellActionMissileLocation EndPoint{ELocBaseType::Target}; /// Start point description.

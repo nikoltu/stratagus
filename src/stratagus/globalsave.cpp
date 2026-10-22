@@ -42,13 +42,16 @@ static fs::path GlobalSavePath()
 	return path;
 }
 
-/// Read the whole file. Missing file is not an error: it means "no progress yet".
-static bool ReadProgress(std::array<int, 4> &out)
+enum class ProgressRead { Missing, Read, Damaged };
+
+/// Read the whole file. A missing file is not an error: it means "no progress yet". A file that is
+/// there but does not parse is Damaged: its values are unknown, not zero.
+static ProgressRead ReadProgressFile(std::array<int, 4> &out)
 {
 	out = {0, 0, 0, 0};
 	FILE *fd = fopen(GlobalSavePath().string().c_str(), "rb");
 	if (!fd) {
-		return false;
+		return ProgressRead::Missing;
 	}
 	std::string text;
 	char buf[1024];
@@ -61,37 +64,55 @@ static bool ReadProgress(std::array<int, 4> &out)
 	content::JsonValue root;
 	std::string err;
 	if (!content::parseJson(text, root, err)) {
-		ErrorPrint("GlobalSave.json is malformed (%s); treating progress as empty\n", err.c_str());
-		return false;
+		ErrorPrint("GlobalSave.json is malformed (%s)\n", err.c_str());
+		return ProgressRead::Damaged;
 	}
 	const content::JsonValue *mc = root.find("missionsCompleted");
 	if (!mc) {
-		return false;
+		return ProgressRead::Read; // valid JSON without the member: no progress recorded yet
 	}
 	for (size_t i = 0; i < CampaignKeys.size(); ++i) {
 		if (const content::JsonValue *v = mc->find(CampaignKeys[i])) {
 			out[i] = static_cast<int>(v->asInt(0));
 		}
 	}
-	return true;
+	return ProgressRead::Read;
 }
 
-static void WriteProgress(const std::array<int, 4> &values)
+/// Write the four values to a temporary file next to the real one and move it over the real one, so
+/// an interrupted write leaves the previous file whole instead of a truncated one (audit EA-419).
+static bool WriteProgress(const std::array<int, 4> &values)
 {
 	const fs::path path = GlobalSavePath();
-	FILE *fd = fopen(path.string().c_str(), "w");
+	fs::path tmp = path;
+	tmp += ".tmp";
+	FILE *fd = fopen(tmp.string().c_str(), "wb");
 	if (!fd) {
-		ErrorPrint("Cannot open '%s' for writing\n", path.u8string().c_str());
-		return;
+		ErrorPrint("Cannot open '%s' for writing\n", tmp.u8string().c_str());
+		return false;
 	}
 	// Same shape the original writes: one object, one member, four integer keys.
-	fprintf(fd, "{\n\t\"missionsCompleted\": {\n");
+	bool ok = fprintf(fd, "{\n\t\"missionsCompleted\": {\n") >= 0;
 	for (size_t i = 0; i < CampaignKeys.size(); ++i) {
-		fprintf(fd, "\t\t\"%s\": %d%s\n", CampaignKeys[i], values[i],
-				(i + 1 < CampaignKeys.size()) ? "," : "");
+		ok = ok && fprintf(fd, "\t\t\"%s\": %d%s\n", CampaignKeys[i], values[i],
+						   (i + 1 < CampaignKeys.size()) ? "," : "") >= 0;
 	}
-	fprintf(fd, "\t}\n}\n");
-	fclose(fd);
+	ok = ok && fprintf(fd, "\t}\n}\n") >= 0;
+	ok = (fflush(fd) == 0) && ok;
+	ok = (fclose(fd) == 0) && ok;
+	std::error_code ec;
+	if (!ok) {
+		ErrorPrint("Writing '%s' failed; GlobalSave.json is left as it was\n", tmp.u8string().c_str());
+		fs::remove(tmp, ec);
+		return false;
+	}
+	fs::rename(tmp, path, ec);
+	if (ec) {
+		ErrorPrint("Cannot replace '%s': %s\n", path.u8string().c_str(), ec.message().c_str());
+		fs::remove(tmp, ec);
+		return false;
+	}
+	return true;
 }
 
 static int KeyIndex(const std::string &campaignKey)
@@ -112,7 +133,13 @@ void SetGlobalCampaignProgress(const std::string &campaignKey, int missionsCompl
 		return;
 	}
 	std::array<int, 4> values{};
-	ReadProgress(values);
+	if (ReadProgressFile(values) == ProgressRead::Damaged) {
+		// The other three campaigns' values are unknown: writing would reset them to zero. Leave the
+		// file for the player (or a later fix) to recover, and record nothing (audit EA-419).
+		ErrorPrint("GlobalSave.json could not be read; '%s' progress %d is not recorded\n",
+				   campaignKey.c_str(), missionsCompleted);
+		return;
+	}
 	if (missionsCompleted <= values[idx]) {
 		return; // monotonic: replaying a mission must not remove progress
 	}

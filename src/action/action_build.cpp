@@ -40,6 +40,7 @@
 
 #include "action/action_built.h"
 #include "ai.h"
+#include "wc2ai.h"
 #include "animation.h"
 #include "iolib.h"
 #include "map.h"
@@ -51,6 +52,7 @@
 #include "unit.h"
 #include "unittype.h"
 #include "video.h"
+#include "wc2strings.h"
 
 extern void AiReduceMadeInBuilt(PlayerAi &pai, const CUnitType &type);
 
@@ -207,7 +209,7 @@ bool COrder_Build::MoveToLocation(CUnit &unit)
 				return false;
 			}
 
-			unit.Player->Notify(ColorYellow, unit.tilePos, "%s", _("You cannot reach building place"));
+			// U-16: no line. The game's string table has no text for an unreachable site.
 			if (unit.Player->AiEnabled) {
 				AiCanNotReach(unit, this->GetUnitType());
 			}
@@ -228,17 +230,16 @@ static bool CheckLimit(const CUnit &unit, const CUnitType &type)
 	const CPlayer &player = *unit.Player;
 	bool isOk = true;
 
-	// Check if enough resources for the building.
+	// Check if enough resources for the building. CheckCosts gives the game's own line for the
+	// missing resource (stat_txt_439 / 440 / 441); no second, English-only line.
 	if (player.CheckUnitType(type)) {
-		// FIXME: Better tell what is missing?
-		player.Notify(
-			ColorYellow, unit.tilePos, _("Not enough resources to build %s"), type.Name.c_str());
 		isOk = false;
 	}
 
 	// Check if hitting any limits for the building.
+	// CheckLimits gives the game's own line (message_cannot_create_units / stat_txt_438);
+	// U-16: the second, English-only line is gone.
 	if (player.CheckLimits(type) != ECheckLimit::Ok) {
-		player.Notify(ColorYellow, unit.tilePos, _("Can't build more units %s"), type.Name.c_str());
 		isOk = false;
 	}
 	if (isOk == false && player.AiEnabled) {
@@ -285,7 +286,7 @@ bool COrder_Build::StartBuilding(CUnit &unit, CUnit &ontop)
 	if (build == nullptr) {
 		// FIXME: Should we retry this?
 		unit.Player->Notify(
-			ColorYellow, unit.tilePos, _("Unable to create building %s"), type.Name.c_str());
+			ColorYellow, unit.tilePos, "%s", WC2Or("message_cannot_create_unit", "Unable to create unit.").c_str());
 		if (unit.Player->AiEnabled) {
 			AiCanNotBuild(unit, type);
 		}
@@ -317,13 +318,8 @@ bool COrder_Build::StartBuilding(CUnit &unit, CUnit &ontop)
 
 		unit.Player->LostMainFacilityTimer = 0;
 		unit.Player->SetRevealed(false);
-		for (int j = 0; j < NumPlayers; ++j) {
-			if (unit.Player->Index != j && Players[j].Type != PlayerTypes::PlayerNobody) {
-				Players[j].Notify(_("%s has rebuilt a base, and will no longer be revealed!"), unit.Player->Name.c_str());
-			} else {
-				Players[j].Notify("%s", _("You have rebuilt a base, and will no longer be revealed!"));
-			}
-		}
+		// U-16: no line. The game's string table has no text for this event; the rule itself
+		// is unchanged.
 	}
 
 	// Must set action before placing, otherwise it will incorrectly mark radar
@@ -332,6 +328,10 @@ bool COrder_Build::StartBuilding(CUnit &unit, CUnit &ontop)
 	UpdateUnitSightRange(*build);
 	// Must place after previous for map flags
 	build->Place(this->goalPos);
+	// The original marks the new building of a computer on its reserved tiles (DECODE_B8 item 2).
+	if (Wc2AiRuns(unit.Player->Index)) {
+		Wc2AiReserveBuilding(*build, false);
+	}
 
 	// HACK: the building is not ready yet
 	build->Player->UnitTypesCount[type.Slot]--;
@@ -435,7 +435,7 @@ void COrder_Build::Execute(CUnit &unit) /* override */
 	}
 	if (this->State == State_StartBuilding_Failed) {
 		unit.Player->Notify(
-			ColorYellow, unit.tilePos, _("You cannot build %s here"), type.Name.c_str());
+			ColorYellow, unit.tilePos, "%s", WC2Or("stat_txt_443", "You cannot build there.").c_str());
 		if (unit.Player->AiEnabled) {
 			AiCanNotBuild(unit, type);
 		}

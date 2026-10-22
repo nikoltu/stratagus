@@ -688,14 +688,29 @@ TEST_CASE("computer: wave: the fighters a condition counts and the ones a wave t
 	CHECK_FALSE(wc2ai::Pickable(false, 0));
 }
 
-TEST_CASE("computer: cast: the pass falls on every fiftieth cycle")
+TEST_CASE("computer: cast: the pass falls on every fiftieth cycle, the first on cycle 1")
 {
-	CHECK(wc2ai::CastPassDue(0));
+	CHECK(wc2ai::CastPassDue(1));
+	CHECK(wc2ai::CastPassDue(51));
+	CHECK(wc2ai::CastPassDue(101));
+	CHECK_FALSE(wc2ai::CastPassDue(0));
+	CHECK_FALSE(wc2ai::CastPassDue(2));
 	CHECK_FALSE(wc2ai::CastPassDue(30));
-	CHECK_FALSE(wc2ai::CastPassDue(49));
-	CHECK(wc2ai::CastPassDue(50));
-	CHECK_FALSE(wc2ai::CastPassDue(51));
-	CHECK(wc2ai::CastPassDue(100));
+	CHECK_FALSE(wc2ai::CastPassDue(50));
+	CHECK_FALSE(wc2ai::CastPassDue(100));
+}
+
+TEST_CASE("attack-move: kept (blocked or at a re-issue) unless within 1 tile of its point; 20 is the cool-down")
+{
+	CHECK(wc2ai::AttackMoveRetryWait == 20);
+	CHECK_FALSE(wc2ai::AttackMoveRetry(0, 0));
+	CHECK_FALSE(wc2ai::AttackMoveRetry(1, -1));
+	CHECK_FALSE(wc2ai::AttackMoveRetry(-1, 1));
+	CHECK_FALSE(wc2ai::AttackMoveRetry(0, 1));
+	CHECK(wc2ai::AttackMoveRetry(2, 0));
+	CHECK(wc2ai::AttackMoveRetry(0, -2));
+	CHECK(wc2ai::AttackMoveRetry(-2, 1));
+	CHECK(wc2ai::AttackMoveRetry(1, 7));
 }
 
 TEST_CASE("computer: split: lumber workers by the two stocks")
@@ -711,6 +726,21 @@ TEST_CASE("computer: split: lumber workers by the two stocks")
 	CHECK(wc2ai::LumberWorkers(5000, 2000, 15) == 0); // lumber enough
 	CHECK(wc2ai::LumberWorkers(5000, 1999, 15) == 7);
 	CHECK(wc2ai::LumberWorkers(0, 0, 1) == 0);
+}
+
+TEST_CASE("computer: split: a worker decides again after a delivery")
+{
+	// run 34, item 4: W 5, G 1200, L 50 wants 4 on lumber
+	const int wanted = wc2ai::LumberWorkers(1200, 50, 5);
+	REQUIRE(wanted == 4);
+	CHECK(wc2ai::LumberNext(3, wanted, true, true));        // three others cut: the fourth goes too
+	CHECK_FALSE(wc2ai::LumberNext(4, wanted, true, true));  // four others cut: gold
+	// lumber enough (L >= 2000): a lumber worker turns to gold at its next delivery
+	CHECK_FALSE(wc2ai::LumberNext(0, wc2ai::LumberWorkers(800, 2100, 15), true, true));
+	// itself left out: alone on lumber with one wanted, it stays on lumber
+	CHECK(wc2ai::LumberNext(0, 1, true, true));
+	CHECK(wc2ai::LumberNext(9, 0, false, true));            // no gold to take
+	CHECK_FALSE(wc2ai::LumberNext(0, 9, true, false));      // no lumber to take
 }
 
 namespace
@@ -865,4 +895,438 @@ TEST_CASE("computer: repair: the building under three quarters with the greatest
 	units = {building(100, 400, 0), building(100, 400, 0)};
 	CHECK(wc2ai::RepairPick(1000, 1000, 9, 0, units) == -1);
 	CHECK(wc2ai::RepairPick(1000, 1000, 9, 0, {}) == -1);
+}
+
+TEST_CASE("computer: repair: the priority is the type's annoy-computer factor")
+{
+	const auto building = [](int factor) {
+		wc2ai::RepairView view;
+		view.finishedBuilding = true;
+		view.sameGround = true;
+		view.hp = 100;
+		view.maxHp = 400;
+		view.priority = factor;
+		return view;
+	};
+	// the original's factors: farm 45, keep 40, guard / cannon tower 50 (the port had 60 / 70)
+	CHECK(wc2ai::RepairPick(1000, 1000, 9, 0, {building(45), building(40), building(50)}) == 2);
+	// two towers: the first of equals; a later farm does not pass a tower
+	CHECK(wc2ai::RepairPick(1000, 1000, 9, 0, {building(50), building(50), building(45)}) == 0);
+	// a factor of 0 never wins
+	CHECK(wc2ai::RepairPick(1000, 1000, 9, 0, {building(0)}) == -1);
+}
+
+TEST_CASE("computer: place: shipyard patch, shore works, planned sites and the tanker's platform")
+{
+	// the shore buildings and the halls go one tile apart
+	CHECK(wc2ai::PlaceStep(0x48) == 1);
+	CHECK(wc2ai::PlaceStep(0x49) == 1);
+	CHECK(wc2ai::PlaceStep(0x4A) == 1);
+	CHECK(wc2ai::PlaceStep(0x4B) == 1);
+	CHECK(wc2ai::PlaceStep(0x4E) == 1);
+	CHECK(wc2ai::PlaceStep(0x55) == 1);
+	CHECK(wc2ai::PlaceStep(0x56) == 0);
+
+	// nearest: the shipyard's patch takes the later of equals, the first hall's mine the first
+	CHECK(wc2ai::NearestOf({7, 3, 5, 3}, true) == 3);
+	CHECK(wc2ai::NearestOf({7, 3, 5, 3}, false) == 1);
+	CHECK(wc2ai::NearestOf({-1, 9, -1}, true) == 1);
+	CHECK(wc2ai::NearestOf({-1, -1}, false) == -1);
+	CHECK(wc2ai::NearestOf({}, true) == -1);
+
+	// foundry / refinery only with a finished shipyard; others never ask
+	for (int type : {0x4E, 0x4F, 0x54, 0x55}) {
+		CHECK_FALSE(wc2ai::ShipyardWorkAllowed(type, 0));
+		CHECK(wc2ai::ShipyardWorkAllowed(type, 1));
+	}
+	CHECK(wc2ai::ShipyardWorkAllowed(0x48, 0));
+	CHECK(wc2ai::ShipyardWorkAllowed(0x3C, 0));
+
+	// a planned site blocks every square that overlaps it
+	const std::vector<wc2ai::Site> sites = {{10, 10, 3, 3}};
+	CHECK(wc2ai::SiteTaken(10, 10, 2, 2, sites));
+	CHECK(wc2ai::SiteTaken(8, 8, 3, 3, sites));
+	CHECK(wc2ai::SiteTaken(12, 12, 4, 4, sites));
+	CHECK_FALSE(wc2ai::SiteTaken(13, 10, 2, 2, sites));
+	CHECK_FALSE(wc2ai::SiteTaken(7, 7, 3, 3, sites));
+	CHECK_FALSE(wc2ai::SiteTaken(10, 10, 3, 3, {}));
+
+	// the tanker's platform: lowest d(depot, platform) + d(platform, tanker) / 2, first of equals
+	const auto platform = [](bool usable, int toDepot, int toTanker) {
+		wc2ai::PlatformView view;
+		view.usable = usable;
+		view.toDepot = toDepot;
+		view.toTanker = toTanker;
+		return view;
+	};
+	CHECK(wc2ai::PlatformPick({platform(true, 10, 2), platform(true, 6, 9)}) == 1);     // 11 against 10
+	CHECK(wc2ai::PlatformPick({platform(true, 10, 3), platform(true, 10, 2)}) == 0);    // 11 and 11
+	CHECK(wc2ai::PlatformPick({platform(false, 1, 1), platform(true, 30, 30)}) == 1);
+	CHECK(wc2ai::PlatformPick({platform(false, 1, 1)}) == -1);
+
+	// run 62: with none finished, the second tanker waits beside the one under construction
+	const auto site = [](int toDepot, int toTanker) {
+		wc2ai::PlatformView view;
+		view.building = true;
+		view.toDepot = toDepot;
+		view.toTanker = toTanker;
+		return view;
+	};
+	CHECK(wc2ai::PlatformWaitPick({site(10, 2)}) == 0);
+	CHECK(wc2ai::PlatformWaitPick({platform(false, 1, 1), site(14, 4)}) == 1);
+	CHECK(wc2ai::PlatformWaitPick({site(20, 2), site(10, 4)}) == 1);      // 21 against 12
+	CHECK(wc2ai::PlatformWaitPick({site(10, 2), site(10, 3)}) == 0);      // first of equals
+	CHECK(wc2ai::PlatformWaitPick({platform(true, 30, 30), site(1, 1)}) == -1);  // one is done: go there
+	CHECK(wc2ai::PlatformWaitPick({platform(false, 1, 1)}) == -1);
+	CHECK(wc2ai::PlatformWaitPick({}) == -1);
+}
+
+TEST_CASE("computer: hit: who runs and where to")
+{
+	for (int type : {0x02, 0x03, 0x0A, 0x0B, 0x0E, 0x0F, 0x15, 0x18}) {
+		CHECK(wc2ai::FleeKind(type));
+	}
+	for (int type : {-1, 0x00, 0x01, 0x04, 0x08, 0x0C, 0x10, 0x1A, 0x1B}) {
+		CHECK_FALSE(wc2ai::FleeKind(type));
+	}
+
+	CHECK(wc2ai::Direction8(0) == 0);    // north
+	CHECK(wc2ai::Direction8(32) == 1);   // north-east
+	CHECK(wc2ai::Direction8(64) == 2);   // east
+	CHECK(wc2ai::Direction8(160) == 5);  // south-west
+	CHECK(wc2ai::Direction8(240) == 0);  // nearer north than north-west
+	CHECK(wc2ai::Direction8(255) == 0);
+
+	// attacker facing east: four tiles east, -2..+5 on each axis
+	wc2ai::Place place = wc2ai::FleePoint(20, 20, 2, 0, 0, 64, 64);
+	CHECK(place.found);
+	CHECK(place.x == 22);
+	CHECK(place.y == 18);
+	place = wc2ai::FleePoint(20, 20, 2, 7, 7, 64, 64);
+	CHECK(place.x == 29);
+	CHECK(place.y == 25);
+	// south-west, the random value taken as 0..7
+	place = wc2ai::FleePoint(20, 20, 5, 10, 2, 64, 64);
+	CHECK(place.x == 16);
+	CHECK(place.y == 24);
+	// kept on the map
+	place = wc2ai::FleePoint(1, 62, 5, 0, 7, 64, 64);
+	CHECK(place.x == 0);
+	CHECK(place.y == 63);
+}
+
+TEST_CASE("computer: further hall: the mine's stock, the hall window and the distance cut")
+{
+	// stock word >= 50, taken as hundreds of gold (NEEDS LIVE)
+	CHECK(wc2ai::FurtherHallMineStock(5000));
+	CHECK_FALSE(wc2ai::FurtherHallMineStock(4999));
+	CHECK_FALSE(wc2ai::FurtherHallMineStock(4000));
+	// an enemy (any) hall within 5 tiles of the mine refuses it: window (x - 5 .. x + 7) on both axes
+	const int mx = 40;
+	const int my = 40;
+	CHECK(wc2ai::FurtherHallWindowHit(mx, my, 44, 44, 4, 4));
+	CHECK(wc2ai::FurtherHallWindowHit(mx, my, 47, 40, 4, 4));   // left column on mine.x + 7
+	CHECK_FALSE(wc2ai::FurtherHallWindowHit(mx, my, 48, 40, 4, 4));
+	CHECK(wc2ai::FurtherHallWindowHit(mx, my, 32, 32, 4, 4));   // last tile on mine.x - 5
+	CHECK_FALSE(wc2ai::FurtherHallWindowHit(mx, my, 31, 32, 4, 4));
+	CHECK_FALSE(wc2ai::FurtherHallWindowHit(mx, my, 40, 31, 4, 4));
+	// distance from the place's top-left tile to the mine's nearest tile (3 x 3 mine)
+	CHECK(wc2ai::PointToBoxDistance(40, 40, mx, my, 3, 3) == 0);
+	CHECK(wc2ai::PointToBoxDistance(43, 41, mx, my, 3, 3) == 1);
+	CHECK(wc2ai::PointToBoxDistance(36, 30, mx, my, 3, 3) == 10);
+	CHECK(wc2ai::PointToBoxDistance(53, 42, mx, my, 3, 3) == 11);
+	// a place 11 tiles away is dropped
+	CHECK(wc2ai::FurtherHallKeeps(10));
+	CHECK_FALSE(wc2ai::FurtherHallKeeps(11));
+	// the first of equal mines wins, a strictly nearer one replaces it
+	CHECK(wc2ai::NearestOf({4, 4, 4}, false) == 0);
+	CHECK(wc2ai::NearestOf({-1, 6, 3, 3}, false) == 2);
+}
+
+TEST_CASE("computer: reserved tiles: kinds, squares, roads and the saved text")
+{
+	using wc2ai::ReserveKind;
+	CHECK(wc2ai::ReserveKindOf(0x3A) == ReserveKind::None);   // farm
+	CHECK(wc2ai::ReserveKindOf(0x40) == ReserveKind::None);   // scout tower
+	CHECK(wc2ai::ReserveKindOf(0x56) == ReserveKind::None);   // oil platform
+	CHECK(wc2ai::ReserveKindOf(0x5C) == ReserveKind::None);   // gold mine
+	CHECK(wc2ai::ReserveKindOf(0x3C) == ReserveKind::Border); // barracks
+	CHECK(wc2ai::ReserveKindOf(0x4B) == ReserveKind::Border); // great hall
+	CHECK(wc2ai::ReserveKindOf(0x5B) == ReserveKind::Border); // fortress
+	CHECK(wc2ai::ReserveKindOf(0x48) == ReserveKind::Coast);  // shipyard
+	CHECK(wc2ai::ReserveKindOf(0x4F) == ReserveKind::Coast);  // foundry
+	CHECK(wc2ai::ReserveKindOf(0x55) == ReserveKind::Coast);  // refinery
+
+	const int w = 16;
+	const int h = 12;
+	std::vector<uint8_t> tiles(w * h, 0);
+	// a planned 3 x 3 site at (5, 5): the border only
+	wc2ai::ReserveSquare(tiles, w, h, 5, 5, 3, 1, false);
+	CHECK(wc2ai::ReservedAny(tiles, w, h, 4, 4, 1, 1));
+	CHECK(wc2ai::ReservedAny(tiles, w, h, 8, 8, 1, 1));
+	CHECK_FALSE(wc2ai::ReservedAny(tiles, w, h, 5, 5, 3, 3));
+	CHECK_FALSE(wc2ai::ReservedAny(tiles, w, h, 9, 5, 3, 3));
+	// a building touching the border is refused: the computer's buildings keep a gap of one tile
+	CHECK(wc2ai::ReservedAny(tiles, w, h, 8, 5, 3, 3));
+	// a map-placed building: the footprint too, cut at the map edge
+	wc2ai::ReserveSquare(tiles, w, h, 0, 0, 2, 1, true);
+	CHECK(wc2ai::ReservedAny(tiles, w, h, 0, 0, 1, 1));
+	CHECK(wc2ai::ReservedAny(tiles, w, h, 2, 2, 1, 1));
+	CHECK_FALSE(wc2ai::ReservedAny(tiles, w, h, 3, 0, 1, 3));
+	// off the map is never reserved
+	CHECK_FALSE(wc2ai::ReservedAny(tiles, w, h, -3, -3, 2, 2));
+
+	// the road: a line from the depot toward the mine, each tile after its step
+	// (0x4B7890 / 0x4B7630: error from half the major length, the minor step when it falls to 0)
+	const auto road = wc2ai::RoadTiles(10, 10, 16, 13);
+	REQUIRE(road.size() == 5);
+	CHECK(road.front().x == 11);
+	CHECK(road.front().y == 11);
+	CHECK(road.back().x == 15);
+	CHECK(road.back().y == 13);
+	for (size_t i = 1; i < road.size(); ++i) {
+		CHECK(std::abs(road[i].x - road[i - 1].x) <= 1);
+		CHECK(std::abs(road[i].y - road[i - 1].y) <= 1);
+	}
+	// ends where the mine's row or column is reached
+	CHECK((road.back().x == 16 || road.back().y == 13));
+	const auto diagonal = wc2ai::RoadTiles(0, 0, 4, 4);
+	REQUIRE(diagonal.size() == 4);
+	CHECK(diagonal[3].x == 4);
+	CHECK(diagonal[3].y == 4);
+	// a steep line stops when it reaches the mine's column, short of its row
+	const auto steep = wc2ai::RoadTiles(10, 10, 12, 20);
+	REQUIRE(steep.size() == 8);
+	CHECK(steep.back().x == 12);
+	CHECK(steep.back().y == 18);
+	// a long flat line: 15 tiles, the minor steps at x = 15 and x = 25, stops on the mine's row
+	const auto flat = wc2ai::RoadTiles(10, 10, 30, 12);
+	REQUIRE(flat.size() == 15);
+	for (const wc2ai::Place &tile : flat) {
+		CHECK(tile.y == (tile.x < 15 ? 10 : tile.x < 25 ? 11 : 12));
+	}
+	CHECK(flat.back().x == 25);
+	// one tile each way: the error starts at 1, not 0
+	const auto one = wc2ai::RoadTiles(10, 10, 11, 11);
+	REQUIRE(one.size() == 1);
+	CHECK(one[0].x == 11);
+	CHECK(one[0].y == 11);
+
+	// saved text and back
+	CHECK(wc2ai::ReservedText(std::vector<uint8_t>(10, 0)).empty());
+	const std::vector<uint8_t> marks{0, 1, 1, 0, 0, 1, 0, 1, 1, 1};
+	CHECK(wc2ai::ReservedText(marks) == "1,2,5,1,7,3");
+	CHECK(wc2ai::ReservedFromText("1,2,5,1,7,3", 10) == marks);
+	CHECK(wc2ai::ReservedFromText(wc2ai::ReservedText(tiles), tiles.size()) == tiles);
+	CHECK(wc2ai::ReservedFromText("8,5", 10) == std::vector<uint8_t>{0, 0, 0, 0, 0, 0, 0, 0, 1, 1});
+	CHECK(wc2ai::ReservedFromText("", 3) == std::vector<uint8_t>(3, 0));
+}
+
+TEST_CASE("computer: reserved tiles: what the haul-way rule covers that the marks do not")
+{
+	// A depot and a mine on one row or one column: the original marks no road at all, so the
+	// port's haul-way rule (AiPlaceOnHaulWay) is the only thing keeping that way free.
+	CHECK(wc2ai::RoadTiles(10, 10, 20, 10).empty());
+	CHECK(wc2ai::RoadTiles(10, 10, 10, 20).empty());
+	// A road stops at the mine's row or column: the rest of the way is not marked.
+	const auto road = wc2ai::RoadTiles(10, 10, 30, 12);
+	REQUIRE_FALSE(road.empty());
+	CHECK(road.back().y == 12);
+	CHECK(road.back().x < 30);
+}
+
+namespace
+{
+bool HaulOpenAll(int, int, void *)
+{
+	return true;
+}
+bool HaulOpenNotRow7(int, int y, void *)
+{
+	return y != 7;
+}
+} // namespace
+
+TEST_CASE("computer: haul way: a building beside the mine-hall line is allowed (live run 43, item 2)")
+{
+	// Plains of snow, run 43: gold mine 3x3 at (11, 6), Great Hall 4x4 at (17, 9).
+	const wc2ai::Site hall{17, 9, 4, 4};
+	const wc2ai::Site mine{11, 6, 3, 3};
+	const auto line = wc2ai::HaulLineTiles(hall, mine);
+	REQUIRE(line.size() == 3);
+	CHECK((line[0].x == 16 && line[0].y == 9));
+	CHECK((line[1].x == 15 && line[1].y == 9));
+	CHECK((line[2].x == 14 && line[2].y == 8));
+	// the same tiles either way round
+	const auto back = wc2ai::HaulLineTiles(mine, hall);
+	REQUIRE(back.size() == 3);
+	CHECK((back[0].x == 14 && back[0].y == 8));
+	CHECK((back[2].x == 16 && back[2].y == 9));
+
+	// the original's Pig Farms (2x2): beside the line at (13, 9), south of the mine at (11, 9),
+	// north of it at (15, 5) - all allowed
+	CHECK_FALSE(wc2ai::HaulLineBlocked(13, 9, 2, 2, line, HaulOpenAll, nullptr));
+	CHECK_FALSE(wc2ai::HaulLineBlocked(11, 9, 2, 2, line, HaulOpenAll, nullptr));
+	CHECK_FALSE(wc2ai::HaulLineBlocked(15, 5, 2, 2, line, HaulOpenAll, nullptr));
+	// touching the line only at a corner
+	CHECK_FALSE(wc2ai::HaulLineBlocked(13, 9, 1, 1, line, HaulOpenAll, nullptr));
+	CHECK_FALSE(wc2ai::HaulLineBlocked(15, 7, 1, 1, line, HaulOpenAll, nullptr));
+	// on the line: refused
+	CHECK(wc2ai::HaulLineBlocked(14, 7, 2, 2, line, HaulOpenAll, nullptr));
+	CHECK(wc2ai::HaulLineBlocked(15, 9, 1, 1, line, HaulOpenAll, nullptr));
+	// beside the line with the ground across it closed (the way would be one tile wide): refused
+	CHECK(wc2ai::HaulLineBlocked(13, 9, 2, 2, line, HaulOpenNotRow7, nullptr));
+	// a farm whose corner meets the line across closed ground is still allowed
+	CHECK_FALSE(wc2ai::HaulLineBlocked(13, 9, 1, 1, line, HaulOpenNotRow7, nullptr));
+
+	// a depot and a mine on one row: the line between them (the original marks no road there)
+	const auto row = wc2ai::HaulLineTiles({10, 10, 4, 4}, {20, 10, 3, 3});
+	REQUIRE(row.size() == 6);
+	for (size_t i = 0; i < row.size(); ++i) {
+		CHECK(row[i].x == 14 + static_cast<int>(i));
+		CHECK(row[i].y == (i < 3 ? 12 : 11)); // centre rows 12 and 11: the step at half way
+	}
+}
+
+namespace
+{
+bool HaulOpenNotFarm115_64(int x, int y, void *)
+{
+	return !(x >= 115 && x <= 116 && y >= 64 && y <= 65);
+}
+} // namespace
+
+TEST_CASE("computer: haul way: farms touching the computer's own gold mine (live run 53, 2 of 2)")
+{
+	// Forsaken Isles BNE, run 53: Town Hall 4x4 at (119, 64), gold mine 3x3 at (112, 64). The
+	// original's computer put Farms (2x2) touching the mine's E side: 115,66 and 115,68 (games 1
+	// and 2), 115,62 and 115,64 (game 2).
+	const wc2ai::Site hall{119, 64, 4, 4};
+	const wc2ai::Site mine{112, 64, 3, 3};
+	const auto line = wc2ai::HaulLineTiles(hall, mine);
+	REQUIRE(line.size() == 4);
+	CHECK((line[0].x == 118 && line[0].y == 66));
+	CHECK((line[3].x == 115 && line[3].y == 65));
+	// the hall and the mine share rows: the original marks no road (nothing reserved between them)
+	CHECK(wc2ai::RoadTiles(hall.x, hall.y, mine.x, mine.y).empty());
+	// touching the mine is allowed: 115,66, 115,68 and 115,62 pass the port's haul-way rule
+	CHECK_FALSE(wc2ai::HaulLineBlocked(115, 66, 2, 2, line, HaulOpenAll, nullptr));
+	CHECK_FALSE(wc2ai::HaulLineBlocked(115, 68, 2, 2, line, HaulOpenAll, nullptr));
+	CHECK_FALSE(wc2ai::HaulLineBlocked(115, 62, 2, 2, line, HaulOpenAll, nullptr));
+	// the one difference: 115,64 covers the mine-hall line; the port's safety rule (not the
+	// original's) refuses it, and with it standing 115,66 would leave the way one tile wide
+	CHECK(wc2ai::HaulLineBlocked(115, 64, 2, 2, line, HaulOpenAll, nullptr));
+	CHECK(wc2ai::HaulLineBlocked(115, 66, 2, 2, line, HaulOpenNotFarm115_64, nullptr));
+	// the four live sites lie on the farm grid (step 2) round the hall: the walk reaches each one
+	for (const auto &site : std::vector<std::pair<int, int>>{{115, 66}, {115, 68}, {115, 62}, {115, 64}}) {
+		WalkMap map;
+		map.fit = {site};
+		const wc2ai::Place place = Walk(map, hall.x, hall.y, wc2ai::PlaceStep(0x3A), 128);
+		CHECK((place.found && place.x == site.first && place.y == site.second));
+	}
+}
+
+TEST_CASE("target score: the classes, Priority less d * d / 4, the floor 1")
+{
+	// the four classes (Priority 0, distance 0)
+	CHECK(wc2ai::TargetScore(false, false, true, 0, 0) == 1);
+	CHECK(wc2ai::TargetScore(false, true, true, 0, 0) == 1);
+	CHECK(wc2ai::TargetScore(true, false, false, 0, 0) == 0x10000);
+	CHECK(wc2ai::TargetScore(true, true, false, 0, 0) == 0x10000);
+	CHECK(wc2ai::TargetScore(true, false, true, 0, 0) == 0x20000);
+	CHECK(wc2ai::TargetScore(true, true, true, 0, 0) == 0x30000);
+	// a footman at 2 tiles beats a peasant at 1 (both in range): 60 - 1 against 50 - 0
+	CHECK(wc2ai::TargetScore(true, false, true, 60, 2) == 0x20000 + 59);
+	CHECK(wc2ai::TargetScore(true, false, true, 50, 1) == 0x20000 + 50);
+	// out of range: a ballista at 6 (70 - 9) beats a footman at 4 (60 - 4)
+	CHECK(wc2ai::TargetScore(true, false, false, 70, 6) == 0x10000 + 61);
+	CHECK(wc2ai::TargetScore(true, false, false, 60, 4) == 0x10000 + 56);
+	// any armed enemy beats any unarmed one; an armed one in range beats one out of range
+	CHECK(wc2ai::TargetScore(true, false, false, 0, 20) > wc2ai::TargetScore(false, false, true, 255, 0));
+	CHECK(wc2ai::TargetScore(true, false, true, 0, 4) > wc2ai::TargetScore(true, false, false, 255, 5));
+	// d * d / 4 rounds down: 3 -> 2, 5 -> 6, 7 -> 12
+	CHECK(wc2ai::TargetScore(true, false, true, 40, 3) == 0x20000 + 38);
+	CHECK(wc2ai::TargetScore(true, false, true, 40, 5) == 0x20000 + 34);
+	CHECK(wc2ai::TargetScore(true, false, true, 40, 7) == 0x20000 + 28);
+	// the floor: an unarmed target far off still scores 1
+	CHECK(wc2ai::TargetScore(false, false, false, 20, 30) == 1);
+	CHECK(wc2ai::TargetScore(false, false, true, 20, 9) == 1);
+	CHECK(wc2ai::TargetScore(false, false, true, 20, 8) == 4);
+
+	// the minimum distance by type number
+	CHECK(wc2ai::MinSearchDistance(0x04) == 2); // ballista
+	CHECK(wc2ai::MinSearchDistance(0x05) == 2); // catapult
+	CHECK(wc2ai::MinSearchDistance(0x1E) == 1); // destroyers
+	CHECK(wc2ai::MinSearchDistance(0x1F) == 1);
+	CHECK(wc2ai::MinSearchDistance(0x20) == 1); // battleship, juggernaut
+	CHECK(wc2ai::MinSearchDistance(0x21) == 1);
+	CHECK(wc2ai::MinSearchDistance(0x62) == 1); // cannon towers
+	CHECK(wc2ai::MinSearchDistance(0x63) == 1);
+	CHECK(wc2ai::MinSearchDistance(0x00) == 0); // footman
+	CHECK(wc2ai::MinSearchDistance(0x60) == 0); // guard tower
+	CHECK(wc2ai::MinSearchDistance(-1) == 0);
+	CHECK(wc2ai::SubmarineKind(0x26));
+	CHECK(wc2ai::SubmarineKind(0x27));
+	CHECK_FALSE(wc2ai::SubmarineKind(0x20));
+}
+
+TEST_CASE("ship hit, ORIG47 E4: the Footman (0x20038) beats the Archer (0x20036) nearer to the ship")
+{
+	// ship top-left 56,52, range 4; Footman 55,48 d 4, Priority 60; Archer 54,50 d 2, Priority 55
+	const int footman = wc2ai::TargetScore(true, false, true, 60, 4);
+	const int archer = wc2ai::TargetScore(true, false, true, 55, 2);
+	CHECK(footman == 0x20038);
+	CHECK(archer == 0x20036);
+	CHECK(footman > archer);
+}
+
+TEST_CASE("patrol memory: flyers and ships on a nearly straight leg are not remembered")
+{
+	// a footman: every leg
+	CHECK(wc2ai::PatrolRememberLeg(false, 5, 0));
+	CHECK(wc2ai::PatrolRememberLeg(false, 0, 1));
+	CHECK(wc2ai::PatrolRememberLeg(false, 0, 0));
+	// a ship on a horizontal or vertical leg, or one tile off it
+	CHECK_FALSE(wc2ai::PatrolRememberLeg(true, 8, 0));
+	CHECK_FALSE(wc2ai::PatrolRememberLeg(true, -8, 1));
+	CHECK_FALSE(wc2ai::PatrolRememberLeg(true, 0, -6));
+	CHECK_FALSE(wc2ai::PatrolRememberLeg(true, 1, 6));
+	// a flyer off both axes by more than one tile
+	CHECK(wc2ai::PatrolRememberLeg(true, 3, 3));
+	CHECK(wc2ai::PatrolRememberLeg(true, -2, 2));
+	CHECK_FALSE(wc2ai::PatrolRememberLeg(true, 2, 1));
+}
+
+TEST_CASE("patrol memory: the re-issue waits 40 game cycles after the last one")
+{
+	CHECK(wc2ai::PatrolReissueWait == 40);
+	// counter at 0 (a new leg): at once
+	CHECK(wc2ai::PatrolReissueReady(0, 0));
+	CHECK(wc2ai::PatrolReissueReady(1234, 0));
+	// re-issued at cycle 1000: not at 1039, at 1040
+	const unsigned long at = 1000 + wc2ai::PatrolReissueWait;
+	CHECK_FALSE(wc2ai::PatrolReissueReady(1000, at));
+	CHECK_FALSE(wc2ai::PatrolReissueReady(1039, at));
+	CHECK(wc2ai::PatrolReissueReady(1040, at));
+	CHECK(wc2ai::PatrolReissueReady(1100, at));
+}
+
+TEST_CASE("attack-move memory: sent again from 2 tiles with a 20-cycle counter, forgotten within 1")
+{
+	using wc2ai::Reissue;
+	// counter at 0: 2 or more tiles on either axis -> sent again
+	CHECK(wc2ai::AttackMoveReissue(500, 0, 2, 0) == Reissue::Ready);
+	CHECK(wc2ai::AttackMoveReissue(500, 0, 0, -2) == Reissue::Ready);
+	CHECK(wc2ai::AttackMoveReissue(500, 0, -7, 1) == Reissue::Ready);
+	// within 1 on both axes (or on the point) -> forgotten
+	CHECK(wc2ai::AttackMoveReissue(500, 0, 0, 0) == Reissue::Forget);
+	CHECK(wc2ai::AttackMoveReissue(500, 0, 1, -1) == Reissue::Forget);
+	CHECK(wc2ai::AttackMoveReissue(500, 0, -1, 1) == Reissue::Forget);
+	// re-issued at 1000: the counter runs until 1020 -> stand, keep it, whatever the distance
+	const unsigned long at = 1000 + wc2ai::AttackMoveRetryWait;
+	CHECK(wc2ai::AttackMoveReissue(1000, at, 5, 5) == Reissue::Wait);
+	CHECK(wc2ai::AttackMoveReissue(1019, at, 5, 5) == Reissue::Wait);
+	CHECK(wc2ai::AttackMoveReissue(1019, at, 0, 0) == Reissue::Wait);
+	CHECK(wc2ai::AttackMoveReissue(1020, at, 5, 5) == Reissue::Ready);
+	CHECK(wc2ai::AttackMoveReissue(1020, at, 1, 0) == Reissue::Forget);
 }

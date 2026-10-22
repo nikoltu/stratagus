@@ -37,6 +37,7 @@
 ----------------------------------------------------------------------------*/
 
 #include "actions.h"
+#include "idle_bob.h"
 #include "pathfinder.h"
 #include "settings.h"
 
@@ -187,6 +188,8 @@ public:
 	void Release(bool final = false);
 
 	bool RestoreOrder();
+	/// Does the saved order hold a remembered patrol or attack-move (kept while the unit stands)?
+	bool SavedOrderIsMemory() const;
 	bool CanStoreOrder(COrder *order);
 
 	// Cowards and invisible units don't attack unless ordered.
@@ -299,6 +302,19 @@ public:
 		return AttackDistanceBetweenTypes(*Type, tilePos, *dst.Type, dst.tilePos);
 	}
 
+	/// The distance a spell's cast range is compared with: the larger of the x and y tile gaps
+	/// to dst (the original's range test 0x4C2140, both tile offsets <= range)
+	int SpellDistanceTo(const CUnit &dst) const
+	{
+		return AttackDistanceBetweenTypes(*Type, tilePos, *dst.Type, dst.tilePos);
+	}
+
+	/// The same for a tile goal
+	int SpellDistanceTo(const Vec2i &pos) const
+	{
+		return ChebyshevEdgeDistance(tilePos, Vec2i(Type->TileWidth, Type->TileHeight), pos, Vec2i(1, 1));
+	}
+
 	/**
 	**  Test if unit can move.
 	**  For the moment only check for move animation.
@@ -370,6 +386,7 @@ public:
 	int LastPixelX = 0;         /// absolute on-map pixel pos at the previous game cycle
 	int LastPixelY = 0;         /// (render-side movement interpolation; not gameplay state)
 	int LastFrame = 0;          /// unit.Frame at the previous game cycle (render-side sprite tween)
+	IdleBobState IdleBob;       /// a flyer's idle bob (idle_bob.h; drawing only, not saved)
 	unsigned char Direction = 0; //: 8; /// angle (0-255) unit looking
 	unsigned char CurrentResource = 0;
 	int ResourcesHeld = 0;      /// Resources Held by a unit
@@ -413,6 +430,13 @@ public:
 	/// What holds the unit to HomePos (home_leash.h, HomeRole): 0 nothing, 1 a guard on its map
 	/// tile, 2 held to the place it was sent to, 4 a wanderer.
 	unsigned char HomeRole = 0;
+	/// The original's remembered attacker (0x495C90 [victim+0x54]): set by a hit when the unit
+	/// remembers no living attacker; while it lives, further hits call no friends. Ref-counted.
+	CUnitPtr LastAttacker;
+	/// GameCycle of the hit that stored LastAttacker. A building that does not attack forgets
+	/// the attacker one cycle after the hit (run 72: cleared 1-3 frames after every farm hit). Not
+	/// saved: a loaded mark counts as old.
+	unsigned long LastAttackerCycle = 0;
 	/// nullptr if the unit was not rescued.
 	/* Seen stuff. */
 	int VisCount[PlayerMax]{}; /// Unit visibility counts
@@ -466,6 +490,10 @@ public:
 */
 #define UnitNumber(unit) ((unit).UnitManagerData.GetUnitId())
 
+// Classic view (video.h, ui.h): Preference.ClassicView reads and sets it.
+extern bool IsClassicView();
+extern bool RequestClassicView(bool on);
+
 /**
 **  User preference.
 */
@@ -491,6 +519,11 @@ public:
 	bool SelectionRectangleIndicatesDamage = false; /// If true, the selection rectangle interpolates color to indicate damage
 	bool FormationMovement = true; /// If true, player controlled units stay in formation
 	bool SmoothUnitAnimation = true; /// Cross-fade walk-animation poses between logic cycles (render-only)
+	bool HoldFrameUnderWindow = true; /// PERF-A3a: paused single player with a window up: the game under it is not drawn again
+	bool AnimatedWater = true; /// HD water layer on (owner decision 87, Options -> Preferences "Animated Water"); drawing only
+	bool UnitSpeech = true;    /// Options -> Sound "Unit Speech": units' selection / ready / job-done voices (UnitVoiceEnabled)
+	bool UnitAck = true;       /// Options -> Sound "Unit Acknowledgements": units' answers to orders (UnitVoiceEnabled)
+	bool BuildingSound = true; /// Options -> Sound "Building Sound": buildings' selection / construction / ready sounds (UnitVoiceEnabled)
 
 	int FrameSkip = 0;          /// Mask used to skip rendering frames (useful for slow renderers that keep up with the game logic, but not the rendering to screen like e.g. original Raspberry Pi)
 
@@ -542,6 +575,11 @@ public:
 		AllyDepositsAllowed = v;
 		GameSettings.AllyDepositsAllowed = v;
 	}
+	// Classic view: presentation only, never read by the simulation, not in a saved game, not
+	// in a network message, not written with the preferences (the original keeps the choice for
+	// the session only: ORIG11 section 7, U3). One state, kept by the video module.
+	bool get_ClassicView() const { return IsClassicView(); }
+	void set_ClassicView(bool v) { RequestClassicView(v); }
 #endif
 };
 
@@ -587,15 +625,21 @@ void FindNearestDrop(const CUnitType &type, const Vec2i &goalPos, Vec2i &resPos,
 extern void UnitLost(CUnit &unit);
 /// Remove the Orders of a Unit
 extern void UnitClearOrders(CUnit &unit);
+/// Take a unit being destroyed out of the selections and the cursor
+extern void LeaveSelectionOnRelease(CUnit &unit);
 /// @todo more docu
 extern void UpdateForNewUnit(const CUnit &unit, int upgrade);
 
 extern CUnit *GetFirstContainer(const CUnit &unit);
+/// After a saved game is read: mark the sight of a removed unit inside a container (FOW-SAVE)
+extern void MapMarkInsideUnitSightAfterLoad(CUnit &unit);
 
 /// Call when an Unit goes under fog.
 extern void UnitGoesUnderFog(CUnit &unit, const CPlayer &player);
 /// Call when an Unit goes out of fog.
 extern void UnitGoesOutOfFog(CUnit &unit, const CPlayer &player);
+/// LOAD-CRASH-3473: a unit known under fog with no remembered look gets one after a load
+extern void UnitFillMissingSeenAfterLoad(CUnit &unit);
 
 /// Does a recount for VisCount
 extern void UnitCountSeen(CUnit &unit);
@@ -614,6 +658,12 @@ extern void SetUnitMapFixed(CUnit &unit);
 extern bool UnitHeldByHome(const CUnit &unit);
 /// The original's 50-cycle pass: idle units of computer players that stand too far from home walk home
 extern void UnitsHomeLeashPass(const std::vector<CUnit *> &units);
+/// The unit's remembered attacker while it lives; a dead one is forgotten here (nullptr then)
+extern CUnit *RememberedAttacker(CUnit &unit);
+/// A hit's memory gate: false (nothing stored) while a living attacker is remembered, else store
+extern bool RememberAttacker(CUnit &victim, CUnit &attacker);
+/// The " \"remembered-attacker\", \"Uxxxx\"," part of a saved unit ("" when none is remembered)
+extern std::string RememberedAttackerText(const CUnit &unit);
 
 /// Convert direction (dx,dy) to heading (0-255)
 extern int DirectionToHeading(const Vec2i &dir);
@@ -762,6 +812,10 @@ extern void RemoveUnitFromGroups(CUnit &unit);
 /// Register CCL group features
 extern void GroupCclRegister();
 extern bool IsGroupTainted(int num);
+/// The group of `bits` (bit n = group n) that was given units last by the stamps (higher = later); -1 if none
+extern int LastGroupOfBits(unsigned int bits, const unsigned long *stamps, int count);
+/// The group the unit was put in last (owner decision 71: its slot is marked); -1 if it is in none
+extern int GetLastGroupOfUnit(const CUnit &unit);
 
 // in selection.c
 
@@ -774,6 +828,8 @@ extern void SaveSelection();
 extern void RestoreSelection();
 /// Clear current selection
 extern void UnSelectAll();
+/// Take destroyed / order-less units out of the selection (draw guard); returns how many
+extern int DropUnreadableSelectedUnits();
 /// Changed TeamUnit Selection
 extern void ChangeTeamSelectedUnits(CPlayer &player, const std::vector<CUnit *> &units);
 /// Add a unit to selection

@@ -65,11 +65,20 @@ public:
 	std::string localHost;  /// Local network address to use
 	unsigned int localPort; /// Local network port to use
 	unsigned int gameCyclesPerUpdate;  /// Network update each # game cycles
-	unsigned int NetworkLag;      /// Network lag (# update cycles)
+	unsigned int NetworkLag;      /// Network lag (# update cycles) of the running game
+	/// Lag of a network game as the room set it up: the host's own value, sent to every joiner
+	/// in the welcome and taken over by him. NetworkOnStartGame makes it the game's NetworkLag.
+	unsigned int SetupLag;
 	unsigned int timeoutInS;      /// Number of seconds until player times out
+
+	/// The lag a game runs with: 1 for a single-player game; for a network game the set-up
+	/// lag, at least two updates and at most kMaxLag (the command queue holds 256 cycles).
+	static unsigned int GameLag(bool networkGame, unsigned int setupLag, unsigned int cyclesPerUpdate);
 
 public:
 	static const int defaultPort = 6660; /// Default communication port
+	static constexpr unsigned int defaultLag = 10; /// Set-up lag unless a host sets another
+	static constexpr unsigned int kMaxLag = 128;  /// Greatest lag a game runs with
 public:
 	static CNetworkParameter Instance;
 };
@@ -215,6 +224,8 @@ extern bool NetworkChat(const std::string &raw);
 extern bool NetworkChatIsDirect();
 /// Once per drawn frame of a game: tell the host whether there is a chat, take what its player typed
 extern void NetworkChatFrame();
+/// The launcher's "Cheat entry" (INGAME_HUD_AND_MENU 5.4): the chat line in a single-player game, for cheats only
+extern bool NetworkCheatEntry;
 
 extern void NetworkCclRegister();
 

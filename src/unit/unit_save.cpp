@@ -89,6 +89,7 @@ void PathFinderOutput::Save(CFile &file) const
 
 	if (this->Fast) {
 		file.printf("\"fast\", %d, ", this->Fast);
+		file.printf("\"waited\", %d, \"last-wait\", %d, ", this->Waited, this->LastWait);
 	}
 	if (this->OverflowLength) {
 		file.printf("\"overflow-length\", %d, ", this->OverflowLength);
@@ -132,6 +133,18 @@ std::string UnitSmallFieldsText(int underAttack, int justMoved, bool zDisplaced,
 		text += " \"colors\", " + std::to_string(colors) + ",";
 	}
 	return text;
+}
+
+/**
+**  The remembered attacker's part of a saved unit, a unit reference as the other ones. A file
+**  without it (saved game format 2 or older) reads as "none remembered".
+*/
+std::string RememberedAttackerText(const CUnit &unit)
+{
+	if (!unit.LastAttacker) {
+		return "";
+	}
+	return " \"remembered-attacker\", \"" + UnitReference(*unit.LastAttacker.get()) +"\",";
 }
 
 void SaveUnit(const CUnit &unit, CFile &file)
@@ -214,6 +227,9 @@ void SaveUnit(const CUnit &unit, CFile &file)
 	// After "home": a file without it is read as before roles were saved (a home makes a guard).
 	if (unit.HomeRole) {
 		file.printf(" \"home-role\", %d,", unit.HomeRole);
+	}
+	if (unit.LastAttacker) {
+		file.printf("%s", RememberedAttackerText(unit).c_str());
 	}
 	// n0b0dy: How is this useful?
 	// mr-russ: You can't always load units in order, it saved the information

@@ -224,6 +224,7 @@ private:
 private:
 	std::string name;
 	CHost serverHost;  /// IP:port of server to join
+	unsigned int foreignDropped = 0; /// room messages dropped for coming from another host
 	NetworkState networkState;
 	unsigned char lastMsgTypeSent;  /// Subtype of last InitConfig message sent
 	CUDPSocket *socket;
@@ -394,6 +395,7 @@ void CClient::Init(const std::string &name, CUDPSocket *socket, CServerSetup *se
 	this->name = name;
 	this->socket = socket;
 	lastProbeTick = 0;
+	foreignDropped = 0;
 }
 
 void CClient::DetachFromServer()
@@ -766,8 +768,22 @@ bool CClient::Parse(const unsigned char *buf, const CHost &host)
 	if (header.GetType() != MessageInit_FromServer) {
 		return true;
 	}
-	// Assert(host == this->serverHost);
 	const unsigned char msgsubtype = header.GetSubType();
+	// Room messages count only from the server this client joined; anyone else on the
+	// network could otherwise quit, reconfigure or start the room for it.
+	if (host != this->serverHost) {
+		++foreignDropped;
+		if (foreignDropped == 1 || foreignDropped % 100 == 0) {
+			const std::string hostStr = host.toString();
+			const std::string serverHostStr = serverHost.toString();
+			ErrorPrint("Dropped room message %d from '%s', not the server '%s' (%u dropped)\n",
+			           int(msgsubtype),
+			           hostStr.c_str(),
+			           serverHostStr.c_str(),
+			           foreignDropped);
+		}
+		return true;
+	}
 
 	DebugPrint("Received %s in state %s\n",
 	           icmsgsubtypenames[msgsubtype],
@@ -910,6 +926,46 @@ bool IsSafeMapTransferName(std::string_view name)
 		}
 	}
 	return false;
+}
+
+/**
+**  The files sent for a map: those of its directory whose name without its extensions is the
+**  map's (x.smp, x.sms, x.smp.gz ...). A map from the game folder may have no directory under
+**  the library path; the directory is then read as empty and the transfer ends at once.
+*/
+std::set<fs::path> MapTransferFiles(const fs::path &mapDirectory, const fs::path &prefix)
+{
+	std::set<fs::path> files;
+	std::error_code ec;
+	fs::directory_iterator it(mapDirectory, ec);
+	for (const fs::directory_iterator end; !ec && it != end; it.increment(ec)) {
+		fs::path stem(it->path().filename());
+		while (stem.stem() != stem) {
+			stem = stem.stem();
+		}
+		if (stem == prefix) {
+			files.insert(it->path());
+		}
+	}
+	return files;
+}
+
+/**
+**  The name a sent file goes under: its path relative to the library path. Empty for a file
+**  outside it (a walk up from such a file would never meet the library path).
+*/
+std::string MapTransferNetworkName(const fs::path &libPath, const fs::path &file)
+{
+	fs::path end(file.filename());
+	fs::path start(file.parent_path());
+	while (start != libPath) {
+		if (start.empty() || !start.has_relative_path() || start.parent_path() == start) {
+			return {};
+		}
+		end = *--start.end() / end;
+		start = start.parent_path();
+	}
+	return end.generic_u8string();
 }
 
 /// The map file being received; its data goes to "<name>.part" until it is complete.
@@ -1074,7 +1130,8 @@ void CClient::Parse_Welcome(const unsigned char *buf)
 	networkState.MsgCnt = 0;
 	networkState.StateArg = 0;
 	NetLocalHostsSlot = msg.NetHostSlot;
-	CNetworkParameter::Instance.NetworkLag = msg.Lag;
+	// The host's set-up lag; NetworkOnStartGame bounds it as on the host.
+	CNetworkParameter::Instance.SetupLag = static_cast<unsigned int>(std::max<int32_t>(msg.Lag, 0));
 	CNetworkParameter::Instance.gameCyclesPerUpdate = msg.gameCyclesPerUpdate;
 
 	OnlineContextHandler->joinGame(msg.hosts[0].PlyName, "");
@@ -1170,8 +1227,8 @@ void CClient::Parse_LuaMismatch(const unsigned char *buf)
 
 	msg.Deserialize(buf);
 	const std::string serverHostStr = serverHost.toString();
-	ErrorPrint("Incompatible Lua files version %d <-> %d \nfrom '%s'\n",
-	           FileChecksums,
+	ErrorPrint("Incompatible content %08x <-> %08x \nfrom '%s'\n",
+	           NetworkContentVersion(),
 	           msg.Version,
 	           serverHostStr.c_str());
 	networkState.State = ccs_incompatibleluafiles;
@@ -1292,16 +1349,7 @@ void CServer::Send_MapFragment(const CNetworkHost &host, uint32_t fragmentIdx)
 	mapDirectory /= NetworkMapName;
 	mapDirectory = mapDirectory.parent_path();
 
-	std::set<fs::path> sortedFilenames;
-	for (const auto &entry : fs::directory_iterator(mapDirectory)) {
-		fs::path entryPath(entry.path());
-		while (entryPath.stem() != entryPath) {
-			entryPath = entryPath.stem();
-		}
-		if (entryPath == prefix) {
-			sortedFilenames.insert(entry.path());
-		}
-	}
+	const std::set<fs::path> sortedFilenames = MapTransferFiles(mapDirectory, prefix);
 
 	fs::path currentPath;
 	std::string networkName;
@@ -1314,16 +1362,17 @@ void CServer::Send_MapFragment(const CNetworkHost &host, uint32_t fragmentIdx)
 		currentPath = p;
 
 		// work around fs::relative not being available in some experimental fs impls
-		fs::path networkPathEnd(p.filename());
-		fs::path networkPathStart(p.parent_path());
-		while (networkPathStart != libPath) {
-			networkPathEnd = *--networkPathStart.end() / networkPathEnd;
-			networkPathStart = networkPathStart.parent_path();
+		networkName = MapTransferNetworkName(libPath, p);
+		std::error_code ec;
+		const auto size = fs::file_size(p, ec);
+		if (networkName.empty() || ec || networkName.size() >= sizeof(CInitMessage_MapFileFragment::Data)) {
+			// not sendable: refuse the transfer (the end fragment below)
+			fragmentDataSize = 0;
+			break;
 		}
-		networkName = networkPathEnd.generic_u8string();
 
 		fragmentDataSize = sizeof(CInitMessage_MapFileFragment::Data) - networkName.size();
-		fileSize = fs::file_size(p);
+		fileSize = static_cast<uint32_t>(size);
 		uint32_t fragmentCountForFile = (fileSize + fragmentDataSize - 1) / fragmentDataSize;
 		if ((fragmentIdxStartForFile <= fragmentIdx) && (fragmentIdx < fragmentIdxStartForFile + fragmentCountForFile)) {
 			break;
@@ -1716,6 +1765,111 @@ void CServer::Parse_SeeYou(const int h)
 	}
 }
 
+//----------------------------------------------------------------------------
+//  Content id (NET-CONTENT-ID)
+//----------------------------------------------------------------------------
+
+const std::vector<std::string> &NetworkContentDataFiles()
+{
+	static const std::vector<std::string> files = {
+		"Data/Rez/unitdata.dat",
+		"Data/Rez/ai.bin",
+		"Data/Rez/script.bin",
+	};
+	return files;
+}
+
+namespace
+{
+/// FNV-1a, 32 bits.
+struct ContentHash {
+	uint32_t h = 2166136261u;
+	void add(const void *data, size_t n)
+	{
+		const unsigned char *p = static_cast<const unsigned char *>(data);
+		for (size_t i = 0; i != n; ++i) {
+			h ^= p[i];
+			h *= 16777619u;
+		}
+	}
+	void add(std::string_view s) { add(s.data(), s.size()); add("", 1); }
+	void addFile(const std::string &name, const fs::path &path)
+	{
+		add(name);
+		std::error_code ec;
+		if (path.empty() || !fs::is_regular_file(path, ec)) {
+			add("missing");
+			return;
+		}
+		const auto length = fs::file_size(path, ec);
+		add(std::to_string(ec ? 0 : length));
+		std::ifstream in(path, std::ios::binary);
+		if (!in) {
+			add("unreadable");
+			return;
+		}
+		char buf[65536];
+		while (in) {
+			in.read(buf, sizeof(buf));
+			add(buf, static_cast<size_t>(in.gcount()));
+		}
+		add("", 1);
+	}
+};
+
+uint32_t CachedContentVersion = 0;
+bool HaveContentVersion = false;
+} // namespace
+
+uint32_t NetworkContentIdOf(const fs::path &scriptsDir,
+                            const std::vector<std::pair<std::string, fs::path>> &dataFiles)
+{
+	std::vector<std::string> paths;
+	std::error_code ec;
+	if (!scriptsDir.empty() && fs::is_directory(scriptsDir, ec)) {
+		for (fs::recursive_directory_iterator it(scriptsDir, ec), end; !ec && it != end; it.increment(ec)) {
+			std::error_code fec;
+			if (it->is_regular_file(fec)) {
+				paths.push_back(fs::relative(it->path(), scriptsDir, fec).generic_u8string());
+			}
+		}
+	}
+	std::sort(paths.begin(), paths.end());
+	ContentHash hash;
+	hash.add("scripts");
+	for (const std::string &rel : paths) {
+		hash.addFile(rel, scriptsDir / fs::u8path(rel));
+	}
+	hash.add("data");
+	for (const auto &[name, path] : dataFiles) {
+		hash.addFile(name, path);
+	}
+	return hash.h;
+}
+
+uint32_t NetworkContentVersion()
+{
+	if (!HaveContentVersion) {
+		std::vector<std::pair<std::string, fs::path>> data;
+		for (const std::string &name : NetworkContentDataFiles()) {
+			const std::string found = LibraryFileName(name);
+			std::error_code ec;
+			data.emplace_back(name, fs::exists(fs::u8path(found), ec) ? fs::u8path(found) : fs::path());
+		}
+		const uint32_t content = NetworkContentIdOf(fs::u8path(StratagusLibPath) / "scripts", data);
+		CachedContentVersion = FileChecksums ^ content;
+		HaveContentVersion = true;
+		DebugPrint("Content version %08x (stratagus.lua %08x, content %08x)\n",
+		           CachedContentVersion, FileChecksums, content);
+	}
+	return CachedContentVersion;
+}
+
+void NetworkContentVersionReset()
+{
+	HaveContentVersion = false;
+}
+
 /**
 **  Check if the Stratagus version and Network Protocol match
 **
@@ -1738,10 +1892,12 @@ static int CheckVersions(const CInitMessage_Hello &msg, CUDPSocket &socket, cons
 		return -1;
 	}
 
-	if (msg.Version != FileChecksums) {
+	// NET-CONTENT-ID: the hello's version is the content version (scripts + game data), not
+	// stratagus.lua alone; a difference refuses the device as the "lua files" mismatch.
+	if (msg.Version != NetworkContentVersion()) {
 		const std::string hostStr = host.toString();
-		ErrorPrint("Incompatible lua files %d <-> %d\nfrom '%s'\n",
-		           FileChecksums,
+		ErrorPrint("Incompatible content %08x <-> %08x\nfrom '%s'\n",
+		           NetworkContentVersion(),
 		           msg.Version,
 		           hostStr.c_str());
 
@@ -2371,6 +2527,24 @@ void NetworkMeshProbeAnswered(int hostIndex)
 	}
 }
 
+/**
+** Client: the other clients that have not answered this device's probe (S12_SPEC 6: a joiner
+** tells net_no_path by its own mask). The server is not probed and not counted.
+**
+** @return  the number of valid host slots, not the server's and not this device's, whose
+**          bit is missing from the mask; 0 before a config arrived.
+*/
+int NetworkClientUnreachedPeers()
+{
+	int missing = 0;
+	for (int i = 1; i < PlayerMax && i < 16; ++i) {
+		if (i != NetLocalHostsSlot && Hosts[i].IsValid() && !(NetMeshProbeMask & (1 << i))) {
+			++missing;
+		}
+	}
+	return missing;
+}
+
 //
 // Test hooks (network_test_hooks.h). The game does not call these functions.
 //
@@ -2634,6 +2808,17 @@ static int CclNetStartFailure(lua_State *l)
 }
 
 /**
+**  Client: how many other clients have not answered this device's probe
+**  (NetworkClientUnreachedPeers).
+*/
+static int CclNetUnreachedPeers(lua_State *l)
+{
+	LuaCheckArgs(l, 0);
+	lua_pushnumber(l, NetworkClientUnreachedPeers());
+	return 1;
+}
+
+/**
 **  Mesh: the bounds in seconds for the games started from now on (drop, load); 0 = the default.
 */
 static int CclSetNetTimeouts(lua_State *l)
@@ -2776,6 +2961,18 @@ static int CclNetChat(lua_State *l)
 }
 
 /**
+**  The launcher's "Cheat entry" switch: a single-player game offers the chat line, for cheats.
+**
+**  @param l  Lua state: one boolean.
+*/
+static int CclSetCheatEntry(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	NetworkCheatEntry = LuaToBoolean(l, 1);
+	return 0;
+}
+
+/**
 **  Why a player is out of the game: 0 he left, 1 the connection to him was lost,
 **  2 he never started; nil while he has not quit.
 */
@@ -2808,11 +3005,13 @@ void NetworkCclRegister()
 {
 	lua_register(Lua, "NetHasLink", CclNetHasLink);
 	lua_register(Lua, "NetStartFailure", CclNetStartFailure);
+	lua_register(Lua, "NetUnreachedPeers", CclNetUnreachedPeers);
 	lua_register(Lua, "SetNetTimeouts", CclSetNetTimeouts);
 	lua_register(Lua, "NetWaitState", CclNetWaitState);
 	lua_register(Lua, "NetQuitReason", CclNetQuitReason);
 	lua_register(Lua, "NetTogglePause", CclNetTogglePause);
 	lua_register(Lua, "NetChat", CclNetChat);
+	lua_register(Lua, "SetCheatEntry", CclSetCheatEntry);
 	lua_register(Lua, "SetNetWatching", CclSetNetWatching);
 	lua_register(Lua, "NetIsWatching", CclNetIsWatching);
 	lua_register(Lua, "SetNetWaitPlate", CclSetNetWaitPlate);

@@ -45,6 +45,7 @@
 #include "icons.h"
 #include "interface.h"
 #include "map.h"
+#include "message_tap.h"
 #include "menus.h"
 #include "network.h"
 #include "player.h"
@@ -393,6 +394,41 @@ static bool CanShowContent(const ConditionPanel *condition, const CUnit &unit)
 
 using UStrInt = std::variant<int, const char *>;
 
+/*
+**  HUD-RESOURCE-WORD: the words the resources are shown with (the worker's "Carry: 20 <word>"
+**  line). The identifiers of DefineDefaultResourceNames ("gold", "wood", "oil") stay as they are
+**  -- saves, AI and scripts look resources up by them; ui.lua sets the shown word from the game's
+**  string table in the language in force.
+*/
+extern std::string DefaultResourceDisplayNames[MaxCosts];
+extern const std::string &ResourceDisplayName(int res);
+extern bool SetResourceDisplayName(std::string_view ident, const std::string &text);
+
+/// Empty = none set, the identifier is shown.
+std::string DefaultResourceDisplayNames[MaxCosts];
+
+/// The word to show for resource `res`: its shown word, or its identifier when none is set.
+const std::string &ResourceDisplayName(int res)
+{
+	if (res < 0 || res >= MaxCosts) {
+		static const std::string none;
+		return none;
+	}
+	return DefaultResourceDisplayNames[res].empty() ? DefaultResourceNames[res]
+	                                                : DefaultResourceDisplayNames[res];
+}
+
+bool SetResourceDisplayName(std::string_view ident, const std::string &text)
+{
+	for (int i = 0; i < MaxCosts; ++i) {
+		if (!DefaultResourceNames[i].empty() && DefaultResourceNames[i] == ident) {
+			DefaultResourceDisplayNames[i] = text;
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
 **  Return the value corresponding.
 **
@@ -435,9 +471,9 @@ UStrInt GetComponent(const CUnit &unit, int index, EnumVariable e, int t)
 			return 100 * var->Value / var->Max;
 		case EnumVariable::Name:
 			if (index == GIVERESOURCE_INDEX) {
-				return DefaultResourceNames[unit.Type->GivesResource].c_str();
+				return ResourceDisplayName(unit.Type->GivesResource).c_str();
 			} else if (index == CARRYRESOURCE_INDEX) {
-				return DefaultResourceNames[unit.CurrentResource].c_str();
+				return ResourceDisplayName(unit.CurrentResource).c_str();
 			} else {
 				return UnitTypeVar.VariableNameLookup[index].data();
 			}
@@ -476,7 +512,7 @@ UStrInt GetComponent(const CUnitType &type, int index, EnumVariable e, int t)
 			return 100 * var->Value / var->Max;
 		case EnumVariable::Name:
 			if (index == GIVERESOURCE_INDEX) {
-				return DefaultResourceNames[type.GivesResource].c_str();
+				return ResourceDisplayName(type.GivesResource).c_str();
 			} else {
 				return UnitTypeVar.VariableNameLookup[index].data();
 			}
@@ -838,7 +874,8 @@ public:
 	}
 
 	void UpdateMessages();
-	void AddUniqueMessage(const char *s);
+	void AddUniqueMessage(const char *s, const Vec2i *pos = nullptr);
+	bool ShownMessage(std::string &text, Vec2i &pos) const;
 	void DrawMessages();
 	void CleanMessages();
 	bool AnyShown() const { return show && Preference.ShowMessages && MessagesCount > 0; }
@@ -866,6 +903,10 @@ protected:
 
 private:
 	char Messages[MESSAGES_MAX][256];         /// Array of messages
+	Vec2i MessagesPos[MESSAGES_MAX];          /// Map position of a message's event
+	bool MessagesHasPos[MESSAGES_MAX];        /// The message has an event position
+	Vec2i AddPos;                             /// Position of the message being added
+	bool AddHasPos = false;
 	int  MessagesCount;                       /// Number of messages
 	int  MessagesScrollY;
 	unsigned long MessagesFrameTimeout;       /// Frame to expire message
@@ -884,6 +925,8 @@ void MessagesDisplay::ShiftMessages()
 		--MessagesCount;
 		for (int z = 0; z < MessagesCount; ++z) {
 			strcpy_s(Messages[z], sizeof(Messages[z]), Messages[z + 1]);
+			MessagesPos[z] = MessagesPos[z + 1];
+			MessagesHasPos[z] = MessagesHasPos[z + 1];
 		}
 	}
 }
@@ -909,6 +952,18 @@ void MessagesDisplay::UpdateMessages()
 		MessagesScrollY = 0;
 		ShiftMessages();
 	}
+}
+
+/**
+**  The screen position of the Remastered message line's text (see MessagesDisplay::DrawMessages).
+*/
+static void MessageLineOrigin(int &x, int &y)
+{
+	const int hudStep = Video.HudCanvas.Step;
+	const int faceCapTop = (int) std::lround(25.5 * Video.HudCanvas.Scale);
+	x = Video.HudCanvas.X + 182 * hudStep + UI.MessageOffsetX;
+	y = Video.HudCanvas.Y + Video.HudCanvas.H - (int) std::lround(50.4 * hudStep) - faceCapTop
+	    + UI.MessageOffsetY;
 }
 
 /**
@@ -980,11 +1035,9 @@ void MessagesDisplay::DrawMessages()
 			// faceCapTop: the HUD face's distance from a text position to the top of a capital,
 			// 25.5 px of its sheet (ui/fonts/blq55_small.png) = 17 px at k = 3. Measure again if the
 			// face changes.
-			const int hudStep = Video.HudCanvas.Step;
-			const int faceCapTop = (int) std::lround(25.5 * Video.HudCanvas.Scale);
-			const int msgX = Video.HudCanvas.X + 182 * hudStep + UI.MessageOffsetX;
-			const int msgY = Video.HudCanvas.Y + Video.HudCanvas.H - (int) std::lround(50.4 * hudStep)
-			                 - faceCapTop + UI.MessageOffsetY;
+			int msgX = 0;
+			int msgY = 0;
+			MessageLineOrigin(msgX, msgY);
 			if (MessagesCount > 0) {
 				PushClipping();
 				SetClipping(msgX, msgY, Video.Width - 1, Video.Height - 1);
@@ -1050,6 +1103,8 @@ void MessagesDisplay::AddMessage(const char *msg)
 		strcpy_s(message, sizeof(Messages[MessagesCount]), msg);
 		next = ptr = message + strlen(message);
 	}
+	MessagesHasPos[MessagesCount] = AddHasPos;
+	MessagesPos[MessagesCount] = AddPos;
 
 	while (UI.MessageFont->Width(message) + 8 >= UI.MapArea.EndX - UI.MapArea.X) {
 		while (1) {
@@ -1104,9 +1159,16 @@ bool MessagesDisplay::CheckRepeatMessage(const char *msg)
 				// This exact message was printed already.
 				// n now holds the previous repeat count.
 				if (n < 10) {
+					// A repeat without a position keeps the event of the message it repeats.
+					if (!AddHasPos && MessagesHasPos[i]) {
+						AddHasPos = true;
+						AddPos = MessagesPos[i];
+					}
 					// 1. Shift all following messages down
 					for (int z = i; z < MessagesCount - 1; ++z) {
 						strcpy_s(Messages[z], sizeof(Messages[z]), Messages[z + 1]);
+						MessagesPos[z] = MessagesPos[z + 1];
+						MessagesHasPos[z] = MessagesHasPos[z + 1];
 					}
 
 					// Update the message and append it to the end with the
@@ -1128,11 +1190,29 @@ bool MessagesDisplay::CheckRepeatMessage(const char *msg)
 /**
 **  Add a new message to display only if it differs from the preceding one.
 */
-void MessagesDisplay::AddUniqueMessage(const char *s)
+void MessagesDisplay::AddUniqueMessage(const char *s, const Vec2i *pos)
 {
+	AddHasPos = pos != nullptr;
+	AddPos = pos != nullptr ? *pos : Vec2i(0, 0);
 	if (!CheckRepeatMessage(s)) {
 		AddMessage(s);
 	}
+	AddHasPos = false;
+}
+
+/**
+**  The message the line shows now (the newest) and its event position.
+**
+**  @return  true when a message is shown and it has an event position
+*/
+bool MessagesDisplay::ShownMessage(std::string &text, Vec2i &pos) const
+{
+	if (!AnyShown() || !MessagesHasPos[MessagesCount - 1]) {
+		return false;
+	}
+	text = Messages[MessagesCount - 1];
+	pos = MessagesPos[MessagesCount - 1];
+	return true;
 }
 
 /**
@@ -1233,7 +1313,7 @@ void SetMessageEvent(const Vec2i &pos, const char *fmt, ...)
 	vsnprintf(temp, sizeof(temp) - 1, fmt, va);
 	temp[sizeof(temp) - 1] = '\0';
 	va_end(va);
-	allmessages.AddUniqueMessage(temp);
+	allmessages.AddUniqueMessage(temp, &pos);
 
 	if (MessagesEventCount == MaxMessagesCount) {
 		ShiftMessagesEvent();
@@ -1260,6 +1340,43 @@ void CenterOnMessage()
 	UI.SelectedViewport->Center(Map.TilePosToMapPixelPos_Center(pos));
 	SetMessage(_("~<Event: %s~>"), MessagesEvent[MessagesEventIndex]);
 	++MessagesEventIndex;
+}
+
+/**
+**  A tap on the message line (owner decision 71): when the line shows a message with an event
+**  position and the tap is on its text, the view is centred on the event as CenterOnMessage does
+**  for the Space key. The line itself is left as it is, so the same message can be tapped again.
+**
+**  @param screenPos  the tap, screen pixels
+**
+**  @return  true when the tap was taken by the message line
+*/
+bool CenterOnTappedMessage(const PixelPos &screenPos)
+{
+	std::string text;
+	Vec2i pos;
+	if (UI.SelectedViewport == nullptr || UI.MessageFont == nullptr
+		|| !allmessages.ShownMessage(text, pos) || !Map.Info.IsPointOnMap(pos)) {
+		return false;
+	}
+	int x = 0;
+	int y = 0;
+	int w = 0;
+	int h = 0;
+	if (ClassicHudActive()) {
+		if (!ClassicMessageRect(text, x, y, w, h)) {
+			return false;
+		}
+	} else {
+		MessageLineOrigin(x, y);
+		w = UI.MessageFont->Width(text);
+		h = UI.MessageFont->Height();
+	}
+	if (!messagetap::hits(screenPos.x, screenPos.y, x, y, w, h, true)) {
+		return false;
+	}
+	UI.SelectedViewport->Center(Map.TilePosToMapPixelPos_Center(pos));
+	return true;
 }
 
 void ToggleShowMessages()

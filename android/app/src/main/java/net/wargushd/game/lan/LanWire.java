@@ -17,8 +17,13 @@ import java.util.Map;
  * everything outside 0x20..0x7e as \\uXXXX. No fractions, no exponents.
  */
 public final class LanWire {
-    /** The room protocol. Changed whenever a message changes its meaning. */
-    public static final int PROTOCOL = 1;
+    /**
+     * The room protocol. Changed whenever a message changes its meaning. 2: the hello carries the
+     * device's gameplay mods ("gm"), a seat its computer player ("bot") and whether its device has
+     * the mods the computer players need ("mods_ok"), the state the mods needed ("need") and
+     * whether the host offers mods' computer players ("bots"), a start row its "bot" (bots mod).
+     */
+    public static final int PROTOCOL = 2;
     /** The launcher's port: UDP discovery and the TCP room. */
     public static final int PORT = 26660;
     /** The engine's own port for the game. */

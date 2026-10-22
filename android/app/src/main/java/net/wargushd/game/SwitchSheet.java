@@ -6,25 +6,29 @@ import android.graphics.Canvas;
 import java.util.List;
 
 /**
- * The list of profiles, opened by Switch on the profile sheet: choose one to play as, or
- * delete one that is not in use.
+ * The list of profiles, opened by Switch on the profile sheet: choose one to play as, make a
+ * new one, or delete one that is not in use. Owner's board 2B (2026-10-18): rows 168 high with
+ * the profile's portrait, and New on this sheet.
  */
 final class SwitchSheet {
-    static final int NONE = 0, CANCEL = 1, SWITCH = 2, DELETE = 3;
+    static final int NONE = 0, CANCEL = 1, SWITCH = 2, DELETE = 3, NEW = 4;
 
     // Layout, logical units: the kit's modal sheet, centred, inner padding 96.
-    private static final float W = 1800f, H = 1200f, PAD = 96f;
-    private static final float ROW_H = 132f, ROW_PITCH = 138f, BUTTON_H = 120f, GAP = 48f;
+    private static final float W = 1800f, H = 1440f, PAD = 96f;
+    private static final float ROW_H = 168f, ROW_PITCH = 180f, BUTTON_H = 120f, GAP = 28f;
+    private static final float FACE_X = 30f, FACE_Y = 12f, FACE_W = 173f, FACE_H = 144f, NAME_X = 233f;
     private static final float CAP_BODY = 44f, CAP_MID = 36f;
 
     private static final int SHADE = 0xAA000000, PANEL_FILL = 0xDE140F0A, LINE = 0xFF92743E;
     private static final int INK = 0xFFE8E2D4, INK_MUTED = 0xFFCEC6B6, GOLD = 0xFFF0D250;
     private static final int INK_DISABLED = 0xFF9C9486, DIM = 0x96000000;
-    private static final int ROW_SELECTED = 0x36F0D250, ROW_FAINT = 0x10FFFFFF;
+    private static final int ROW_SELECTED = 0x36F0D250, ROW_FAINT = 0x10FFFFFF, FACE_FILL = 0xFF2A2218;
 
     private final List<Profiles.Profile> profiles;
     private final String activeId;
     private int selected;
+    /** The rows' portraits in each profile's colour, made when first drawn. */
+    private final java.util.Map<String, Bitmap> faces = new java.util.HashMap<String, Bitmap>();
     private float scroll;
     private Bitmap buttonPlain, buttonMarked;
 
@@ -59,7 +63,7 @@ final class SwitchSheet {
     private float listTop(SkinKit kit) { return y(kit) + PAD + 108f; }
     private float buttonY(SkinKit kit) { return y(kit) + H - PAD - BUTTON_H; }
     private float listBottom(SkinKit kit) { return buttonY(kit) - 24f; }
-    private float buttonW() { return (pw() - 2f * GAP) / 3f; }
+    private float buttonW() { return (pw() - 3f * GAP) / 4f; }
     private float buttonX(int i) { return px() + (buttonW() + GAP) * i; }
 
     private float maxScroll(SkinKit kit) {
@@ -100,8 +104,16 @@ final class SwitchSheet {
             if (sel) {
                 kit.fill(c, px, ry, 10f, ROW_H, GOLD, 0f);
             }
-            kit.textMiddle(c, kit.fit(p.name, CAP_BODY, pw - 36f - 520f), px + 36f, ry, ROW_H, CAP_BODY,
-                           INK, true);
+            Bitmap face = faces.get(p.id);
+            if (face == null && !faces.containsKey(p.id)) {
+                face = Portraits.tinted(kit, p.portrait, Profiles.COLORS[p.color]);
+                faces.put(p.id, face);
+            }
+            kit.fill(c, px + FACE_X, ry + FACE_Y, FACE_W, FACE_H, FACE_FILL, 10f);
+            kit.picture(c, face, px + FACE_X, ry + FACE_Y, FACE_W, FACE_H);
+            kit.outline(c, px + FACE_X, ry + FACE_Y, FACE_W, FACE_H, LINE, 10f);
+            kit.textMiddle(c, kit.fit(p.name, CAP_BODY, pw - NAME_X - 520f), px + NAME_X, ry, ROW_H, CAP_BODY,
+                           sel ? GOLD : INK, true);
             final String right = p.id.equals(activeId) ? kit.own("In use")
                 : (p.games == 0) ? kit.own("No games yet")
                 : kit.own(p.games == 1 ? "{0} game" : "{0} games", p.games);
@@ -109,9 +121,10 @@ final class SwitchSheet {
         }
         c.restore();
 
-        button(c, kit, 0, kit.string("common_delete", "Delete"), false, canDelete());
-        button(c, kit, 1, kit.string("common_cancel", "Cancel"), false, true);
-        button(c, kit, 2, kit.own("Switch"), true, true);
+        button(c, kit, 0, kit.own("New"), false, true);
+        button(c, kit, 1, kit.string("common_delete", "Delete"), false, canDelete());
+        button(c, kit, 2, kit.string("common_cancel", "Cancel"), false, true);
+        button(c, kit, 3, kit.own("Switch"), true, true);
     }
 
     private static boolean in(float x, float y, float rx, float ry, float rw, float rh) {
@@ -155,13 +168,16 @@ final class SwitchSheet {
             return NONE;
         }
         if (y >= buttonY(kit) && y < buttonY(kit) + BUTTON_H) {
-            if (in(x, y, buttonX(0), buttonY(kit), buttonW(), BUTTON_H) && canDelete()) {
+            if (in(x, y, buttonX(0), buttonY(kit), buttonW(), BUTTON_H)) {
+                return NEW;
+            }
+            if (in(x, y, buttonX(1), buttonY(kit), buttonW(), BUTTON_H) && canDelete()) {
                 return DELETE;
             }
-            if (in(x, y, buttonX(1), buttonY(kit), buttonW(), BUTTON_H)) {
+            if (in(x, y, buttonX(2), buttonY(kit), buttonW(), BUTTON_H)) {
                 return CANCEL;
             }
-            if (in(x, y, buttonX(2), buttonY(kit), buttonW(), BUTTON_H)) {
+            if (in(x, y, buttonX(3), buttonY(kit), buttonW(), BUTTON_H)) {
                 return SWITCH;
             }
         }

@@ -113,6 +113,41 @@ constexpr int HdNativeTilePx = 216;
 // (Data/Art/hd/classic/classic_*.json), and a classic sprite cell is drawn at the same density.
 constexpr int ClassicTilePx = 32;
 
+// HD animated water (owner decision 87; spec .wargushd/work/WATER_ANIM.md, map/map_water.cpp).
+// Drawing only. LoadHDWater reads Data/Art/hd/bgs/bgs_water_<bgsName>.json/png and waterMasks.png
+// from the player's game folder; when one is missing nothing is loaded and the water stays static.
+struct HDWaterTile {
+	int frame;     // frame of the water mask atlases (HDWaterFrame)
+	SDL_Rect dst;  // the megatile's rect, in the coordinates of the current render target
+};
+extern void LoadHDWater(const char *bgsName, const char *framePrefix, int megatileCount);
+extern void ReleaseHDWater();
+extern bool HDWaterLoaded();
+/// Water mask frame of a megatile, or -1 (no water mask for it, or nothing loaded).
+extern int HDWaterFrame(unsigned megatile);
+/// Add the animated layer over the drawn terrain. (originX, originY): where map pixel 0,0 lands and
+/// tilePx: the on-screen size of one megatile, both in the current render target's coordinates.
+extern void DrawHDWaterLayer(const std::vector<HDWaterTile> &tiles, float originX, float originY,
+                             float tilePx);
+/// Called before the map is drawn: the layer is not shown until DrawHDWaterLayer adds it again.
+extern void HDWaterNewFrame();
+/// Was the layer added in the last frame the map was drawn? (PERF-A3a keeps that frame under a
+/// window; the water under it moves on.)
+extern bool HDWaterShown();
+/// PERF-A3a held water (sdl.cpp GreyFrameUnderMenu, WATER_ANIM.md "Frame-time check"): what the
+/// layer draws in the map draw that follows. NoLayer: nothing (the kept greys are taken without the
+/// water); Black / White: the layer's area is filled with 0 / 255 (two probes: how much of the
+/// terrain shows through what is drawn over it). Every probe keeps the view for HDWaterAddHeldGreys.
+enum class HDWaterProbe { None, NoLayer, Black, White };
+extern void HDWaterSetProbe(HDWaterProbe probe);
+/// Was the layer of the last map draw added once, straight into the backbuffer (one viewport, no
+/// world render target)? Only then can it be added again over the kept greys.
+extern bool HDWaterHeldCapable();
+/// Add the layer of the current water step, in greys, into the current render target (a texture the
+/// size of the backbuffer in pixels; sx, sy: the renderer scale), for the view kept by the last
+/// probe. False when no view is kept or the layer cannot be built.
+extern bool HDWaterAddHeldGreys(float sx, float sy);
+
 // World internal-resolution scale (0.25..1.0). When < 1.0 the zoomed in-game world (terrain, units,
 // missiles, particles, fog) is rendered into a GPU target texture at this fraction of the viewport
 // render size and upscaled (linear) onto the on-screen viewport, trading world sharpness for
@@ -314,6 +349,9 @@ public:
 	int OriginHeight = 0;  /// Origin graphic height
 	bool Resized = false;  /// Image has been resized
 	bool Grayscale = false; /// Loaded as grayscale (must be re-applied when SetOriginalSize reloads)
+	/// CLASSIC-SHEET-LOOKUPS: a native HD atlas draws this file, so Load() makes the transparent
+	/// placeholder at once: no file search, no "Can't open" line, no _team.png probe.
+	bool NoClassicFile = false;
 
 	friend class CFont;
 };
@@ -777,6 +815,19 @@ extern void EndFrame();
 /// While an in-game window is up, or the game stands paused: the game drawn so far this frame is
 /// shown in greys. `live`: keep the kept frame up to date (no window: the HUD is in use).
 extern void GreyFrameUnderMenu(bool menuUp, bool live = false);
+/// PERF-A3a: the next GreyFrameUnderMenu(true, false) lays the kept frame over this one without
+/// reading it again, so the game drawn under it is not seen.
+extern bool GreyFrameHeld();
+/// The next GreyFrameUnderMenu(true, false) reads the frame again (the water moved under it).
+extern void GreyFrameRetake();
+/// PERF-A3a held water: called before the map is drawn in full under a paused window. `wanted`: the
+/// switch is on, the water was shown and HDWaterHeldCapable(). Returns the probe for this draw (see
+/// HDWaterProbe); not wanted drops the GPU water state.
+extern HDWaterProbe GreyFrameWaterProbe(bool wanted);
+/// The kept greys get the moving water on the GPU each frame (no draw of the game, no readback).
+extern bool GreyFrameWaterOnGpu();
+/// An in-game window (menu, dialog) is up over a running game: the game is shown in greys.
+extern bool InGameWindowUp();
 
 /// Realize video memory.
 extern void RealizeVideoMemory();

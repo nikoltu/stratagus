@@ -145,6 +145,7 @@ static const char SHIELDPIERCING_KEY[] = "ShieldPiercing";
 static const char ISALIVE_KEY[] = "IsAlive";
 static const char PLAYER_KEY[] = "Player";
 static const char PRIORITY_KEY[] = "Priority";
+static const char FLAMESHIELD_KEY[] = "FlameShield";
 
 /*----------------------------------------------------------------------------
 --  Functions
@@ -181,7 +182,7 @@ CUnitTypeVar::CVariableKeys::CVariableKeys()
 							   RADARJAMMERRANGE_KEY, AUTOREPAIRRANGE_KEY, BLOODLUST_KEY, HASTE_KEY,
 							   SLOW_KEY, INVISIBLE_KEY, UNHOLYARMOR_KEY, SLOT_KEY, SHIELD_KEY, POINTS_KEY,
 							   MAXHARVESTERS_KEY, POISON_KEY, SHIELDPERMEABILITY_KEY, SHIELDPIERCING_KEY, ISALIVE_KEY, PLAYER_KEY,
-							   PRIORITY_KEY
+							   PRIORITY_KEY, FLAMESHIELD_KEY
 							  };
 
 	for (int i = 0; i < NVARALREADYDEFINED; ++i) {
@@ -2297,7 +2298,7 @@ void UpdateUnitVariables(CUnit &unit)
 			|| i == INVISIBLE_INDEX || i == UNHOLYARMOR_INDEX || i == HP_INDEX
 			|| i == SHIELD_INDEX || i == POINTS_INDEX || i == MAXHARVESTERS_INDEX
 			|| i == POISON_INDEX || i == SHIELDPERMEABILITY_INDEX || i == SHIELDPIERCING_INDEX
-			|| i == ISALIVE_INDEX || i == PLAYER_INDEX) {
+			|| i == ISALIVE_INDEX || i == PLAYER_INDEX || i == FLAMESHIELD_INDEX) {
 			continue;
 		}
 		unit.Variable[i].Value = 0;

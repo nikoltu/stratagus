@@ -36,6 +36,8 @@
 #include "stratagus.h"
 
 #include "action/action_still.h"
+#include "action/action_attack.h"
+#include "action/action_patrol.h"
 
 #include "animation.h"
 #include "commands.h"
@@ -51,6 +53,7 @@
 #include "unit_find.h"
 #include "unittype.h"
 #include "video.h"
+#include "wc2ai.h"
 
 #include <set>
 
@@ -261,6 +264,9 @@ bool AutoCast(CUnit &unit)
 	if (CheckInvalidAutoCastVectors(unit)) {
 		WarnInvalidAutoCastVectors(unit, "AutoCast");
 	}
+	if (!wc2ai::UnitMayAutoCast(unit.Player->Type == PlayerTypes::PlayerPerson)) {
+		return false;
+	}
 	if (!unit.Type->CanCastSpell.empty() && !unit.AutoCastSpell.empty() && !unit.Removed) { // Removed units can't cast any spells, from bunker)
 		const size_t spellCount = std::min({SpellTypeTable.size(), unit.Type->CanCastSpell.size(), unit.AutoCastSpell.size()});
 		for (size_t i = 0; i < spellCount; ++i) {
@@ -315,6 +321,9 @@ static CUnit *UnitToRepairInRange(const CUnit &unit, int range)
 */
 bool AutoRepair(CUnit &unit)
 {
+	if (!wc2ai::UnitMayAutoRepair(unit.Player->Type == PlayerTypes::PlayerPerson)) {
+		return false; // an old save's flag on a person's unit is never used (owner 2026-10-15)
+	}
 	const int repairRange = unit.Type->DefaultStat.Variables[AUTOREPAIRRANGE_INDEX].Value;
 
 	if (unit.AutoRepair == false || repairRange == 0) {
@@ -379,6 +388,9 @@ bool COrder_Still::AutoCastStand(CUnit &unit)
 	if (CheckInvalidAutoCastVectors(unit)) {
 		WarnInvalidAutoCastVectors(unit, "AutoCastStand");
 	}
+	if (!wc2ai::UnitMayAutoCast(unit.Player->Type == PlayerTypes::PlayerPerson)) {
+		return false;
+	}
 	if (!unit.Type->CanCastSpell.empty() && !unit.AutoCastSpell.empty() && !unit.Removed) { // Removed units can't cast any spells, from bunker)
 		const size_t spellCount = std::min({SpellTypeTable.size(), unit.Type->CanCastSpell.size(), unit.AutoCastSpell.size()});
 		for (size_t i = 0; i < spellCount; ++i) {
@@ -413,9 +425,20 @@ bool AutoAttack(CUnit &unit)
 	std::unique_ptr<COrder> savedOrder;
 
 	if (unit.CurrentAction() == UnitAction::Still) {
-		// A unit held by its home tile is brought back by the 50-cycle pass.
-		if (!UnitHeldByHome(unit)) {
+		if (unit.SavedOrderIsMemory()) {
+			// A standing unit that keeps a patrol / attack-move memory: the end of this fight is the next
+			// re-issue check.
+			savedOrder = std::move(unit.SavedOrder);
+		} else if (!UnitHeldByHome(unit)) {
+			// A unit held by its home tile is brought back by the 50-cycle pass.
 			savedOrder = COrder::NewActionAttack(unit, unit.tilePos);
+		}
+	} else if (unit.CurrentAction() == UnitAction::Patrol) {
+		// A patrol is remembered only on the legs the original remembers (a flyer's or a ship's leg in
+		// a nearly straight line is not: after the fight the unit stays where it is).
+		if (unit.CanStoreOrder(unit.CurrentOrder())
+		    && static_cast<const COrder_Patrol *>(unit.CurrentOrder())->Remembered(unit)) {
+			savedOrder = unit.CurrentOrder()->Clone();
 		}
 	} else if (unit.CanStoreOrder(unit.CurrentOrder())) {
 		savedOrder = unit.CurrentOrder()->Clone();
@@ -439,6 +462,12 @@ void COrder_Still::Execute(CUnit &unit) /* override */
 		return;
 	}
 	this->Finished = false;
+
+	// A standing flyer bobs one pixel (idle_bob.h): drawing only, its random is not SyncRand.
+	// Ships bob through their Still animation.
+	if (this->State == SUB_STILL_STANDBY && !unit.Removed && unit.Type->MoveType == EMovement::Fly) {
+		IdleBobCycle(unit.IdleBob, UnitNumber(unit), static_cast<uint32_t>(GameCycle));
+	}
 
 	switch (this->State) {
 		case SUB_STILL_STANDBY:

@@ -46,6 +46,9 @@
 
 #include "spells.h"
 
+#include "action/action_patrol.h"
+#include "action/action_spellcast.h"
+
 #include "actions.h"
 #include "commands.h"
 #include "map.h"
@@ -241,6 +244,34 @@ private:
 };
 
 /**
+**  The goal of a position autocast that has one ("position-goal"): the first candidate whose tile
+**  is the chosen one (the unit the position callback picked), else none.
+**
+**  @param positionGoal  the autocast's "position-goal"
+**  @param candidates    the candidates the callback was given, in their order
+**  @param pos           the tile the callback chose
+*/
+CUnit *PositionGoalOf(bool positionGoal, const std::vector<CUnit *> &candidates, const Vec2i &pos)
+{
+	if (!positionGoal) {
+		return nullptr;
+	}
+	const auto it = ranges::find_if(candidates, [&](const CUnit *unit) { return unit->tilePos == pos; });
+	return it != candidates.end() ? *it : nullptr;
+}
+
+/**
+**  AUTOCAST-CORPSE-CRASH: a unit the autocast pass may not read. A unit without an order (or with a
+**  null first order), a released (Destroyed) unit, or one without a type / owner is left out: the
+**  filters read CurrentAction(), CurrentOrder(), Type and Player of every candidate.
+*/
+bool IsUnfitAutoCastUnit(const CUnit &unit)
+{
+	return unit.Orders.empty() || unit.Orders[0] == nullptr || unit.Destroyed || unit.Type == nullptr
+	    || unit.Player == nullptr;
+}
+
+/**
 **  Select the target for the autocast.
 **
 **  @param caster    Unit who would cast the spell.
@@ -273,7 +304,7 @@ static std::optional<std::pair<CUnit*, Vec2i>> SelectTargetUnitsOfAutoCast(CUnit
 	// AUTOCAST-CORPSE-CRASH: a unit without any order must not reach the filters below, which read
 	// CurrentAction(). Such a unit is named in the log and left out, so that the game goes on.
 	ranges::erase_if(table, [&](const CUnit *unit) {
-		if (!unit->Orders.empty() && unit->Orders[0] != nullptr) {
+		if (!IsUnfitAutoCastUnit(*unit)) {
 			return false;
 		}
 		ErrorPrint("autocast: unit %d (%s, player %d, removed %d, destroyed %d) has no order; "
@@ -334,7 +365,7 @@ static std::optional<std::pair<CUnit*, Vec2i>> SelectTargetUnitsOfAutoCast(CUnit
 					}
 					Vec2i resPos(autocast->PositionAutoCast(array));
 					if (Map.Info.IsPointOnMap(resPos)) {
-						return std::pair{nullptr, resPos};
+						return std::pair{PositionGoalOf(autocast->PositionGoal, table, resPos), resPos};
 					}
 				}
 			}
@@ -491,10 +522,30 @@ bool AutoCastSpell(CUnit &caster, const SpellType &spell)
 	} else {
 		// Save previous order
 		std::unique_ptr<COrder> savedOrder;
-		if (caster.CurrentAction() != UnitAction::Still && caster.CanStoreOrder(caster.CurrentOrder())) {
+		if (caster.CurrentAction() == UnitAction::Still) {
+			if (caster.SavedOrderIsMemory()) {
+				// A standing unit that keeps a patrol / attack-move memory keeps it through the cast; the cast's
+				// end runs the re-issue check (DECODE_B11_ROUND2 1).
+				savedOrder = std::move(caster.SavedOrder);
+			}
+		} else if (caster.CurrentAction() == UnitAction::Patrol) {
+			// A patrol leg is the memory only when the original remembers it (no memory for a
+			// flyer's / ship's nearly straight leg).
+			if (caster.CanStoreOrder(caster.CurrentOrder())
+			    && static_cast<const COrder_Patrol *>(caster.CurrentOrder())->Remembered(caster)) {
+				savedOrder = caster.CurrentOrder()->Clone();
+			}
+		} else if (caster.CanStoreOrder(caster.CurrentOrder())) {
 			savedOrder = caster.CurrentOrder()->Clone();
 		}
 		auto [targetUnit, targetPos] = *target;
+		// AUTOCAST-CORPSE-CRASH: a target released by the Lua position callback (or one that lost its
+		// orders) is not ordered on.
+		if (targetUnit != nullptr && IsUnfitAutoCastUnit(*targetUnit)) {
+			ErrorPrint("autocast: target %d unfit after selection; caster %d, spell %s\n",
+			           UnitNumber(*targetUnit), UnitNumber(caster), spell.Ident.c_str());
+			return false;
+		}
 		// Must move before?
 		CommandSpellCast(caster, targetPos, targetUnit, spell, EFlushMode::On, true);
 		if (savedOrder != nullptr) {

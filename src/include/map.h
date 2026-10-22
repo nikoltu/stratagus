@@ -401,6 +401,22 @@ extern bool UnitCanBeAt(const CUnit &unit, const Vec2i &pos);
 /// Preprocess map, for internal use.
 extern void PreprocessMap();
 
+/// STALL-HUNT: the HD terrain atlas, the classic tile atlas and the animated water of the map's
+/// tileset, loaded at load time (map_draw.cpp) instead of at the first draw of the map.
+extern void PreloadHDTerrainForMap();
+
+/// The HD terrain atlas names of a tileset image (map_draw.cpp); all null for an unknown image.
+struct HDTerrainNames {
+	const char *bgsAtlas = nullptr;      /// Data/Art/hd/bgs/bgs_<bgsAtlas>.json
+	const char *bgsPrefix = nullptr;     /// its frame prefix
+	const char *classicAtlas = nullptr;  /// Data/Art/hd/classic/<classicAtlas>.json
+	const char *classicPrefix = nullptr; /// its group-prefixed frame prefix
+	const char *era = nullptr;           /// legacy .hdatlas stem
+};
+extern HDTerrainNames HDTerrainNamesFor(const std::string &imageFile);
+/// CLASSIC-SHEET-LOOKUPS: the game folder's HD terrain atlas replaces this tileset's classic sheet.
+extern bool HDTerrainCoversTileset(const std::string &imageFile);
+
 // in unit.c
 //using MapClearField = void(const Vec2i &tilePos);
 

@@ -34,6 +34,7 @@
 
 #include "wc2strings.h"
 #include "action/action_built.h"
+#include "action/action_resource.h"
 
 #include "ai.h"
 #include "commands.h"
@@ -47,6 +48,7 @@
 #include "translate.h"
 #include "unit.h"
 #include "unittype.h"
+#include "wc2ai.h"
 
 /// How many resources the player gets back if canceling building
 #define CancelBuildingCostsFactor  75
@@ -163,6 +165,7 @@ static void Finish(COrder_Built &order, CUnit &unit)
 		unit.Frame = 0;
 	}
 	CUnit *worker = order.GetWorkerPtr();
+	CUnit *droppedBuilder = nullptr;
 
 	if (worker != nullptr) {
 		if (type.BoolFlag[BUILDERLOST_INDEX].value) {
@@ -184,16 +187,27 @@ static void Finish(COrder_Built &order, CUnit &unit)
 			if (worker->Type->ResInfo[type.GivesResource]) {
 				CommandResource(*worker, unit, EFlushMode::Off);
 			}
-			// If we can return goods to a new depot, do it.
-			if (worker->CurrentResource && worker->ResourcesHeld > 0 && type.CanStore[worker->CurrentResource]) {
-				CommandReturnGoods(*worker, &unit, EFlushMode::Off);
-			}
+			// Its load is delivered into a new depot on the spot, below (no walk-in).
+			droppedBuilder = worker;
 		}
 	}
 
 	if (type.GivesResource && type.StartingResources != 0) {
 		// Has StartingResources, Use those
 		unit.ResourcesHeld = type.StartingResources;
+	}
+
+	// A player run by its original script: its idle harvesters of this resource waiting beside the
+	// new building go in at once (live run 62: the second tanker entered the platform the same
+	// second it was finished, 2 of 2; ai_resource.cpp sends it there to wait).
+	if (type.GivesResource && player.AiEnabled && Wc2AiRuns(player.Index)) {
+		for (CUnit *waiter : player.GetUnits()) {
+			if (waiter && waiter != worker && waiter->IsAliveOnMap() && waiter->IsIdle()
+			    && waiter->Type->ResInfo[type.GivesResource] && waiter->ResourcesHeld == 0
+			    && waiter->MapDistanceTo(unit) <= 1) {
+				CommandResource(*waiter, unit, EFlushMode::On);
+			}
+		}
 	}
 
 	// No text: the original prints no line for this event (time series of work/agent-orig-scenes2,
@@ -233,6 +247,29 @@ static void Finish(COrder_Built &order, CUnit &unit)
 	}
 
 	UpdateForNewUnit(unit, 0);
+
+	// The builder of a new hall / lumber mill delivers its load into it at once (0x4D6E2F -> 0x4B27E0,
+	// DECODE_B11_ROUND2 3): the full trip when the building stores that kind, nothing otherwise (gold
+	// into a mill is lost); either way it no longer carries anything and it stands beside the building.
+	// Counted after UpdateForNewUnit, so a new mill already gives its lumber amount.
+	if (droppedBuilder != nullptr && droppedBuilder->ResourcesHeld > 0 && droppedBuilder->CurrentResource) {
+		const int kind = droppedBuilder->CurrentResource;
+		const ResourceInfo *resinfo = droppedBuilder->Type->ResInfo[kind].get();
+		const int finalKind = resinfo ? resinfo->FinalResource : kind;
+		const bool depot = type.CanStore[GoldCost] || type.CanStore[WoodCost];
+		const BuilderLoad load = BuilderFinishLoad(droppedBuilder->ResourcesHeld,
+		                                           depot,
+		                                           type.CanStore[kind] != 0,
+		                                           player.Incomes[finalKind]);
+		if (load.credited != 0) {
+			player.ChangeResource(finalKind, load.credited, true);
+			player.TotalResources[finalKind] += load.credited;
+		}
+		if (load.emptied) {
+			droppedBuilder->ResourcesHeld = 0;
+			droppedBuilder->CurrentResource = 0;
+		}
+	}
 
 	// Set the direction of the building if it supports them
 	if (type.NumDirections > 1 && type.BoolFlag[NORANDOMPLACING_INDEX].value == false) {

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -81,6 +82,14 @@ public final class CanvasView extends View {
         int colour(int slot);
         /** The Balance tile was tapped; the last measurement of the map, which may be an older one. */
         void balance(BalanceWatch.Answer measured);
+        /** Say a line in the bar for a while: one of the launcher's own words with {0}.. places. */
+        void notice(long millis, String english, Object... values);
+        /**
+         * The amount of the chosen mines or patches was tapped (owner decision 94, E1): open the
+         * number sheet over the view, titled with the kind's name; `current` is the amount they
+         * share, or -1 when they differ. OK hands the rounded data word to {@link #typeAmount}.
+         */
+        void amount(String title, long current);
     }
     private Host host;
 
@@ -95,9 +104,26 @@ public final class CanvasView extends View {
     private volatile boolean failed;
     private volatile Terrain terrain;      // null until the tile table is read
 
-    /** The still pictures of the palette's units, in the order of UnitFrames.TYPES; null where there is none. */
+    /**
+     * The still pictures of the palette's units, in the order of UnitFrames.TYPES; null where none
+     * is held. Read lazily (Session 2026-10-19 d): a type's picture is asked for when it is first
+     * drawn (a palette cell, a unit on the map) and read off this thread, one after the other;
+     * above PICTURE_BUDGET bytes the pictures drawn longest ago are let go and asked for again
+     * when drawn. Only the UI thread sets and frees them.
+     */
     private final java.util.concurrent.atomic.AtomicReferenceArray<UnitArt.Picture> pictures =
         new java.util.concurrent.atomic.AtomicReferenceArray<UnitArt.Picture>(UnitFrames.TYPES.length);
+    /** By the same order: 0 not asked, 1 asked, 2 read and none found. */
+    private final java.util.concurrent.atomic.AtomicIntegerArray asked =
+        new java.util.concurrent.atomic.AtomicIntegerArray(UnitFrames.TYPES.length);
+    private final java.util.concurrent.LinkedBlockingQueue<Integer> wanted = new java.util.concurrent.LinkedBlockingQueue<Integer>();
+    /** The frame a picture was last drawn in; the frame being drawn. UI thread only. */
+    private final long[] lastDrawn = new long[UnitFrames.TYPES.length];
+    private long frameNumber;
+    private long picturesHeld;
+    /** Bytes of pictures held at most (provisional: the whole palette of a tileset holds about 26 MB at half size). */
+    private static final long PICTURE_BUDGET = 16L * 1024 * 1024;
+    private Thread unitLoader;
     private final UnitArt art = new UnitArt();
     private final float[] spot = new float[3];
     private volatile boolean released;
@@ -156,12 +182,58 @@ public final class CanvasView extends View {
     /** Fill and Pick: a finger is down on the map and has not left its place. */
     private boolean tapPending;
     private float tapX, tapY;
-    private int tool = TOOL_TERRAIN, unitKind = MapRules.KIND_MINE, owner;
-    /** The unit chosen with Select, or -1. */
-    private int selected = -1;
-    /** The unit under the finger: its type, or -1; its top left tile; the unit being moved, or -1. */
-    private int ghostType = -1, ghostX, ghostY, moving = -1;
+    private int tool = TOOL_TERRAIN, owner;
+    /** The unit type the Units tool places (UnitCatalog), and the race the palette shows (owner decision 88, 5B). */
+    private int unitType = MapRules.GOLD_MINE, unitRace = UnitCatalog.HUMAN;
+    /** How far the palette's list of groups is scrolled, logical units. */
+    private float listScroll;
+    /** The units chosen (Select, a rectangle, a long press), in the order of the unit list; none when empty. */
+    private int[] chosen = new int[0];
+    /** The tools for units: the type under the finger, or -1, and its top left tile. */
+    private int ghostType = -1, ghostX, ghostY;
     private float grabX, grabY;
+    /** Select: the finger came down on a chosen unit at a tile; the chosen units are moved by so many tiles. */
+    private boolean grabbing, groupMoving;
+    private int grabTX, grabTY, moveDX, moveDY;
+    /** Select: a rectangle drawn from a tile of empty ground; whether the finger has left that tile. */
+    private boolean boxing, boxMoved;
+    private int boxX0, boxY0, boxX1, boxY1;
+
+    // The long press (EDITOR_DESIGN.md 4.1): 400 ms with no movement.
+    private static final long HOLD_MILLIS = 400L;
+    private float downX, downY;
+    /** A long press has acted; the finger does nothing more until it is lifted. */
+    private boolean held;
+    private final Runnable hold = new Runnable() {
+        @Override
+        public void run() {
+            longPress();
+        }
+    };
+
+    // Scrolling at the canvas edge while painting or moving a unit (EDITOR_DESIGN.md 4.1). The band
+    // and the speed are not designed: provisional numbers (EDITOR_STATUS.md, Session 2026-10-19 b).
+    private static final float EDGE_BAND = 120f, EDGE_SPEED = 2400f;     // logical units; logical units a second
+    private float lastX, lastY;
+    private long edgeLast;
+    private boolean edging;
+    private final Runnable edge = new Runnable() {
+        @Override
+        public void run() {
+            edgeStep();
+        }
+    };
+
+    /** How long a line of the view stays in the bar (owner decision 88, 1A: 4 s). */
+    private static final long NOTICE_MILLIS = 4000L;
+
+    /** The palette's cells for the walls: kinds of their own beside the corner model's. */
+    private static final int KIND_HUMAN_WALL = 100, KIND_ORC_WALL = 101;
+
+    /** Walls.HUMAN or Walls.ORC for a wall kind of the palette, else -1. */
+    private static int wallRace(int k) {
+        return (k == KIND_HUMAN_WALL) ? Walls.HUMAN : (k == KIND_ORC_WALL) ? Walls.ORC : -1;
+    }
     private boolean inStrip;
     /** Erase: the tile the finger came down on, not yet cleared (a second finger may still make it a view gesture). */
     private boolean erasePending;
@@ -177,6 +249,10 @@ public final class CanvasView extends View {
     private final Paint image = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final Paint fill = new Paint();
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** The rescue mark (owner decision 93, 2A): its dashed outline and its badge. */
+    private final Paint rescueLine = new Paint(Paint.ANTI_ALIAS_FLAG), rescueBadge = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private float rescueDashFor = -1f;
+    private final RectF rescueBox = new RectF();
     private final Rect src = new Rect();
     private final RectF dst = new RectF();
 
@@ -195,6 +271,9 @@ public final class CanvasView extends View {
         this.gameFolder = gameFolder;
         this.dataDir = dataDir;
         stroke.setStyle(Paint.Style.STROKE);
+        // The palette opens on the race of player 1, at its start location (owner decision 88, 5B).
+        unitRace = UnitCatalog.ofSlotRace(map.slot(MapModel.FIELD_RACE, 0));
+        unitType = UnitCatalog.types(unitRace, UnitCatalog.LAND_UNITS)[0];
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -202,12 +281,13 @@ public final class CanvasView extends View {
                 postInvalidate();
             }
         }, "editor-terrain").start();
-        new Thread(new Runnable() {
+        unitLoader = new Thread(new Runnable() {
             @Override
             public void run() {
                 loadUnits();
             }
-        }, "editor-units").start();
+        }, "editor-units");
+        unitLoader.start();
         post(settled);
     }
 
@@ -231,7 +311,13 @@ public final class CanvasView extends View {
     public void release() {
         released = true;
         removeCallbacks(settled);
+        removeCallbacks(hold);
+        removeCallbacks(fling);
+        stopEdge();
         watch.close();
+        if (unitLoader != null) {
+            unitLoader.interrupt();
+        }
         for (int i = 0; i < pictures.length(); ++i) {
             final UnitArt.Picture p = pictures.getAndSet(i, null);
             if (p != null) {
@@ -313,40 +399,92 @@ public final class CanvasView extends View {
     }
 
     /**
-     * Read the still pictures of the palette's units for the map's tileset, one after the
-     * other; a unit whose picture is not found keeps its box.
+     * The loader of the pictures: reads the types asked for, one after the other, for the map's
+     * tileset; with nothing asked it lets the open sheet go and waits. A type whose picture is
+     * not found keeps its box.
      */
     private void loadUnits() {
-        final long began = System.nanoTime();
         final String names = UnitArt.text(new File(dataDir, "hd_units_map.json"));
         final int era = Math.max(0, Math.min(3, map.tileset()));
-        int found = 0;
-        long held = 0L;
-        for (int i = 0; i < UnitFrames.TYPES.length && !released; ++i) {
-            final UnitArt.Picture p = UnitArt.load(gameFolder, names, UnitFrames.TYPES[i], era);
-            if (p == null) {
-                continue;
-            }
-            pictures.set(i, p);
-            if (released) {
-                final UnitArt.Picture mine = pictures.getAndSet(i, null);
-                if (mine != null) {
-                    mine.recycle();
+        final UnitArt.Sheets sheets = new UnitArt.Sheets(gameFolder);
+        int found = 0, missing = 0;
+        long nanos = 0L;
+        try {
+            while (!released) {
+                Integer next = wanted.poll();
+                if (next == null) {
+                    sheets.close();
+                    if (found + missing > 0) {
+                        android.util.Log.i("WargusHD", "LAUNCHER editor unit pictures read " + found + ", not found "
+                            + missing + ", " + nanos / 1000000L + " ms");
+                    }
+                    next = wanted.take();
                 }
-                return;
+                final int i = next;
+                final long began = System.nanoTime();
+                final UnitArt.Picture p = UnitArt.load(sheets, names, UnitFrames.TYPES[i], era);
+                nanos += System.nanoTime() - began;
+                if (p == null) {
+                    ++missing;
+                    asked.set(i, 2);
+                    continue;
+                }
+                ++found;
+                post(new Runnable() {
+                    @Override
+                    public void run() {
+                        pictureRead(i, p);
+                    }
+                });
             }
-            ++found;
-            held += p.bytes();
-            postInvalidate();
+        } catch (InterruptedException e) {
+            // Released.
+        } finally {
+            sheets.close();
         }
-        android.util.Log.i("WargusHD", "LAUNCHER editor unit pictures " + found + " of " + UnitFrames.TYPES.length
-            + ", " + held + " bytes, " + (System.nanoTime() - began) / 1000000L + " ms");
     }
 
-    /** The still picture of a unit type, or null. */
+    /** A picture came from the loader (UI thread): held, and the oldest let go above the budget. */
+    private void pictureRead(int i, UnitArt.Picture p) {
+        if (released || pictures.get(i) != null) {
+            p.recycle();
+            return;
+        }
+        pictures.set(i, p);
+        picturesHeld += p.bytes();
+        lastDrawn[i] = frameNumber;
+        while (picturesHeld > PICTURE_BUDGET) {
+            int oldest = -1;
+            for (int k = 0; k < lastDrawn.length; ++k) {
+                if (pictures.get(k) != null && lastDrawn[k] < frameNumber
+                    && (oldest < 0 || lastDrawn[k] < lastDrawn[oldest])) {
+                    oldest = k;
+                }
+            }
+            if (oldest < 0) {
+                break;     // every picture held is on the screen
+            }
+            final UnitArt.Picture gone = pictures.getAndSet(oldest, null);
+            picturesHeld -= gone.bytes();
+            gone.recycle();
+            asked.set(oldest, 0);
+        }
+        invalidate();
+    }
+
+    /** The still picture of a unit type, or null; one not yet held is asked for (UI thread). */
     private UnitArt.Picture picture(int type) {
         final int i = UnitFrames.indexOf(type);
-        return (i < 0) ? null : pictures.get(i);
+        if (i < 0) {
+            return null;
+        }
+        final UnitArt.Picture p = pictures.get(i);
+        if (p != null) {
+            lastDrawn[i] = frameNumber;
+        } else if (!released && asked.compareAndSet(i, 0, 1)) {
+            wanted.offer(i);
+        }
+        return p;
     }
 
     /** The tile as it is shown: as the stroke under the finger has left it, else the map's. */
@@ -493,6 +631,7 @@ public final class CanvasView extends View {
     @Override
     protected void onDraw(Canvas c) {
         final long began = System.nanoTime();
+        ++frameNumber;
         layout();
         if (!placed && getWidth() > 0) {
             placed = true;
@@ -532,14 +671,18 @@ public final class CanvasView extends View {
         }
         if (painting != null) {
             // The brush under the finger: the corners it sets, each with half a tile round it.
+            // A wall brush covers whole tiles.
             final int size = Terrain.BRUSHES[brush];
-            final float bx = Terrain.brushStart(paintX, size) - 0.5f, by = Terrain.brushStart(paintY, size) - 0.5f;
+            final boolean wall = wallRace(kind) >= 0;
+            final float bx = wall ? Terrain.wallStart(paintX, size) : Terrain.brushStart(paintX, size) - 0.5f;
+            final float by = wall ? Terrain.wallStart(paintY, size) : Terrain.brushStart(paintY, size) - 0.5f;
             stroke.setColor(VIEW_BOX);
             stroke.setStrokeWidth(Math.max(2f, 4f * unit));
             c.drawRect(left + bx * tilePx - originX, by * tilePx - originY,
                        left + (bx + size) * tilePx - originX, (by + size) * tilePx - originY, stroke);
         }
         drawShows(c, left);
+        drawPending(c, left);
         drawUnits(c, left);
         c.restore();
         drawStrip(c);
@@ -597,19 +740,26 @@ public final class CanvasView extends View {
 
     // ----- the palette column: terrain kinds and brush sizes -----
 
-    /** The kinds in the order of the palette's cells; the last two cells are the walls, not yet to be had. */
-    private static final int[] CELL_KIND = { Terrain.WATER, Terrain.DEEP_WATER, Terrain.COAST, Terrain.GRASS,
-        Terrain.DARK_GRASS, Terrain.FOREST, Terrain.ROCKS, -1, -1 };
+    /**
+     * The kinds in the order of the palette's cells, light and dark side by side (owner decision
+     * 88, 2A): Water, Deep water, Coast, Dark coast / Grass, Dark grass, Forest, Rocks / the walls.
+     */
+    private static final int[] CELL_KIND = { Terrain.WATER, Terrain.DEEP_WATER, Terrain.COAST, Terrain.DARK_COAST,
+        Terrain.GRASS, Terrain.DARK_GRASS, Terrain.FOREST, Terrain.ROCKS, KIND_HUMAN_WALL, KIND_ORC_WALL };
     /** A solid tile of each cell, for its picture. */
-    private static final int[] CELL_TILE = { 0x10, 0x20, 0x30, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0 };
-    // Rects of the palette, logical units; y from the view's top (the screen's y less the bar's 168).
-    private static final float PAL_X = 3168f, PAL_Y = 348f - 168f, PAL_SIDE = 192f, PAL_PITCH_X = 216f, PAL_PITCH_Y = 264f;
+    private static final int[] CELL_TILE = { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0 };
+    // Rects of the palette (owner board 2A: cells 156 in four columns at a pitch of 172, rows of 232),
+    // logical units; y from the view's top (the screen's y less the bar's 168).
+    private static final int PAL_COLUMNS = 4;
+    private static final float PAL_X = 3144f, PAL_Y = 348f - 168f, PAL_SIDE = 156f, PAL_PITCH_X = 172f, PAL_PITCH_Y = 232f;
     private static final float BRUSH_X = 3150f, BRUSH_Y = 1206f - 168f, BRUSH_W = 160.5f, BRUSH_H = 96f, BRUSH_PITCH = 166.5f;
     private static final int DIM = 0xB00E0B08, CELL_FILL = 0x10FFFFFF, CELL_CHOSEN = 0x36F0D250;
     /** The cells' names, in the launcher's own words. */
-    private static final String[] CELL_NAME = { "Water", "Deep water", "Coast", "Grass", "Dark grass", "Forest",
-        "Rocks", "Human wall", "Orc wall" };
-    private static final float NAME_X = 3162f, NAME_GAP = 6f, NAME_W = 204f, NAME_H = 48f, CAP_NAME = 24f;
+    private static final String[] CELL_NAME = { "Water", "Deep water", "Coast", "Dark coast", "Grass", "Dark grass",
+        "Forest", "Rocks", "Human wall", "Orc wall" };
+    private static final float NAME_GAP = 6f, NAME_H = 48f, CAP_NAME = 24f;
+    /** A terrain cell's name: as wide as the pitch less 8, cap 21 (2A). */
+    private static final float TER_NAME_IN = 4f, TER_NAME_W = PAL_PITCH_X - 8f, CAP_TER_NAME = 21f;
     private static final float BRUSH_KEY_X = 3144f, BRUSH_KEY_Y = 1152f - 168f, BRUSH_KEY_H = 40f;
     private static final float CAP_KEY = 30f, CAP_CELL = 36f;
     /** What a palette row takes beside its cell: the name's line and the gaps. */
@@ -628,8 +778,8 @@ public final class CanvasView extends View {
     private static final float CAP_BALANCE = 60f;
 
     private void paletteCell(int i, RectF r) {
-        final float x = (PAL_X + (i % 3) * PAL_PITCH_X + (PAL_SIDE - palSide) / 2f) * unit;
-        final float y = (palY + (i / 3) * palPitch) * unit;
+        final float x = (PAL_X + (i % PAL_COLUMNS) * PAL_PITCH_X + (PAL_SIDE - palSide) / 2f) * unit;
+        final float y = (palY + (i / PAL_COLUMNS) * palPitch) * unit;
         r.set(x, y, x + palSide * unit, y + palSide * unit);
     }
 
@@ -657,9 +807,10 @@ public final class CanvasView extends View {
             stroke.setStrokeWidth(Math.max(1f, (chosen ? 6f : 2f) * unit));
             c.drawRect(dst, stroke);
             if (host != null) {
-                host.text(c, host.word(CELL_NAME[i]), NAME_X + (i % 3) * PAL_PITCH_X,
-                          palY + (i / 3) * palPitch + palSide + NAME_GAP,
-                          NAME_W, NAME_H, CAP_NAME, chosen ? VIEW_BOX : (CELL_KIND[i] < 0) ? INK_MUTED : INK, true);
+                host.text(c, host.word(CELL_NAME[i]), PAL_X - TER_NAME_IN + (i % PAL_COLUMNS) * PAL_PITCH_X,
+                          palY + (i / PAL_COLUMNS) * palPitch + palSide + NAME_GAP,
+                          TER_NAME_W, NAME_H, CAP_TER_NAME, chosen ? VIEW_BOX : (CELL_KIND[i] < 0) ? INK_MUTED : INK,
+                          true);
             }
         }
         if (host != null) {
@@ -741,7 +892,7 @@ public final class CanvasView extends View {
             stroke.setStrokeWidth(Math.max(1f, ((i == mirror) ? 6f : 2f) * unit));
             c.drawRect(dst, stroke);
             if (host != null) {
-                host.text(c, (i == 0) ? host.word(MIRROR_NAME[i]) : MIRROR_NAME[i], mirrorX(i), mirrorY(i), mirrorW(),
+                host.text(c, (i == 0) ? host.term("option_common_off", host.word(MIRROR_NAME[i])) : MIRROR_NAME[i], mirrorX(i), mirrorY(i), mirrorW(),
                           MIRROR_H, mirrorPaired ? CAP_KEY : CAP_CELL, (i == mirror) ? VIEW_BOX : INK, true);
             }
         }
@@ -794,7 +945,8 @@ public final class CanvasView extends View {
         final int steps = Math.max(1, (int) Math.ceil(Math.hypot(mx - paintX, my - paintY) * 2f));
         for (int i = 1; i <= steps; ++i) {
             final float px = paintX + (mx - paintX) * i / steps, py = paintY + (my - paintY) * i / steps;
-            if (painting.dab(px, py, kind, size, mirror)) {
+            final int race = wallRace(kind);
+            if ((race >= 0) ? painting.wall(px, py, race, size, mirror) : painting.dab(px, py, kind, size, mirror)) {
                 // The place under the finger and its images on the other sides of the map.
                 final float ix = map.width() - px, iy = map.height() - py;
                 redrawAround(px, py, size);
@@ -899,11 +1051,13 @@ public final class CanvasView extends View {
 
     /** The colour a tile gets from the ground classes that are switched on; 0 for none. */
     private int showColour(int tile) {
+        // The placing rule decides (MapRules.passClass / buildableOn): the engine's flags while its export is installed.
         if (shows[SHOW_BUILDABLE]) {
-            return MapRules.buildable(tile) ? PASS_LAND : PASS_NONE;
+            return MapRules.buildableOn(map, tile) ? PASS_LAND : PASS_NONE;
         }
         if (shows[SHOW_PASSABLE]) {
-            return MapRules.land(tile) ? PASS_LAND : MapRules.water(tile) ? PASS_WATER : PASS_NONE;
+            final int pass = MapRules.passClass(map, tile);
+            return (pass == MapRules.PASS_LAND) ? PASS_LAND : (pass == MapRules.PASS_WATER) ? PASS_WATER : PASS_NONE;
         }
         return 0;
     }
@@ -952,19 +1106,161 @@ public final class CanvasView extends View {
     /** Fill: the area of the kind under the finger takes the chosen kind, as one step. */
     private void fillAt(float x, float y) {
         final Terrain set = terrain;
-        if (set == null || tilePx <= 0f) {
+        // A fill with a wall is not designed (EDITOR_STATUS.md, Session 2026-10-19 b): nothing is done.
+        if (set == null || tilePx <= 0f || wallRace(kind) >= 0) {
             return;
         }
         endStroke(true);
         final Terrain.Stroke s = set.begin(map, System.nanoTime());
         if (s.fill((x - canvasLeft() + originX) / tilePx, (y + originY) / tilePx, kind)) {
-            painting = s;
-            endStroke(true);
+            final MapModel.TileStep step = s.step();
+            if (step != null && step.count() > FILL_ASK) {
+                // Above 2 000 tiles the area is shown and the strip asks (owner decision 88, 3B).
+                pendingFill = s;
+                pendingStep = step;
+                pendingMark = new boolean[map.width() * map.height()];
+                for (int ty = Math.max(0, s.minY()); ty <= s.maxY(); ++ty) {
+                    for (int tx = Math.max(0, s.minX()); tx <= s.maxX(); ++tx) {
+                        pendingMark[ty * map.width() + tx] = s.tile(tx, ty) != map.tile(tx, ty);
+                    }
+                }
+                chosen = new int[0];
+                invalidate();
+            } else {
+                painting = s;
+                endStroke(true);
+            }
             if (host != null) {
                 host.click();
             }
         }
     }
+
+    // ----- a fill above 2 000 tiles waits for its answer (owner decision 88, 3B) -----
+
+    /** EDITOR_DESIGN.md 4.2: Fill asks above this many tiles. */
+    private static final int FILL_ASK = 2000;
+    private static final int PENDING_TINT = 0x61FF7A3D, PENDING_LINE = 0xFFFF7A3D;
+    private static final float FILL_CANCEL_X = 2088f, FILL_OK_X = 2748f, FILL_BUTTON_W = 324f, FILL_TEXT_X = 330f;
+    private static final float CAP_FILL = 42f;
+    private Terrain.Stroke pendingFill;
+    private MapModel.TileStep pendingStep;
+    private boolean[] pendingMark;
+    /** A finger came down on the canvas while a fill waits: lifted without a second finger, it drops the fill. */
+    private boolean dropTap;
+
+    /** Drop a fill that waits for its answer; false when none waits. For Android Back. */
+    public boolean dropPending() {
+        if (pendingFill == null) {
+            return false;
+        }
+        pendingFill = null;
+        pendingStep = null;
+        pendingMark = null;
+        invalidate();
+        return true;
+    }
+
+    private void drawPending(Canvas c, float left) {
+        final boolean[] mark = pendingMark;
+        if (mark == null || tilePx <= 0f) {
+            return;
+        }
+        final int w = map.width(), h = map.height();
+        final int x0 = Math.max(0, (int) Math.floor(originX / tilePx));
+        final int y0 = Math.max(0, (int) Math.floor(originY / tilePx));
+        final int x1 = Math.min(w - 1, (int) Math.floor((originX + canvasWidth()) / tilePx));
+        final int y1 = Math.min(h - 1, (int) Math.floor((originY + canvasHeight()) / tilePx));
+        fill.setColor(PENDING_TINT);
+        for (int ty = y0; ty <= y1; ++ty) {
+            for (int tx = x0; tx <= x1; ++tx) {
+                if (mark[ty * w + tx]) {
+                    c.drawRect(left + tx * tilePx - originX, ty * tilePx - originY,
+                               left + (tx + 1) * tilePx - originX, (ty + 1) * tilePx - originY, fill);
+                }
+            }
+        }
+        // The outline: the edges of the area, where a marked tile meets one that is not.
+        fill.setColor(PENDING_LINE);
+        final float t = Math.max(2f, 4f * unit);
+        for (int ty = y0; ty <= y1; ++ty) {
+            for (int tx = x0; tx <= x1; ++tx) {
+                if (!mark[ty * w + tx]) {
+                    continue;
+                }
+                final float ax = left + tx * tilePx - originX, ay = ty * tilePx - originY;
+                if (ty == 0 || !mark[(ty - 1) * w + tx]) {
+                    c.drawRect(ax, ay, ax + tilePx, ay + t, fill);
+                }
+                if (ty == h - 1 || !mark[(ty + 1) * w + tx]) {
+                    c.drawRect(ax, ay + tilePx - t, ax + tilePx, ay + tilePx, fill);
+                }
+                if (tx == 0 || !mark[ty * w + tx - 1]) {
+                    c.drawRect(ax, ay, ax + t, ay + tilePx, fill);
+                }
+                if (tx == w - 1 || !mark[ty * w + tx + 1]) {
+                    c.drawRect(ax + tilePx - t, ay, ax + tilePx, ay + tilePx, fill);
+                }
+            }
+        }
+    }
+
+    private String kindName(int k) {
+        for (int i = 0; i < CELL_KIND.length; ++i) {
+            if (CELL_KIND[i] == k) {
+                return host.word(CELL_NAME[i]);
+            }
+        }
+        return "";
+    }
+
+    private void drawFillStrip(Canvas c, float y) {
+        stripBack(c, y);
+        host.text(c, host.word("Fill {0} tiles with {1}?").replace("{0}", String.valueOf(pendingStep.count()))
+                      .replace("{1}", kindName(kind)), FILL_TEXT_X, y, FILL_CANCEL_X - FILL_TEXT_X - 24f, STRIP_H, CAP_FILL,
+                  VIEW_BOX, false);
+        final float cy = y + STRIP_CELL_Y;
+        stripCell(c, FILL_CANCEL_X, cy, FILL_BUTTON_W, host.term("common_cancel", "Cancel"));
+        dst.set(FILL_OK_X * unit, cy * unit, (FILL_OK_X + FILL_BUTTON_W) * unit, (cy + STRIP_CELL_H) * unit);
+        cell(c, dst, true);
+        host.text(c, host.word("Fill"), FILL_OK_X, cy, FILL_BUTTON_W, STRIP_CELL_H, CAP_CELL, VIEW_BOX, true);
+    }
+
+    private void fillStripTap(float x) {
+        if (x >= FILL_OK_X && x < FILL_OK_X + FILL_BUTTON_W) {
+            final MapModel.TileStep step = pendingStep;
+            final Terrain.Stroke s = pendingFill;
+            dropPending();
+            if (step != null && step.count() > 0) {
+                apply(step);
+                redraw(s.minX(), s.minY(), s.maxX(), s.maxY());
+            }
+            if (host != null) {
+                host.click();
+            }
+        } else if (x >= FILL_CANCEL_X && x < FILL_CANCEL_X + FILL_BUTTON_W) {
+            dropPending();
+            if (host != null) {
+                host.click();
+            }
+        }
+    }
+
+    /** The palette's kind a tile shows at a point of it (a wall by its race), or -1 for a kind the palette has not. */
+    private static int paletteKindAt(MapModel map, int tx, int ty, float fx, float fy) {
+        final int tile = map.tile(tx, ty);
+        final int race = Walls.raceOf(tile);
+        final int found = (race == Walls.HUMAN) ? KIND_HUMAN_WALL : (race == Walls.ORC) ? KIND_ORC_WALL
+            : Terrain.kindAt(tile, fx, fy);
+        for (int k : CELL_KIND) {
+            if (k >= 0 && k == found) {
+                return found;
+            }
+        }
+        return -1;
+    }
+
+    private int paletteKindAt(int tx, int ty, float fx, float fy) { return paletteKindAt(map, tx, ty, fx, fy); }
 
     /** Pick: the unit under the finger, or else the terrain kind there, goes into the palette with its tool. */
     private void pickAt(float x, float y) {
@@ -977,26 +1273,24 @@ public final class CanvasView extends View {
             return;
         }
         final int at = MapRules.unitAt(map, tx, ty);
-        final int unitIs = (at >= 0) ? MapRules.kindOf(map.unit(at).type) : -1;
-        if (unitIs >= 0) {
-            unitKind = unitIs;
+        final int unitIs = (at >= 0) ? map.unit(at).type : -1;
+        if (unitIs >= 0 && UnitCatalog.has(unitIs)) {
+            unitType = unitIs;
+            unitRace = UnitCatalog.race(unitIs);
+            reveal(unitIs);
             if (map.unit(at).owner < MapRules.PLAYERS) {
                 owner = map.unit(at).owner;
             }
             tool = TOOL_UNITS;
         } else {
-            final int found = Terrain.kindAt(map.tile(tx, ty), mx - tx, my - ty);
-            boolean had = false;
-            for (int k : CELL_KIND) {
-                had |= k >= 0 && k == found;
-            }
-            if (!had) {
+            final int found = paletteKindAt(tx, ty, mx - tx, my - ty);
+            if (found < 0) {
                 return;     // a kind the palette has not: nothing is taken
             }
             kind = found;
             tool = TOOL_TERRAIN;
         }
-        selected = -1;
+        chosen = new int[0];
         if (host != null) {
             host.click();
         }
@@ -1007,11 +1301,14 @@ public final class CanvasView extends View {
     /** The share of a palette cell's side a unit's picture takes. */
     private static final float PICTURE_ROOM = 0.86f;
     private static final int GHOST_OK = 0x8030C050, GHOST_NO = 0x80D03030, DARK_INK = 0xFF101010;
-    private static final float OWNER_KEY_H = 40f, OWNER_GAP = 48f, OWNER_PITCH = 108f;
+    private static final float OWNER_KEY_H = 40f, OWNER_PITCH = 108f;
     // The strip of the chosen unit at the canvas' foot; x in logical units, y from the strip's top.
     private static final float STRIP_X = 288f, STRIP_W = 2808f, STRIP_H = 120f, STRIP_UP = 144f;
     private static final float MINUS_X = 1740f, AMOUNT_X = 1872f, AMOUNT_W = 360f, PLUS_X = 2244f, STEP_W = 120f;
     private static final float REMOVE_X = 2748f, REMOVE_W = 324f, STRIP_CELL_Y = 12f, STRIP_CELL_H = 96f;
+    // The AI word cell (Passive / Active, ORIG60 item 3): the design is silent, so it takes the span of
+    // the resource's - amount + cells in the same strip cell style; a tap switches the word.
+    private static final float AI_X = MINUS_X, AI_W = PLUS_X + STEP_W - MINUS_X;
 
     private void toolCell(int i, RectF r) {
         final float x = MIRROR_X * unit, y = (TOOL_Y + i * MIRROR_PITCH) * unit;
@@ -1045,7 +1342,7 @@ public final class CanvasView extends View {
             if (dst.contains(x, y)) {
                 if (tool != i) {
                     tool = i;
-                    selected = -1;
+                    chosen = new int[0];
                     if (host != null) {
                         host.click();
                     }
@@ -1057,8 +1354,6 @@ public final class CanvasView extends View {
         return false;
     }
 
-    private int ownerRace() { return map.slot(MapModel.FIELD_RACE, owner); }
-
     /**
      * The name of a unit kind: the game's own (its string table names a kind by the kind's
      * number, unit_N), the launcher's word for a start location and for a kind without a name.
@@ -1067,21 +1362,17 @@ public final class CanvasView extends View {
         if (MapRules.isStart(type)) {
             return host.word("Start Location");
         }
-        final String name = host.term("unit_" + type, plainName(type));
+        final String name = host.term("unit_" + type, UnitCatalog.name(type));
         return name.isEmpty() ? host.word("Unit") : name;
     }
 
-    /** The English name of a kind of the palette, shown where the game's table has no text. */
-    private static String plainName(int type) {
-        switch (type) {
-            case MapRules.GOLD_MINE: return "Gold Mine";
-            case MapRules.OIL_PATCH: return "Oil Patch";
-            case MapRules.PEASANT: return "Peasant";
-            case MapRules.PEON: return "Peon";
-            case MapRules.TOWN_HALL: return "Town Hall";
-            case MapRules.GREAT_HALL: return "Great Hall";
-            default: return "";
-        }
+    /**
+     * A race segment's word: the game's own (customscenario_race_*), the launcher's own word where
+     * the game has no such string (Neutral) or the player's table lacks the key.
+     */
+    private static String raceName(Host host, int race) {
+        final String own = host.word(RACE_NAME[race]);
+        return (RACE_KEY[race] == null) ? own : host.term(RACE_KEY[race], own);
     }
 
     private int unitColour(MapModel.Unit u) {
@@ -1099,55 +1390,149 @@ public final class CanvasView extends View {
         return (light > 1400) ? DARK_INK : INK;
     }
 
+    // ----- the unit palette of stage 1b (owner decision 88, 5B) -----
+    // Rects of owner board 5B, logical units, y from the view's top (the screen's less 168): the
+    // race segment Human / Orc / Neutral, cells 220 x 96 at a pitch of 226; under it the list of the
+    // race's groups [3144, 268, 672, to 30 above the word Player], scrolled by one finger, each group
+    // a header of 64 and rows of three cells of 192 at a pitch of 216 x 252, the header sticking at
+    // the list's top while its cells pass; a scroll bar of 10 at x 3826; the word Player 414 above
+    // the minimap and the eight player cells 54 under it, two rows at a pitch of 108.
+    private static final String[] RACE_NAME = { "Human", "Orc", "Neutral" };
+    /** The game's own string of each race (read from the player's game folder); the game has none for Neutral. */
+    private static final String[] RACE_KEY = { "customscenario_race_human", "customscenario_race_orc", null };
+    private static final float SEG_X = 3144f, SEG_Y = 324f - 168f, SEG_W = 220f, SEG_PITCH = 226f, SEG_H = 96f;
+    private static final float LIST_X = 3144f, LIST_Y = 436f - 168f, LIST_W = 672f, LIST_FOOT_GAP = 30f;
+    private static final float HEAD_H = 64f, HEAD_TEXT_IN = 20f, HEAD_TO_CELLS = 80f, GROUP_GAP = 10f, CAP_HEAD = 30f;
+    private static final float U_CELL_X = 3168f, U_CELL = 192f, U_PITCH_X = 216f, U_ROW = 252f, CAP_UNIT_NAME = 22f;
+    private static final int U_COLUMNS = 3;
+    private static final float BAR_X = 3826f, BAR_W = 10f, BAR_LEAST = 96f;
+    private static final float OWNER_ABOVE_MINI = 414f, OWNER_CELLS_DOWN = 54f;
+    private static final int HEAD_FILL = 0x5992743E, BAR_TRACK = 0x1AFFFFFF, BAR_THUMB = 0xFFCEC6B6;
+    /** A fling slows by this share a second, and stops below this speed (logical units a second). */
+    private static final float FLING_KEEP = 0.04f, FLING_LEAST = 60f;
+
+    /** The word Player above the player cells: 414 above the minimap (1290 on the design's height). */
+    private float ownerKeyY() {
+        final float high = (unit > 0f) ? getHeight() / unit : 0f;
+        return high - MINI_PAD - mini - OWNER_ABOVE_MINI;
+    }
+
     /** The player cells: two rows of four, one under the other, under the word "Player". */
-    private float ownerY(int i) { return palY + 2f * palPitch + OWNER_GAP + (i / 4) * OWNER_PITCH; }
+    private float ownerY(int i) { return ownerKeyY() + OWNER_CELLS_DOWN + (i / 4) * OWNER_PITCH; }
 
     private void ownerCell(int i, RectF r) {
         final float x = (BRUSH_X + (i % 4) * BRUSH_PITCH) * unit, y = ownerY(i) * unit;
         r.set(x, y, x + BRUSH_W * unit, y + BRUSH_H * unit);
     }
 
-    private void drawUnitPalette(Canvas c) {
-        for (int i = 0; i < MapRules.KINDS; ++i) {
-            paletteCell(i, dst);
-            final int type = MapRules.typeOf(i, ownerRace());
-            final boolean chosen = i == unitKind;
-            cell(c, dst, chosen);
-            final float cx = dst.centerX(), cy = dst.centerY();
-            final UnitArt.Picture p = picture(type);
-            if (p != null) {
-                // The kind's still picture, as large as the cell takes it, in the chosen player's colour.
-                UnitFrames.fit(p.bodyAt, cx, cy, dst.width(), PICTURE_ROOM, spot);
-                art.draw(c, p, spot[0], spot[1], spot[2], (host != null) ? host.colour(owner) : OTHER);
-                if (host != null) {
-                    host.text(c, nameOf(host, type), NAME_X + (i % 3) * PAL_PITCH_X,
-                              palY + (i / 3) * palPitch + palSide + NAME_GAP, NAME_W, NAME_H, CAP_NAME,
-                              chosen ? VIEW_BOX : INK, true);
+    private float listBottom() { return Math.max(LIST_Y + U_ROW, ownerKeyY() - LIST_FOOT_GAP); }
+
+    /** The height of the race's list: its groups one under the other. */
+    private float listHigh() {
+        float y = 0f;
+        for (int g : UnitCatalog.groups(unitRace)) {
+            y += groupHigh(UnitCatalog.types(unitRace, g).length);
+        }
+        return Math.max(0f, y - GROUP_GAP);
+    }
+
+    private static float groupHigh(int n) { return HEAD_TO_CELLS + ((n + U_COLUMNS - 1) / U_COLUMNS) * U_ROW + GROUP_GAP; }
+
+    private float listRoom() { return listBottom() - LIST_Y; }
+
+    private void clampList() { listScroll = Math.max(0f, Math.min(Math.max(0f, listHigh() - listRoom()), listScroll)); }
+
+    private void segCell(int i, RectF r) {
+        final float x = (SEG_X + i * SEG_PITCH) * unit, y = SEG_Y * unit;
+        r.set(x, y, x + SEG_W * unit, y + SEG_H * unit);
+    }
+
+    /** The cell of the k-th type of a group whose header lies at gy of the list (before the scroll). */
+    private void unitCell(float gy, int k, RectF r) {
+        final float x = (U_CELL_X + (k % U_COLUMNS) * U_PITCH_X) * unit;
+        final float y = (LIST_Y + gy - listScroll + HEAD_TO_CELLS + (k / U_COLUMNS) * U_ROW) * unit;
+        r.set(x, y, x + U_CELL * unit, y + U_CELL * unit);
+    }
+
+    /** Scroll the list so that a type's row is in view (Pick took it from the map). */
+    private void reveal(int type) {
+        layout();
+        float gy = 0f;
+        for (int g : UnitCatalog.groups(unitRace)) {
+            final int[] types = UnitCatalog.types(unitRace, g);
+            for (int k = 0; k < types.length; ++k) {
+                if (types[k] == type) {
+                    final float top = gy + HEAD_TO_CELLS + (k / U_COLUMNS) * U_ROW;
+                    if (top - HEAD_H < listScroll || top + U_ROW > listScroll + listRoom()) {
+                        listScroll = top - HEAD_TO_CELLS;
+                    }
+                    clampList();
+                    return;
                 }
-                continue;
             }
-            // Without a picture: the kind as its footprint in the colour it has on the map.
-            final float side = dst.width() * (MapRules.footprint(type) + 1) / 12f;
-            fill.setColor((i == MapRules.KIND_MINE) ? MINE : (i == MapRules.KIND_PATCH) ? PATCH
-                : (host != null) ? host.colour(owner) : OTHER);
-            stroke.setColor(INK);
-            stroke.setStrokeWidth(Math.max(1f, 2f * unit));
-            if (i == MapRules.KIND_START) {
-                c.drawCircle(cx, cy, side, fill);
-                c.drawCircle(cx, cy, side, stroke);
-            } else {
-                c.drawRect(cx - side, cy - side, cx + side, cy + side, fill);
-                c.drawRect(cx - side, cy - side, cx + side, cy + side, stroke);
-            }
+            gy += groupHigh(types.length);
+        }
+    }
+
+    private void drawUnitPalette(Canvas c) {
+        clampList();
+        for (int i = 0; i < RACE_NAME.length; ++i) {
+            segCell(i, dst);
+            cell(c, dst, i == unitRace);
             if (host != null) {
-                host.text(c, nameOf(host, type), NAME_X + (i % 3) * PAL_PITCH_X,
-                          palY + (i / 3) * palPitch + palSide + NAME_GAP, NAME_W, NAME_H, CAP_NAME,
-                          chosen ? VIEW_BOX : INK, true);
+                host.text(c, raceName(host, i), SEG_X + i * SEG_PITCH, SEG_Y, SEG_W, SEG_H, CAP_KEY,
+                          (i == unitRace) ? VIEW_BOX : INK, true);
             }
         }
+        final float bottom = listBottom();
+        c.save();
+        c.clipRect(LIST_X * unit, LIST_Y * unit, (LIST_X + LIST_W) * unit, bottom * unit);
+        final int[] groups = UnitCatalog.groups(unitRace);
+        float gy = 0f;
+        for (int g : groups) {
+            final int[] types = UnitCatalog.types(unitRace, g);
+            for (int k = 0; k < types.length; ++k) {
+                unitCell(gy, k, dst);
+                if (dst.bottom + NAME_H * unit < LIST_Y * unit || dst.top > bottom * unit) {
+                    continue;
+                }
+                drawUnitCell(c, types[k], dst);
+            }
+            gy += groupHigh(types.length);
+        }
+        // The headers over the cells: each at its place, the one whose cells pass the top held there
+        // until the next one pushes it up.
+        gy = 0f;
+        for (int i = 0; i < groups.length; ++i) {
+            final float high = groupHigh(UnitCatalog.types(unitRace, groups[i]).length);
+            float y = gy - listScroll;
+            if (y < 0f) {
+                y = Math.min(0f, gy + high - GROUP_GAP - HEAD_H - listScroll);
+            }
+            final float top = LIST_Y + y;
+            fill.setColor(COLUMN);
+            c.drawRect(LIST_X * unit, top * unit, (LIST_X + LIST_W) * unit, (top + HEAD_H) * unit, fill);
+            fill.setColor(HEAD_FILL);
+            c.drawRect(LIST_X * unit, top * unit, (LIST_X + LIST_W) * unit, (top + HEAD_H) * unit, fill);
+            if (host != null) {
+                host.text(c, host.word(UnitCatalog.GROUP_NAME[groups[i]]), LIST_X + HEAD_TEXT_IN, top,
+                          LIST_W - 2f * HEAD_TEXT_IN, HEAD_H, CAP_HEAD, VIEW_BOX, false);
+            }
+            gy += high;
+        }
+        c.restore();
+        // The scroll bar, where the list is longer than its room.
+        final float room = bottom - LIST_Y, all = listHigh();
+        if (all > room && room > 0f) {
+            fill.setColor(BAR_TRACK);
+            c.drawRect(BAR_X * unit, LIST_Y * unit, (BAR_X + BAR_W) * unit, bottom * unit, fill);
+            final float thumb = Math.max(BAR_LEAST, room * room / all);
+            final float ty = LIST_Y + (room - thumb) * listScroll / (all - room);
+            fill.setColor(BAR_THUMB);
+            c.drawRect(BAR_X * unit, ty * unit, (BAR_X + BAR_W) * unit, (ty + thumb) * unit, fill);
+        }
         if (host != null) {
-            host.text(c, host.word("Player"), BRUSH_KEY_X, palY + 2f * palPitch, PALETTE_W, OWNER_KEY_H, CAP_KEY,
-                      INK_MUTED, false);
+            host.text(c, host.word("Player"), BRUSH_KEY_X, ownerKeyY(), PALETTE_W, OWNER_KEY_H, CAP_KEY, INK_MUTED, false);
         }
         for (int i = 0; i < MapRules.PLAYERS; ++i) {
             ownerCell(i, dst);
@@ -1161,20 +1546,75 @@ public final class CanvasView extends View {
                 host.text(c, String.valueOf(i + 1), BRUSH_X + (i % 4) * BRUSH_PITCH, ownerY(i), BRUSH_W, BRUSH_H,
                           CAP_CELL, inkOn(colour), true);
             }
+            // The rescue badge repeated on the player's cell, so the kind is known before placing (2A).
+            final int kind = MapRules.rescueOf(map, i);
+            if (kind != 0) {
+                drawRescueBadge(c, dst.right - RESCUE_CELL_IN * unit, dst.top + RESCUE_CELL_IN * unit,
+                                Math.max(4f, RESCUE_BADGE_CELL * unit), kind);
+            }
         }
         stroke.setColor(LINE);
         stroke.setStrokeWidth(Math.max(1f, 2f * unit));
     }
 
+    /** One type of the list: its cell, its still picture or its footprint, its name under it. */
+    private void drawUnitCell(Canvas c, int type, RectF r) {
+        final boolean chosen = type == unitType;
+        cell(c, r, chosen);
+        final float cx = r.centerX(), cy = r.centerY();
+        final boolean neutral = MapRules.neutral(type);
+        final int colour = (type == MapRules.GOLD_MINE) ? MINE : (type == MapRules.OIL_PATCH) ? PATCH
+            : (neutral || host == null) ? OTHER : host.colour(owner);
+        final UnitArt.Picture p = picture(type);
+        if (p != null) {
+            // The type's still picture, as large as the cell takes it, in the chosen player's colour.
+            UnitFrames.fit(p.bodyAt, cx, cy, r.width(), PICTURE_ROOM, spot);
+            art.draw(c, p, spot[0], spot[1], spot[2], colour);
+        } else {
+            // Without a picture: the type as its footprint (a quarter of the cell a tile, at most) in its colour.
+            final float side = r.width() * Math.min(4, MapRules.footprint(type) + 1) / 12f;
+            fill.setColor(colour);
+            stroke.setColor(INK);
+            stroke.setStrokeWidth(Math.max(1f, 2f * unit));
+            if (MapRules.isStart(type)) {
+                c.drawCircle(cx, cy, side, fill);
+                c.drawCircle(cx, cy, side, stroke);
+            } else {
+                c.drawRect(cx - side, cy - side, cx + side, cy + side, fill);
+                c.drawRect(cx - side, cy - side, cx + side, cy + side, stroke);
+            }
+        }
+        if (host != null) {
+            host.text(c, nameOf(host, type), r.left / unit - (U_PITCH_X - U_CELL) / 2f + 4f, r.bottom / unit + NAME_GAP,
+                      U_PITCH_X - 8f, NAME_H, CAP_UNIT_NAME, chosen ? VIEW_BOX : INK, true);
+        }
+    }
+
     private void unitPaletteTap(float x, float y) {
         boolean chose = false;
-        for (int i = 0; i < MapRules.KINDS; ++i) {
-            paletteCell(i, dst);
-            if (dst.contains(x, y)) {
-                chose = unitKind != i || tool != TOOL_UNITS;
-                unitKind = i;
-                tool = TOOL_UNITS;
-                selected = -1;
+        for (int i = 0; i < RACE_NAME.length; ++i) {
+            segCell(i, dst);
+            if (dst.contains(x, y) && unitRace != i) {
+                unitRace = i;
+                listScroll = 0f;
+                chose = true;
+            }
+        }
+        if (x >= LIST_X * unit && x < (LIST_X + LIST_W) * unit && y >= LIST_Y * unit && y < listBottom() * unit) {
+            float gy = 0f;
+            for (int g : UnitCatalog.groups(unitRace)) {
+                final int[] types = UnitCatalog.types(unitRace, g);
+                for (int k = 0; k < types.length; ++k) {
+                    unitCell(gy, k, dst);
+                    // The header that sticks over a cell takes the tap, not the cell under it.
+                    if (dst.contains(x, y) && y >= (LIST_Y + HEAD_H) * unit) {
+                        chose = unitType != types[k] || tool != TOOL_UNITS;
+                        unitType = types[k];
+                        tool = TOOL_UNITS;
+                        chosen = new int[0];
+                    }
+                }
+                gy += groupHigh(types.length);
             }
         }
         for (int i = 0; i < MapRules.PLAYERS; ++i) {
@@ -1190,34 +1630,154 @@ public final class CanvasView extends View {
         invalidate();
     }
 
-    /** The unit the ghost does not collide with: the one being moved. */
-    private int ghostLeftOut() { return moving; }
+    // One finger on the list scrolls it (it never paints: the palette is outside the canvas); a fling goes on.
+    private boolean listDragging, listScrolled;
+    private float listDownY, listFrom, listLastY, listSpeed;
+    private long listLastTime, flingLast;
+    private final Runnable fling = new Runnable() {
+        @Override
+        public void run() {
+            flingStep();
+        }
+    };
+
+    private void listDown(float x, float y, long time) {
+        removeCallbacks(fling);
+        listScrolled = false;
+        listDragging = !terrainPalette() && x >= LIST_X * unit && y >= LIST_Y * unit && y < listBottom() * unit;
+        listDownY = listLastY = y;
+        listFrom = listScroll;
+        listLastTime = time;
+        listSpeed = 0f;
+    }
+
+    private void listMove(float y, long time) {
+        if (!listDragging) {
+            return;
+        }
+        listScrolled |= Math.abs(y - listDownY) > TAP_SLOP * unit;
+        if (!listScrolled) {
+            return;
+        }
+        listScroll = listFrom - (y - listDownY) / unit;
+        clampList();
+        if (time > listLastTime) {
+            listSpeed = -(y - listLastY) / unit * 1000f / (time - listLastTime);
+        }
+        listLastY = y;
+        listLastTime = time;
+        invalidate();
+    }
+
+    private void listUp(boolean lifted) {
+        if (listDragging && listScrolled && lifted && Math.abs(listSpeed) > FLING_LEAST) {
+            flingLast = android.os.SystemClock.uptimeMillis();
+            postDelayed(fling, 16L);
+        }
+        listDragging = false;
+    }
+
+    private void flingStep() {
+        final long now = android.os.SystemClock.uptimeMillis();
+        final float dt = Math.min(0.05f, (now - flingLast) / 1000f);
+        flingLast = now;
+        final float before = listScroll;
+        listScroll += listSpeed * dt;
+        clampList();
+        listSpeed *= (float) Math.pow(FLING_KEEP, dt);
+        invalidate();
+        if (Math.abs(listSpeed) > FLING_LEAST && listScroll != before && !released) {
+            postDelayed(fling, 16L);
+        }
+    }
+
+    /** True when a unit is among the chosen. */
+    private boolean isChosen(int index) {
+        for (int i : chosen) {
+            if (i == index) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The chosen units, less any that is no longer in the list. */
+    private int[] liveChosen() {
+        int n = 0;
+        for (int i : chosen) {
+            n += (i < map.unitCount()) ? 1 : 0;
+        }
+        if (n == chosen.length) {
+            return chosen;
+        }
+        final int[] out = new int[n];
+        n = 0;
+        for (int i : chosen) {
+            if (i < map.unitCount()) {
+                out[n++] = i;
+            }
+        }
+        chosen = out;
+        return out;
+    }
+
+    /** One footprint under the finger, tile by tile: green where the unit may stand, red where not; its frame. */
+    private void drawGhost(Canvas c, float left, int type, int gx, int gy, boolean[] leftOut) {
+        final int size = MapRules.footprint(type);
+        for (int yy = gy; yy < gy + size; ++yy) {
+            for (int xx = gx; xx < gx + size; ++xx) {
+                fill.setColor((MapRules.tileFits(map, type, xx, yy)
+                               && (MapRules.isStart(type) || !MapRules.takenBut(map, xx, yy, leftOut, type)))
+                    ? GHOST_OK : GHOST_NO);
+                c.drawRect(left + xx * tilePx - originX, yy * tilePx - originY,
+                           left + (xx + 1) * tilePx - originX, (yy + 1) * tilePx - originY, fill);
+            }
+        }
+        stroke.setColor(MapRules.mayPlace(map, type, gx, gy, leftOut) ? 0xFF30C050 : 0xFFD03030);
+        stroke.setStrokeWidth(Math.max(2f, 4f * unit));
+        c.drawRect(left + gx * tilePx - originX, gy * tilePx - originY,
+                   left + (gx + size) * tilePx - originX, (gy + size) * tilePx - originY, stroke);
+    }
 
     private void drawUnits(Canvas c, float left) {
+        final int[] picked = liveChosen();
         // The start locations last: one may lie under a hall or a worker.
         for (int pass = 0; pass < 2; ++pass) {
             for (int i = 0; i < map.unitCount(); ++i) {
-                if (i != moving && MapRules.isStart(map.unit(i).type) == (pass == 1)) {
-                    drawUnit(c, left, map.unit(i), i == selected);
+                final boolean mine = isChosen(i);
+                if (!(groupMoving && mine) && MapRules.isStart(map.unit(i).type) == (pass == 1)) {
+                    drawUnit(c, left, map.unit(i), mine);
+                }
+            }
+        }
+        // The rescue marks over all units: a unit's neighbour does not hide them (owner decision 93, 2A).
+        for (int i = 0; i < map.unitCount(); ++i) {
+            final MapModel.Unit u = map.unit(i);
+            if (!(groupMoving && isChosen(i)) && !MapRules.isStart(u.type)) {
+                final int kind = MapRules.rescueOf(map, u.owner);
+                if (kind != 0) {
+                    drawRescueMark(c, left, u, kind);
                 }
             }
         }
         if (ghostType >= 0) {
-            // The footprint under the finger, tile by tile: green where the unit may stand, red where not.
-            final int size = MapRules.footprint(ghostType), leftOut = ghostLeftOut();
-            for (int yy = ghostY; yy < ghostY + size; ++yy) {
-                for (int xx = ghostX; xx < ghostX + size; ++xx) {
-                    fill.setColor((MapRules.tileFits(map, ghostType, xx, yy)
-                                   && (MapRules.isStart(ghostType) || !MapRules.taken(map, xx, yy, leftOut)))
-                        ? GHOST_OK : GHOST_NO);
-                    c.drawRect(left + xx * tilePx - originX, yy * tilePx - originY,
-                               left + (xx + 1) * tilePx - originX, (yy + 1) * tilePx - originY, fill);
-                }
+            drawGhost(c, left, ghostType, ghostX, ghostY, null);
+        }
+        if (groupMoving) {
+            // The chosen units at the place they are being moved to; the others of the group are not in their way.
+            final boolean[] out = MapRules.marks(map, picked);
+            for (int i : picked) {
+                final MapModel.Unit u = map.unit(i);
+                drawGhost(c, left, u.type, u.x + moveDX, u.y + moveDY, out);
             }
-            stroke.setColor(MapRules.mayPlace(map, ghostType, ghostX, ghostY, leftOut) ? 0xFF30C050 : 0xFFD03030);
+        }
+        if (boxing && boxMoved) {
+            final int ax = Math.min(boxX0, boxX1), bx = Math.max(boxX0, boxX1) + 1;
+            final int ay = Math.min(boxY0, boxY1), by = Math.max(boxY0, boxY1) + 1;
+            stroke.setColor(VIEW_BOX);
             stroke.setStrokeWidth(Math.max(2f, 4f * unit));
-            c.drawRect(left + ghostX * tilePx - originX, ghostY * tilePx - originY,
-                       left + (ghostX + size) * tilePx - originX, (ghostY + size) * tilePx - originY, stroke);
+            c.drawRect(left + ax * tilePx - originX, ay * tilePx - originY, left + bx * tilePx - originX,
+                       by * tilePx - originY, stroke);
         }
         if (markX >= 0) {
             stroke.setColor(VIEW_BOX);
@@ -1227,6 +1787,51 @@ public final class CanvasView extends View {
         }
         stroke.setColor(LINE);
         stroke.setStrokeWidth(Math.max(1f, 2f * unit));
+    }
+
+    // The rescue mark of owner board 2A, logical units: outline 6 wide, 12 outside the footprint,
+    // dashes 22 / 14, corners 8; badge radius 34 on the footprint's top right corner (22 on a palette
+    // cell, 6 in from its corner), dark fill, white ring 6; a dot of 0.45 the radius for "fights".
+    // A footprint below 60 on the screen gets the badge only.
+    private static final float RESCUE_LINE = 6f, RESCUE_OUT = 12f, RESCUE_DASH = 22f, RESCUE_GAP = 14f, RESCUE_CORNER = 8f;
+    private static final float RESCUE_BADGE = 34f, RESCUE_BADGE_CELL = 22f, RESCUE_CELL_IN = 6f, RESCUE_RING = 6f;
+    private static final float RESCUE_DOT = 0.45f, RESCUE_LEAST = 60f;
+    private static final int RESCUE_WHITE = 0xFFFFFFFF, RESCUE_DARK = 0xFF111111;
+
+    /** The dashed white outline round a rescuable unit and its badge (owner decision 93, 2A). */
+    private void drawRescueMark(Canvas c, float left, MapModel.Unit u, int kind) {
+        final int size = MapRules.footprint(u.type);
+        final float x0 = left + u.x * tilePx - originX, y0 = u.y * tilePx - originY;
+        final float x1 = x0 + size * tilePx, y1 = y0 + size * tilePx;
+        if (x1 - x0 >= RESCUE_LEAST * unit) {
+            if (rescueDashFor != unit) {
+                rescueDashFor = unit;
+                rescueLine.setStyle(Paint.Style.STROKE);
+                rescueLine.setColor(RESCUE_WHITE);
+                rescueLine.setPathEffect(new DashPathEffect(new float[] { Math.max(2f, RESCUE_DASH * unit),
+                    Math.max(2f, RESCUE_GAP * unit) }, 0f));
+            }
+            rescueLine.setStrokeWidth(Math.max(1.5f, RESCUE_LINE * unit));
+            final float out = RESCUE_OUT * unit, r = RESCUE_CORNER * unit;
+            rescueBox.set(x0 - out, y0 - out, x1 + out, y1 + out);
+            c.drawRoundRect(rescueBox, r, r, rescueLine);
+        }
+        drawRescueBadge(c, x1, y0, Math.max(6f, RESCUE_BADGE * unit), kind);
+    }
+
+    /** The badge: a ring for "waits", a ring with a dot for "fights". */
+    private void drawRescueBadge(Canvas c, float cx, float cy, float radius, int kind) {
+        rescueBadge.setStyle(Paint.Style.FILL);
+        rescueBadge.setColor(RESCUE_DARK);
+        c.drawCircle(cx, cy, radius, rescueBadge);
+        rescueBadge.setStyle(Paint.Style.STROKE);
+        rescueBadge.setColor(RESCUE_WHITE);
+        rescueBadge.setStrokeWidth(Math.max(1.5f, RESCUE_RING * unit));
+        c.drawCircle(cx, cy, radius, rescueBadge);
+        if (kind == MapModel.OWNER_RESCUE_FIGHTS) {
+            rescueBadge.setStyle(Paint.Style.FILL);
+            c.drawCircle(cx, cy, radius * RESCUE_DOT, rescueBadge);
+        }
     }
 
     /** A unit as its footprint in its colour, with its name where there is room for it. */
@@ -1265,7 +1870,91 @@ public final class CanvasView extends View {
         }
     }
 
-    private boolean stripShown() { return tool == TOOL_SELECT && selected >= 0 && selected < map.unitCount(); }
+    /**
+     * The strip shows while units are chosen, with whatever tool (a long press chooses with any
+     * tool): for units of one kind the designed strip; for several kinds one chip a kind and
+     * Remove all (owner decision 88, 6B), a chip narrowing the choice to its kind.
+     */
+    private boolean stripShown() {
+        return liveChosen().length > 0 || pendingFill != null;
+    }
+
+    // The strip of several kinds (owner board 6B): the count, chips of 440 at a pitch of 470 (StripChips), Remove all.
+    private static final float KINDS_COUNT_X = 330f, CHIP_X = StripChips.X, CHIP_W = StripChips.W;
+    private static final float CHIP_SWATCH_IN = 20f, CHIP_SWATCH = 48f, CAP_CHIP = 32f;
+    private static final float ALL_X = 2700f, ALL_W = 372f;
+
+    // More kinds than the room holds scroll sideways under one finger (board 6B); the scroll
+    // starts at 0 for every new choice.
+    private float chipScroll, chipScrollDown, stripDownX;
+    private boolean chipDragging;
+    private int[] chipFor;
+
+    /** The chip scroll of the choice now shown, 0 when the choice is a new one; held in its range. */
+    private float chipScroll(int chips) {
+        if (chipFor != chosen) {
+            chipFor = chosen;
+            chipScroll = 0f;
+        }
+        chipScroll = StripChips.clamp(chipScroll, chips, ALL_X);
+        return chipScroll;
+    }
+
+    /** A finger down on the strip: where it began and the chip scroll then. */
+    private void stripDown(float px) {
+        stripDownX = px;
+        chipScrollDown = chipScroll;
+        chipDragging = false;
+    }
+
+    /**
+     * A finger moving on the strip: on the chips of several kinds with more than the room holds,
+     * past the tap slop it scrolls them sideways (and is no longer a tap).
+     */
+    private void stripMove(float px) {
+        if (pendingFill != null || !stripShown() || MapRules.oneKind(map, chosen)) {
+            return;
+        }
+        final int chips = MapRules.kindsOf(map, chosen).length;
+        if (StripChips.maxScroll(chips, ALL_X) <= 0f) {
+            return;
+        }
+        if (!chipDragging && Math.abs(px - stripDownX) > TAP_SLOP * unit) {
+            chipDragging = true;
+            chipScrollDown = chipScroll(chips);
+        }
+        if (chipDragging) {
+            chipScroll = StripChips.clamp(chipScrollDown - (px - stripDownX) / unit, chips, ALL_X);
+            invalidate();
+        }
+    }
+
+    private void drawKindsStrip(Canvas c, float y) {
+        final int[][] kinds = MapRules.kindsOf(map, chosen);
+        host.text(c, host.word("{0} units").replace("{0}", String.valueOf(chosen.length)), KINDS_COUNT_X, y,
+                  CHIP_X - KINDS_COUNT_X - 12f, STRIP_H, CAP_CELL, VIEW_BOX, false);
+        final float cy = y + STRIP_CELL_Y;
+        final float scroll = chipScroll(kinds.length), right = StripChips.windowRight(ALL_X);
+        c.save();
+        // A chip cut at the window's edge shows that the row goes on.
+        c.clipRect(CHIP_X * unit, y * unit, right * unit, (y + STRIP_H) * unit);
+        for (int i = 0; i < kinds.length; ++i) {
+            final float x = StripChips.left(i, scroll);
+            if (x + CHIP_W <= CHIP_X || x >= right) {
+                continue;
+            }
+            dst.set(x * unit, cy * unit, (x + CHIP_W) * unit, (cy + STRIP_CELL_H) * unit);
+            cell(c, dst, false);
+            final MapModel.Unit u = map.unit(kinds[i][0]);
+            fill.setColor(unitColour(u));
+            final float sx = (x + CHIP_SWATCH_IN) * unit, sy = (cy + (STRIP_CELL_H - CHIP_SWATCH) / 2f) * unit;
+            c.drawRect(sx, sy, sx + CHIP_SWATCH * unit, sy + CHIP_SWATCH * unit, fill);
+            final float tx = x + CHIP_SWATCH_IN + CHIP_SWATCH;
+            host.text(c, nameOf(host, u.type) + " " + kinds[i][1], tx, cy, x + CHIP_W - tx, STRIP_CELL_H, CAP_CHIP, INK, true);
+        }
+        c.restore();
+        stripCell(c, ALL_X, cy, ALL_W, host.word("Remove all"));
+    }
 
     private float stripY() { return getHeight() / unit - STRIP_UP; }
 
@@ -1273,25 +1962,88 @@ public final class CanvasView extends View {
         if (!stripShown() || host == null) {
             return;
         }
-        final MapModel.Unit u = map.unit(selected);
-        final float y = stripY();
+        final float y0 = stripY();
+        if (pendingFill != null) {
+            drawFillStrip(c, y0);
+            return;
+        }
+        final int[] picked = chosen;
+        if (!MapRules.oneKind(map, picked)) {
+            stripBack(c, y0);
+            drawKindsStrip(c, y0);
+            return;
+        }
+        final MapModel.Unit u = map.unit(picked[0]);
+        boolean oneOwner = true, oneAmount = true, oneWord = true;
+        for (int i : picked) {
+            oneOwner &= map.unit(i).owner == u.owner;
+            oneAmount &= map.unit(i).data == u.data;
+            oneWord &= MapRules.isPassive(map.unit(i).data) == MapRules.isPassive(u.data);
+        }
+        final float y = y0;
+        stripBack(c, y);
+        // Several units of one kind: their number after the name; the owner only when they share one
+        // and the strip has no owner cells (owner decision 94, E2: the cells show the owner).
+        final boolean cells = MapRules.ownerCells(u.type);
+        String line = nameOf(host, u.type) + ((picked.length > 1) ? " (" + picked.length + ")" : "");
+        if (oneOwner && !cells) {
+            line += " - " + ((u.owner < MapRules.PLAYERS) ? host.word("Player") + " " + (u.owner + 1)
+                                                          : host.word("Neutral"));
+        }
+        host.text(c, line, STRIP_X + 36f, y, (cells ? StripOwners.X - StripOwners.NAME_GAP : MINUS_X - 36f) - STRIP_X - 36f,
+                  STRIP_H, CAP_CELL, INK, false);
+        final float cy = y + STRIP_CELL_Y;
+        if (cells) {
+            drawOwnerCells(c, cy, oneOwner ? u.owner : -1);
+        }
+        if (MapRules.isResource(u.type)) {
+            stripCell(c, MINUS_X, cy, STEP_W, "-");
+            // Amounts that differ are not shown (not designed); - and + still step each one.
+            if (oneAmount) {
+                host.text(c, String.valueOf(u.data * MapModel.RESOURCE_UNIT), AMOUNT_X, cy, AMOUNT_W, STRIP_CELL_H,
+                          CAP_CELL, VIEW_BOX, true);
+            }
+            stripCell(c, PLUS_X, cy, STEP_W, "+");
+        } else if (MapRules.hasAiWord(u.type)) {
+            // Words that differ show both; a tap then makes all Passive.
+            stripCell(c, AI_X, cy, AI_W, !oneWord ? host.word("Passive") + " / " + host.word("Active")
+                                              : host.word(MapRules.isPassive(u.data) ? "Passive" : "Active"));
+        }
+        stripCell(c, REMOVE_X, cy, REMOVE_W, host.word("Remove"));
+    }
+
+    /** The eight owner cells (E2): the slots' colours; the owner the chosen units share ringed gold. */
+    private void drawOwnerCells(Canvas c, float cy, int owner) {
+        final float top = cy + (STRIP_CELL_H - StripOwners.CELL) / 2f;
+        for (int i = 0; i < StripOwners.COUNT; ++i) {
+            final float x = StripOwners.left(i);
+            dst.set(x * unit, top * unit, (x + StripOwners.CELL) * unit, (top + StripOwners.CELL) * unit);
+            fill.setColor(host.colour(i));
+            c.drawRect(dst, fill);
+            stroke.setColor(i == owner ? VIEW_BOX : LINE);
+            stroke.setStrokeWidth(Math.max(1f, (i == owner ? 6f : 2f) * unit));
+            c.drawRect(dst, stroke);
+        }
+    }
+
+    /**
+     * The number sheet's OK (owner decision 94, E1): every chosen mine or patch takes the data
+     * word, as one undo step. Nothing when the choice is no longer mines or patches of one kind.
+     */
+    public void typeAmount(int data) {
+        final int[] picked = liveChosen();
+        if (data <= 0 || !MapRules.oneKind(map, picked) || !MapRules.isResource(map.unit(picked[0]).type)) {
+            return;
+        }
+        apply(MapRules.amountSetAll(map, picked, data));
+    }
+
+    private void stripBack(Canvas c, float y) {
         fill.setColor(COLUMN);
         c.drawRect(STRIP_X * unit, y * unit, (STRIP_X + STRIP_W) * unit, (y + STRIP_H) * unit, fill);
         stroke.setColor(LINE);
         stroke.setStrokeWidth(Math.max(1f, 2f * unit));
         c.drawRect(STRIP_X * unit, y * unit, (STRIP_X + STRIP_W) * unit, (y + STRIP_H) * unit, stroke);
-        final String who = (u.owner < MapRules.PLAYERS) ? host.word("Player") + " " + (u.owner + 1)
-                                                        : host.word("Neutral");
-        host.text(c, nameOf(host, u.type) + " - " + who, STRIP_X + 36f, y, MINUS_X - STRIP_X - 72f, STRIP_H,
-                  CAP_CELL, INK, false);
-        final float cy = y + STRIP_CELL_Y;
-        if (MapRules.isResource(u.type)) {
-            stripCell(c, MINUS_X, cy, STEP_W, "-");
-            host.text(c, String.valueOf(u.data * MapModel.RESOURCE_UNIT), AMOUNT_X, cy, AMOUNT_W, STRIP_CELL_H,
-                      CAP_CELL, VIEW_BOX, true);
-            stripCell(c, PLUS_X, cy, STEP_W, "+");
-        }
-        stripCell(c, REMOVE_X, cy, REMOVE_W, host.word("Remove"));
     }
 
     private void stripCell(Canvas c, float x, float y, float w, String word) {
@@ -1313,15 +2065,57 @@ public final class CanvasView extends View {
         if (y < STRIP_CELL_Y || y >= STRIP_CELL_Y + STRIP_CELL_H) {
             return;
         }
-        final MapModel.Unit u = map.unit(selected);
+        if (pendingFill != null) {
+            fillStripTap(x);
+            return;
+        }
+        final int[] picked = chosen;
+        final MapModel.Unit u = map.unit(picked[0]);
+        final boolean several = !MapRules.oneKind(map, picked);
+        if (several) {
+            final int[][] kinds = MapRules.kindsOf(map, picked);
+            final int i = StripChips.at(x, chipScroll(kinds.length), kinds.length, ALL_X);
+            if (i >= 0) {
+                chosen = MapRules.narrow(map, picked, kinds[i][0]);
+                if (host != null) {
+                    host.click();
+                }
+                invalidate();
+                return;
+            }
+        }
         MapModel.Step step = null;
-        if (x >= REMOVE_X && x < REMOVE_X + REMOVE_W) {
-            step = MapRules.erase(map, selected);
-            selected = -1;
-        } else if (MapRules.isResource(u.type) && x >= MINUS_X && x < MINUS_X + STEP_W) {
-            step = MapRules.amount(map, selected, -1);
-        } else if (MapRules.isResource(u.type) && x >= PLUS_X && x < PLUS_X + STEP_W) {
-            step = MapRules.amount(map, selected, 1);
+        if (several ? (x >= ALL_X && x < ALL_X + ALL_W) : (x >= REMOVE_X && x < REMOVE_X + REMOVE_W)) {
+            // Removed units are repeated on the images when Mirror is on (EDITOR_DESIGN.md 4.2).
+            final java.util.TreeSet<Integer> gone = new java.util.TreeSet<Integer>();
+            for (int i : picked) {
+                gone.addAll(MapRules.withImages(map, i, mirror));
+            }
+            step = MapRules.eraseAll(map, gone);
+            chosen = new int[0];
+        } else if (!several && MapRules.isResource(u.type) && x >= MINUS_X && x < MINUS_X + STEP_W) {
+            step = MapRules.amountAll(map, picked, -1);
+        } else if (!several && MapRules.isResource(u.type) && x >= PLUS_X && x < PLUS_X + STEP_W) {
+            step = MapRules.amountAll(map, picked, 1);
+        } else if (!several && MapRules.isResource(u.type) && x >= AMOUNT_X && x < AMOUNT_X + AMOUNT_W) {
+            // Tap the amount: the number sheet over the view (E1); its OK comes back as typeAmount.
+            boolean oneAmount = true;
+            for (int i : picked) {
+                oneAmount &= map.unit(i).data == u.data;
+            }
+            if (host != null) {
+                host.click();
+                host.amount(nameOf(host, u.type), oneAmount ? (long) u.data * MapModel.RESOURCE_UNIT : -1L);
+            }
+            return;
+        } else if (!several && MapRules.ownerCells(u.type) && StripOwners.at(x) >= 0) {
+            step = MapRules.ownerAll(map, picked, StripOwners.at(x));
+        } else if (!several && MapRules.hasAiWord(u.type) && x >= AI_X && x < AI_X + AI_W) {
+            boolean allPassive = true;
+            for (int i : picked) {
+                allPassive &= MapRules.isPassive(map.unit(i).data);
+            }
+            step = MapRules.aiWordAll(map, picked, !allPassive);
         }
         if (step != null) {
             apply(step);
@@ -1349,6 +2143,9 @@ public final class CanvasView extends View {
 
     /** End whatever a finger has begun, keeping a begun stroke: before the map is read as a whole. */
     public void rest() {
+        dropPending();
+        removeCallbacks(hold);
+        stopEdge();
         endStroke(true);
         unitUp(false);
         tapPending = false;
@@ -1372,24 +2169,31 @@ public final class CanvasView extends View {
     private void unitDown(float x, float y) {
         final int tx = tileX(x), ty = tileY(y);
         if (tool == TOOL_UNITS) {
-            ghostType = MapRules.typeOf(unitKind, ownerRace());
-            moving = -1;
+            ghostType = unitType;
             grabX = grabY = (MapRules.footprint(ghostType) - 1) / 2f;
             unitMove(x, y);
         } else if (tool == TOOL_SELECT) {
-            final int at = MapRules.unitAt(map, tx, ty);
-            if (at != selected && host != null) {
-                host.click();
-            }
-            selected = at;
-            moving = -1;
             ghostType = -1;
-            if (at >= 0) {
-                // Moved only once the finger leaves the tile it came down on.
-                grabX = tx - map.unit(at).x;
-                grabY = ty - map.unit(at).y;
-                ghostX = map.unit(at).x;
-                ghostY = map.unit(at).y;
+            groupMoving = false;
+            final int at = MapRules.unitAt(map, tx, ty);
+            if (at < 0) {
+                // Empty ground: a rectangle, or with no movement a tap that chooses nothing.
+                boxing = true;
+                boxMoved = false;
+                boxX0 = boxX1 = tx;
+                boxY0 = boxY1 = ty;
+            } else {
+                if (!isChosen(at)) {
+                    chosen = new int[] { at };
+                    if (host != null) {
+                        host.click();
+                    }
+                }
+                // Moved only once the finger leaves the tile it came down on; a chosen group moves together.
+                grabbing = true;
+                grabTX = tx;
+                grabTY = ty;
+                moveDX = moveDY = 0;
             }
         } else if (tool == TOOL_ERASE) {
             erasePending = true;
@@ -1404,15 +2208,16 @@ public final class CanvasView extends View {
         if (tool == TOOL_UNITS && ghostType >= 0) {
             ghostX = Math.round((x - canvasLeft() + originX) / tilePx - 0.5f - grabX);
             ghostY = Math.round((y + originY) / tilePx - 0.5f - grabY);
-        } else if (tool == TOOL_SELECT && selected >= 0 && selected < map.unitCount()) {
-            final int nx = tx - (int) grabX, ny = ty - (int) grabY;
-            if (moving < 0 && (nx != ghostX || ny != ghostY)) {
-                moving = selected;
-                ghostType = map.unit(selected).type;
-            }
-            if (moving >= 0) {
-                ghostX = nx;
-                ghostY = ny;
+        } else if (tool == TOOL_SELECT && boxing) {
+            boxMoved |= tx != boxX0 || ty != boxY0;
+            boxX1 = tx;
+            boxY1 = ty;
+        } else if (tool == TOOL_SELECT && grabbing && liveChosen().length > 0) {
+            final int dx = tx - grabTX, dy = ty - grabTY;
+            groupMoving |= dx != 0 || dy != 0;
+            if (groupMoving) {
+                moveDX = dx;
+                moveDY = dy;
             }
         } else if (tool == TOOL_ERASE && (!erasePending || tx != eraseX || ty != eraseY)) {
             if (erasePending) {
@@ -1426,18 +2231,29 @@ public final class CanvasView extends View {
 
     /** The finger was lifted, or the touch was taken away (keep false). */
     private void unitUp(boolean keep) {
-        final int type = ghostType, was = moving;
+        final int type = ghostType;
         ghostType = -1;
-        moving = -1;
         if (erasePending) {
             erasePending = false;
             if (keep) {
                 eraseAt(eraseX, eraseY);
             }
         }
-        if (keep && type >= 0) {
-            final MapModel.Step step = (was >= 0) ? MapRules.move(map, was, ghostX, ghostY)
-                : MapRules.place(map, unitKind, owner, ghostX, ghostY);
+        if (boxing) {
+            boxing = false;
+            if (keep) {
+                final int[] now = boxMoved ? MapRules.unitsIn(map, boxX0, boxY0, boxX1, boxY1) : new int[0];
+                if (!java.util.Arrays.equals(now, chosen) && host != null) {
+                    host.click();
+                }
+                chosen = now;
+            }
+        }
+        final boolean moved = groupMoving;
+        groupMoving = false;
+        grabbing = false;
+        if (keep && moved) {
+            final MapModel.Step step = MapRules.moveAll(map, liveChosen(), moveDX, moveDY);
             if (step != null) {
                 apply(step);
                 if (host != null) {
@@ -1445,17 +2261,161 @@ public final class CanvasView extends View {
                 }
             }
         }
+        if (keep && type >= 0) {
+            // Placed units are repeated on the images when Mirror is on (EDITOR_DESIGN.md 4.2; owner decision 88, 1A).
+            final MapRules.Mirrored made = MapRules.mirrorPlaceType(map, unitType, owner, ghostX, ghostY, mirror);
+            if (made.step != null) {
+                apply(made.step);
+                if (host != null) {
+                    host.click();
+                    if (made.placed < made.wanted) {
+                        host.notice(NOTICE_MILLIS, "{0} of {1} not placed: the image falls where it cannot stand",
+                                    made.wanted - made.placed, made.wanted);
+                    }
+                }
+            }
+        }
         invalidate();
     }
 
+    /** Erase on a tile: the unit there and its images; else the wall there and its images. */
     private void eraseAt(int tx, int ty) {
         final int at = MapRules.unitAt(map, tx, ty);
         if (at >= 0) {
-            apply(MapRules.erase(map, at));
+            chosen = new int[0];
+            apply(MapRules.eraseAll(map, MapRules.withImages(map, at, mirror)));
+            if (host != null) {
+                host.click();
+            }
+            return;
+        }
+        final Terrain set = terrain;
+        if (set == null || tx < 0 || ty < 0 || tx >= map.width() || ty >= map.height()
+            || !Walls.isWall(map.tile(tx, ty))) {
+            return;
+        }
+        final Terrain.Stroke s = set.begin(map, System.nanoTime());
+        if (s.unwall(tx, ty, mirror)) {
+            apply(s.step());
+            redraw(s.minX(), s.minY(), s.maxX(), s.maxY());
             if (host != null) {
                 host.click();
             }
         }
+    }
+
+    // ----- the long press and the canvas edge -----
+
+    /** Whatever the finger began is let go without a change. */
+    private void dropFinger() {
+        endStroke(false);
+        ghostType = -1;
+        grabbing = false;
+        groupMoving = false;
+        boxing = false;
+        erasePending = false;
+        tapPending = false;
+        stopEdge();
+    }
+
+    /**
+     * A finger held 400 ms without moving: on a unit, with any tool, the unit is chosen and its
+     * strip shown; on terrain with the tool Terrain, that terrain is taken into the palette.
+     * Otherwise the tool goes on as if nothing had happened.
+     */
+    private void longPress() {
+        if (twoFingers || tilePx <= 0f || released) {
+            return;
+        }
+        final float mx = (downX - canvasLeft() + originX) / tilePx, my = (downY + originY) / tilePx;
+        final int tx = (int) Math.floor(mx), ty = (int) Math.floor(my);
+        if (tx < 0 || ty < 0 || tx >= map.width() || ty >= map.height()) {
+            return;
+        }
+        final int at = MapRules.unitAt(map, tx, ty);
+        if (at >= 0) {
+            dropFinger();
+            chosen = new int[] { at };
+        } else if (tool == TOOL_TERRAIN) {
+            final int found = paletteKindAt(tx, ty, mx - tx, my - ty);
+            if (found < 0) {
+                return;
+            }
+            dropFinger();
+            kind = found;
+        } else {
+            return;
+        }
+        held = true;
+        if (host != null) {
+            host.click();
+        }
+        invalidate();
+    }
+
+    /** True while one finger paints or moves a unit: the drags the canvas edge scrolls under. */
+    private boolean edgeDrag() {
+        return !twoFingers && !held && (painting != null || (tool == TOOL_UNITS && ghostType >= 0) || grabbing);
+    }
+
+    /** How fast the view moves for a finger at a place along one axis, pixels a second; 0 away from the edge. */
+    private float edgeSpeed(float at, float low, float high) {
+        final float band = EDGE_BAND * unit;
+        if (band <= 0f) {
+            return 0f;
+        }
+        if (at < low + band) {
+            return -EDGE_SPEED * unit * Math.min(1f, (low + band - at) / band);
+        }
+        if (at > high - band) {
+            return EDGE_SPEED * unit * Math.min(1f, (at - (high - band)) / band);
+        }
+        return 0f;
+    }
+
+    /** The finger moved to (x, y): begin scrolling when it reached the canvas edge. */
+    private void edgeCheck(float x, float y) {
+        lastX = x;
+        lastY = y;
+        if (edging || !edgeDrag()) {
+            return;
+        }
+        if (edgeSpeed(x, canvasLeft(), canvasLeft() + canvasWidth()) != 0f || edgeSpeed(y, 0f, canvasHeight()) != 0f) {
+            edging = true;
+            edgeLast = android.os.SystemClock.uptimeMillis();
+            postDelayed(edge, 16L);
+        }
+    }
+
+    private void edgeStep() {
+        if (!edging) {
+            return;
+        }
+        final float vx = edgeSpeed(lastX, canvasLeft(), canvasLeft() + canvasWidth());
+        final float vy = edgeSpeed(lastY, 0f, canvasHeight());
+        if (!edgeDrag() || (vx == 0f && vy == 0f)) {
+            edging = false;
+            return;
+        }
+        final long now = android.os.SystemClock.uptimeMillis();
+        final float dt = Math.min(0.05f, (now - edgeLast) / 1000f);
+        edgeLast = now;
+        originX += vx * dt;
+        originY += vy * dt;
+        settle();
+        // The map moved under the finger that stands still: the stroke or the unit follows it.
+        if (painting != null) {
+            dab(lastX, lastY);
+        } else {
+            unitMove(lastX, lastY);
+        }
+        invalidate();
+        postDelayed(edge, 16L);
+    }
+
+    private void stopEdge() {
+        edging = false;
+        removeCallbacks(edge);
     }
 
     public boolean canUndo() { return map.canUndo(); }
@@ -1470,7 +2430,8 @@ public final class CanvasView extends View {
     private void history(boolean back) {
         endStroke(true);
         unitUp(false);
-        selected = -1;
+        dropPending();
+        chosen = new int[0];
         try {
             if (back ? work.undo() : work.redo()) {
                 redraw(0, 0, map.width() - 1, map.height() - 1);
@@ -1518,18 +2479,35 @@ public final class CanvasView extends View {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 twoFingers = false;
+                held = false;
+                removeCallbacks(hold);
+                stopEdge();
                 miniRect(dst);
                 onMini = dst.contains(e.getX(), e.getY());
                 inPalette = !onMini && e.getX() >= PALETTE_X * unit;
                 inTools = e.getX() < canvasLeft();
+                if (inPalette) {
+                    listDown(e.getX(), e.getY(), e.getEventTime());
+                }
                 if (onMini) {
                     lookAt(e.getX(), e.getY());
                 }
                 markX = -1;
                 inStrip = !onMini && !inPalette && !inTools && inStrip(e.getX(), e.getY());
+                if (inStrip) {
+                    stripDown(e.getX());
+                }
                 if (onMini || inPalette || inTools || inStrip || tilePx <= 0f) {
                     break;
                 }
+                downX = lastX = e.getX();
+                downY = lastY = e.getY();
+                if (pendingFill != null) {
+                    // A fill waits: the canvas takes no tool; a tap on it drops the fill, two fingers still move the view.
+                    dropTap = true;
+                    break;
+                }
+                postDelayed(hold, HOLD_MILLIS);
                 if (tool == TOOL_FILL || tool == TOOL_PICK) {
                     tapPending = true;
                     tapX = e.getX();
@@ -1547,12 +2525,16 @@ public final class CanvasView extends View {
                 break;
             case MotionEvent.ACTION_POINTER_DOWN:
                 if (e.getPointerCount() == 2) {
+                    removeCallbacks(hold);
+                    stopEdge();
+                    held = false;
                     // A second finger soon after the first takes the begun stroke back.
                     endStroke(e.getEventTime() - paintBegan > 150);
                     unitUp(false);
                     tapPending = false;
                     inStrip = false;
                     inPalette = false;
+                    listDragging = false;
                     inTools = false;
                     // Two fingers are always the view, whatever the first finger had begun.
                     twoFingers = true;
@@ -1563,6 +2545,9 @@ public final class CanvasView extends View {
                 }
                 break;
             case MotionEvent.ACTION_MOVE:
+                if (!held && Math.hypot(e.getX() - downX, e.getY() - downY) > TAP_SLOP * unit) {
+                    removeCallbacks(hold);
+                }
                 if (twoFingers && e.getPointerCount() >= 2) {
                     final float midX = (e.getX(0) + e.getX(1)) / 2f, midY = (e.getY(0) + e.getY(1)) / 2f;
                     final float now = span(e);
@@ -1581,12 +2566,20 @@ public final class CanvasView extends View {
                     invalidate();
                 } else if (onMini) {
                     lookAt(e.getX(), e.getY());
+                } else if (inStrip) {
+                    stripMove(e.getX());
+                } else if (inPalette) {
+                    listMove(e.getY(), e.getEventTime());
+                } else if (held) {
+                    // A long press has acted: the finger does nothing more until it is lifted.
                 } else if (painting != null && !twoFingers) {
                     dab(e.getX(), e.getY());
+                    edgeCheck(e.getX(), e.getY());
                 } else if (tapPending) {
                     tapPending = Math.hypot(e.getX() - tapX, e.getY() - tapY) <= TAP_SLOP * unit;
                 } else if (!twoFingers && !inPalette && !inTools && !inStrip && !terrainPalette()) {
                     unitMove(e.getX(), e.getY());
+                    edgeCheck(e.getX(), e.getY());
                 }
                 break;
             case MotionEvent.ACTION_POINTER_UP:
@@ -1594,6 +2587,13 @@ public final class CanvasView extends View {
             case MotionEvent.ACTION_CANCEL:
                 // The finger left of a two-finger gesture does nothing until all are lifted.
                 if (e.getActionMasked() != MotionEvent.ACTION_POINTER_UP) {
+                    removeCallbacks(hold);
+                    stopEdge();
+                    held = false;
+                    if (dropTap && !twoFingers && e.getActionMasked() == MotionEvent.ACTION_UP) {
+                        dropPending();
+                    }
+                    dropTap = false;
                     endStroke(e.getActionMasked() == MotionEvent.ACTION_UP);
                     unitUp(e.getActionMasked() == MotionEvent.ACTION_UP && !twoFingers);
                     if (tapPending && !twoFingers && e.getActionMasked() == MotionEvent.ACTION_UP) {
@@ -1608,7 +2608,7 @@ public final class CanvasView extends View {
                     if (inPalette && !twoFingers && e.getActionMasked() == MotionEvent.ACTION_UP) {
                         if (terrainPalette()) {
                             paletteTap(e.getX(), e.getY());
-                        } else {
+                        } else if (!listScrolled) {
                             unitPaletteTap(e.getX(), e.getY());
                         }
                     }
@@ -1617,8 +2617,11 @@ public final class CanvasView extends View {
                         && !balanceTap(e.getX(), e.getY())) {
                         mirrorTap(e.getX(), e.getY());
                     }
-                    if (inStrip && !twoFingers && e.getActionMasked() == MotionEvent.ACTION_UP) {
+                    if (inStrip && !twoFingers && !chipDragging && e.getActionMasked() == MotionEvent.ACTION_UP) {
                         stripTap(e.getX(), e.getY());
+                    }
+                    if (inPalette) {
+                        listUp(e.getActionMasked() == MotionEvent.ACTION_UP && !twoFingers);
                     }
                     inStrip = false;
                     inPalette = false;

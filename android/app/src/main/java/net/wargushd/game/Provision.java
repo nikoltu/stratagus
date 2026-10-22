@@ -27,6 +27,12 @@ final class Provision {
     /** Receives progress on the worker thread. */
     interface Progress {
         void unpacked(int done, int total);
+
+        /**
+         * The interface art is being made from the game folder: done of the expected files
+         * (the package's list) have been written in this run.
+         */
+        void made(int done, int expected);
     }
 
     private Provision() {}
@@ -109,17 +115,27 @@ final class Provision {
             carried.add(new File(dest, path.substring(ASSET_ROOT.length() + 1)).getPath());
         }
         boolean madeAll = false;
+        final java.util.HashSet<String> expected = new java.util.HashSet<String>();
+        for (String rel : artList(c)) {
+            expected.add(new File(dest, rel).getPath());
+        }
         synchronized (MADE) {
             MADE.clear();
+            madeExpected = expected;
+            madeCounted = 0;
+            madeProgress = progress;
         }
         final String folder = GateActivity.rememberedFolder(c);
         if (folder != null) {
             madeTried = true;
-            final boolean fonts = FontBaker.bake(new File(folder), dest);
+            progress.made(0, expected.size());
+            final boolean fonts = FontBaker.bake(c, new File(folder), dest);
             madeAll = ArtBaker.bake(new File(folder), dest) && fonts;
         }
         synchronized (MADE) {
             carried.addAll(MADE);
+            madeExpected = null;
+            madeProgress = null;
         }
         // What an older version left in files/data and this package neither carries nor has
         // just made is removed: the engine would otherwise find and use it (an old tileset
@@ -139,11 +155,26 @@ final class Provision {
     /** What the makers wrote in this run. */
     private static final java.util.HashSet<String> MADE = new java.util.HashSet<String>();
 
+    /** While the makers run in unpack: the listed art files, how many of them were written, and who is told. */
+    private static java.util.Set<String> madeExpected;
+    private static int madeCounted;
+    private static Progress madeProgress;
+
     /** A maker reports a file it wrote under files/data. */
     static void wrote(File f) {
+        final Progress tell;
+        final int done, total;
         synchronized (MADE) {
-            MADE.add(f.getPath());
+            final boolean listed = MADE.add(f.getPath()) && madeExpected != null
+                && madeExpected.contains(f.getPath());
+            if (!listed || madeProgress == null) {
+                return;
+            }
+            tell = madeProgress;
+            done = ++madeCounted;
+            total = madeExpected.size();
         }
+        tell.made(done, total);
     }
 
     /** True for a path (relative to files/data) in one of the places the makers write to. */
@@ -220,24 +251,31 @@ final class Provision {
      */
     static int[] countInterfaceArt(Context c) {
         int present = 0;
-        int expected = 0;
         final File data = dataDir(c);
+        final List<String> list = artList(c);
+        for (String path : list) {
+            if (new File(data, path).isFile()) {
+                ++present;
+            }
+        }
+        return new int[] { present, list.size() };
+    }
+
+    /** The package's list of interface-art files, relative to files/data; empty when it carries none. */
+    private static List<String> artList(Context c) {
+        final List<String> out = new ArrayList<String>();
         try (BufferedReader in = new BufferedReader(
                  new InputStreamReader(c.getAssets().open(ART_LIST), "UTF-8"))) {
             String line;
             while ((line = in.readLine()) != null) {
                 final String path = line.trim();
-                if (path.isEmpty()) {
-                    continue;
-                }
-                ++expected;
-                if (new File(data, path).isFile()) {
-                    ++present;
+                if (!path.isEmpty()) {
+                    out.add(path);
                 }
             }
         } catch (Exception e) {
             // No list in this package: nothing to report.
         }
-        return new int[] { present, expected };
+        return out;
     }
 }

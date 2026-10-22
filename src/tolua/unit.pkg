@@ -35,9 +35,15 @@ class CPreference
 	tolua_property bool SimplifiedAutoTargeting;
 	tolua_property bool AiChecksDependencies;
 	tolua_property bool AllyDepositsAllowed;
+	tolua_property bool ClassicView;
 	bool HardwareCursor;
 	bool SelectionRectangleIndicatesDamage;
 	bool FormationMovement;
+	bool HoldFrameUnderWindow;
+	bool AnimatedWater;
+	bool UnitSpeech;
+	bool UnitAck;
+	bool BuildingSound;
 
         unsigned int FrameSkip;
 
@@ -54,7 +60,7 @@ class CPreference
 
 class CUnitManager
 {
-	CUnit &GetSlotUnit(int index) const;
+	CUnit *FindSlotUnit @ GetSlotUnit(int index) const; // nil for a slot that does not exist
 };
 
 tolua_readonly CUnitManager *UnitManager;   /// Unit manager

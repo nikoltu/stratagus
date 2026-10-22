@@ -39,6 +39,7 @@
 #include "ui.h"
 
 #include "actions.h"
+#include "action/action_resource.h"
 #include "commands.h"
 #include "depend.h"
 #include "font.h"
@@ -55,6 +56,7 @@
 #include "unittype.h"
 #include "upgrade.h"
 #include "video.h"
+#include "wc2ai.h"
 #include "../video/hd_classic_hud.h"
 
 #include <cctype>
@@ -287,8 +289,11 @@ static int GetButtonStatus(const ButtonAction &button, int UnderCursor)
 		case ButtonCmd::SpellCast:
 			// FIXME : and IconSelected ?
 
-			// Autocast
+			// Autocast (never for a person's units, DECODE_B11_ROUND2 4)
 			if (ranges::all_of(Selected, [&](const CUnit *unit) {
+					if (!wc2ai::UnitMayAutoCast(unit->Player->Type == PlayerTypes::PlayerPerson)) {
+						return false;
+					}
 					if (button.Value < 0 || static_cast<size_t>(button.Value) >= unit->AutoCastSpell.size()) {
 						WarnInvalidButtonSpell(*unit, button.Value, "autocast status", unit->AutoCastSpell.size());
 						return false;
@@ -304,8 +309,11 @@ static int GetButtonStatus(const ButtonAction &button, int UnderCursor)
 				})) {
 				res |= IconSelected;
 			}
-			// Auto repair
-			if (ranges::all_of(Selected, [](const CUnit *unit) { return unit->AutoRepair; })) {
+			// Auto repair (never for a person's units)
+			if (ranges::all_of(Selected, [](const CUnit *unit) {
+					return unit->AutoRepair
+				        && wc2ai::UnitMayAutoRepair(unit->Player->Type == PlayerTypes::PlayerPerson);
+				})) {
 				res |= IconAutoCast;
 			}
 			break;
@@ -548,6 +556,13 @@ void CButtonPanel::Draw()
 	if (CurrentButtons.empty()) {
 		return;
 	}
+	// Guard (SELECTION-CRASH 3.4.83): a released unit left in the selection must not be read.
+	if (DropUnreadableSelectedUnits() != 0) {
+		Update();
+		if (CurrentButtons.empty() || Selected.empty()) {
+			return;
+		}
+	}
 	std::vector<ButtonAction> &buttons(CurrentButtons);
 
 	Assert(!Selected.empty());
@@ -755,10 +770,7 @@ bool IsButtonAllowed(const CUnit &unit, const ButtonAction &buttonaction)
 			res = unit.CanMove();
 			break;
 		case ButtonCmd::Harvest:
-			if (!unit.CurrentResource
-				|| unit.ResourcesHeld < unit.Type->ResInfo[unit.CurrentResource]->ResourceCapacity) {
-				res = true;
-			}
+			res = HarvestButtonShown(unit.ResourcesHeld);
 			break;
 		case ButtonCmd::Return:
 		    if (unit.CurrentResource && unit.ResourcesHeld > 0) {
@@ -939,6 +951,7 @@ static void UpdateButtonPanelSingleUnit(const CUnit &unit, std::vector<ButtonAct
 */
 void CButtonPanel::Update()
 {
+	DropUnreadableSelectedUnits();
 	if (Selected.empty()) {
 		CurrentButtons.clear();
 		return;
@@ -1008,34 +1021,8 @@ void CButtonPanel::DoClicked_Unload(int button)
 void CButtonPanel::DoClicked_SpellCast(int button)
 {
 	const int spellId = CurrentButtons[button].Value;
-	if (KeyModifiers & ModifierControl) {
-		if (!SpellTypeTable[spellId]->AutoCast) {
-			PlayGameSound(GameSounds.PlacementError[ThisPlayer->Race].Sound.get(), MaxSampleVolume);
-			return;
-		}
-
-		// If any selected unit doesn't have autocast on turn it on
-		// for everyone
-
-		const bool autocast = ranges::any_of(
-			Selected, [&](const CUnit *unit) {
-				if (static_cast<size_t>(spellId) >= unit->AutoCastSpell.size()) {
-					WarnInvalidButtonSpell(*unit, spellId, "autocast toggle", unit->AutoCastSpell.size());
-					return true;
-				}
-				return !unit->AutoCastSpell[spellId];
-			});
-		for (CUnit *unit : Selected) {
-			if (static_cast<size_t>(spellId) >= unit->AutoCastSpell.size()) {
-				WarnInvalidButtonSpell(*unit, spellId, "autocast toggle", unit->AutoCastSpell.size());
-				continue;
-			}
-			if (unit->AutoCastSpell[spellId] != autocast) {
-				SendCommandAutoSpellCast(*unit, spellId, autocast);
-			}
-		}
-		return;
-	}
+	// No Ctrl + click autocast toggle: a person's units cast only on an order, as in the original
+	// (DECODE_B11_ROUND2 4); a Ctrl + click is an ordinary click.
 	if (SpellTypeTable[spellId]->IsCasterOnly()) {
 		const EFlushMode flush = !(KeyModifiers & ModifierShift) ? EFlushMode::On : EFlushMode::Off;
 
@@ -1050,17 +1037,8 @@ void CButtonPanel::DoClicked_SpellCast(int button)
 
 void CButtonPanel::DoClicked_Repair(int button)
 {
-	if (KeyModifiers & ModifierControl) {
-		// If any selected unit doesn't have autorepair on turn it on for everyone
-		const bool autorepair =
-			ranges::any_of(Selected, [](const CUnit *unit) { return unit->AutoRepair == false; });
-		for (CUnit *unit : Selected) {
-			if (unit->AutoRepair != autorepair) {
-				SendCommandAutoRepair(*unit, autorepair);
-			}
-		}
-		return;
-	}
+	// No Ctrl + click auto-repair toggle: a person's workers repair only on an order, as in the
+	// original (owner 2026-10-15); a Ctrl + click is an ordinary click.
 	DoClicked_SelectTarget(button);
 }
 
@@ -1185,7 +1163,8 @@ void CButtonPanel::DoClicked_Train(int button)
 	}
 
 	if (Selected[best_training_place]->CurrentAction() == UnitAction::Train && !EnableTrainingQueue) {
-		ThisPlayer->Notify(ColorYellow, Selected[best_training_place]->tilePos, "%s", _("Unit training queue is full"));
+		// U-16: no line. The game's string table has no text for a full training queue; the
+		// click is still refused.
 	}
 	else if (ThisPlayer->CheckLimits(type) == ECheckLimit::Ok && !ThisPlayer->CheckUnitType(type)) {
 		const EFlushMode flush = !(KeyModifiers & ModifierShift) ? EFlushMode::On : EFlushMode::Off;

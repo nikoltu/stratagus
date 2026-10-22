@@ -60,6 +60,15 @@ public:
 
 	bool IsAutoTargeting() const;
 	void OfferNewTarget(const CUnit &unit, CUnit &target);
+	wc2ai::Reissue ReissueReady(const CUnit &unit, unsigned long cycle) override;
+	/// Is this an attack-move to a point (the original's order 0x0A memory)?
+	bool IsRememberedAttackMove() const;
+	/// The path of an attack-move to its point failed: idle, keeping it as the unit's memory.
+	void EndBlockedAttackMove(CUnit &unit);
+	/// Read-only views for the network sync hash.
+	int GetRange() const { return Range; }
+	const Vec2i &GetAttackMovePos() const { return attackMovePos; }
+	bool GetGoalPulled() const { return GoalPulled; }
 
 private:
 	bool IsMovingToAttackPos() const;
@@ -70,12 +79,19 @@ private:
 	void TurnToTarget(CUnit &unit, const CUnit *target);
 	void SetAutoTarget(CUnit &unit, CUnit *target);
 	bool EndActionAttack(CUnit &unit, const bool canBeFinished);
+	void RememberAttackMove(CUnit &unit) const;
 	void MoveToBetterPos(CUnit &unit);
 	bool AutoSelectTarget(CUnit &unit);
 	bool CheckForTargetInRange(CUnit &unit);
 	void MoveToAttackPos(CUnit &unit, const int pfReturn);
 	void MoveToTarget(CUnit &unit);
 	void AttackTarget(CUnit &unit);
+	/// Is goalPos the attack-move's own point (as ordered, or pulled), not a target's tile?
+	bool HeadsForOwnPoint() const;
+	/// A person's ship whose target died: notes the kill and keeps the ship in its fight for
+	/// wc2ai::ShipKillHold cycles (true = this cycle is spent holding, or the hold has just ended
+	/// with the next target or the re-issue).
+	bool HoldAfterKill(CUnit &unit);
 
 private:
 	int State = 0;
@@ -86,6 +102,13 @@ private:
 	Vec2i goalPos{-1, -1}; // Current goal position
 	Vec2i attackMovePos{-1, -1}; // If attack-move was ordered
 	unsigned char Sleep = 0;
+	unsigned long ReissueAt = 0; // game cycle from which the remembered attack-move may be sent again
+	unsigned long KillSeenAt = 0; // game cycle a ship saw its target dead (0 = none); saved "kill-seen-at"
+	/// An attack-move to a point: goalPos is the point pulled toward the unit (0x4C2630) from the
+	/// tile it stood on when the order (or its re-issue) became its order; attackMovePos stays the
+	/// ordered point. False while the pull is still to come, and while goalPos is a target's tile.
+	/// Saved as "goal-pulled".
+	bool GoalPulled = false;
 };
 //@}
 

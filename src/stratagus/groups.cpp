@@ -108,6 +108,10 @@ private:
 };                                       /// group of units
 
 static CUnitGroup Groups[NUM_GROUPS];    /// Number of groups predefined
+/// When each group was last given units (0: never since it was cleared); only for the mark of a
+/// unit's last group on the touch strip, so it is neither saved nor part of the simulation.
+static unsigned long GroupStamp[NUM_GROUPS];
+static unsigned long GroupStampLast = 0;
 
 /*----------------------------------------------------------------------------
 --  Functions
@@ -139,7 +143,9 @@ void CleanGroups()
 {
 	for (int i = 0; i < NUM_GROUPS; ++i) {
 		Groups[i].init();
+		GroupStamp[i] = 0;
 	}
+	GroupStampLast = 0;
 }
 
 bool IsGroupTainted(int num)
@@ -176,6 +182,7 @@ void ClearGroup(int num)
 		Assert(!unit->Destroyed);
 	}
 	group.init();
+	GroupStamp[num] = 0;
 }
 
 /**
@@ -199,6 +206,38 @@ void AddToGroup(CUnit **units, unsigned int nunits, int num)
 		CUnit &unit = *units[i];
 		group.add(unit, num);
 	}
+	if (num < NUM_GROUPS && !group.getUnits().empty()) {
+		GroupStamp[num] = ++GroupStampLast;
+	}
+}
+
+/**
+**  The group of a set that was given units last.
+**
+**  @param bits    the groups, bit n for group n
+**  @param stamps  when each group was given units last (higher = later)
+**  @param count   how many groups the stamps hold
+**
+**  @return  the group with the highest stamp (the lower number on a tie), -1 if bits holds none
+*/
+int LastGroupOfBits(unsigned int bits, const unsigned long *stamps, int count)
+{
+	int last = -1;
+	for (int num = 0; num < count; ++num) {
+		if ((bits & (1u << num)) != 0 && (last < 0 || stamps[num] > stamps[last])) {
+			last = num;
+		}
+	}
+	return last;
+}
+
+/**
+**  The group the unit was put in last. After a load every group has the same (no) stamp, and the
+**  lowest group the unit is in stands for it.
+*/
+int GetLastGroupOfUnit(const CUnit &unit)
+{
+	return LastGroupOfBits(unit.GroupId, GroupStamp, NUM_GROUPS);
 }
 
 /**

@@ -220,7 +220,9 @@ public class WargusHDActivity extends SDLActivity {
 
             @Override
             public void onClosed() {
-                // The keys are the game's again.
+                // The keys are the game's again; the engine's own text fields pan the game above
+                // the keyboard (the manifest's adjustPan).
+                getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
                 final View surface = (View) (Object) mSurface;
                 if (surface != null) {
                     surface.requestFocus();

@@ -113,6 +113,7 @@ set(action_SRCS
 	src/action/action_upgradeto.cpp
 	src/action/actions.cpp
 	src/action/command.cpp
+	src/action/goal_pull.cpp
 )
 source_group(action FILES ${action_SRCS})
 
@@ -148,6 +149,9 @@ set(ai_SRCS
 	src/ai/ai.cpp
 	src/ai/wc2ai_data.cpp
 	src/ai/wc2ai.cpp
+	src/ai/wc2bot.cpp
+	src/ai/wc2bot_core.cpp
+	src/ai/wc2bot_profile.cpp
 	src/ai/ai_force.cpp
 	src/ai/ai_magic.cpp
 	src/ai/ai_plan.cpp
@@ -201,6 +205,7 @@ set(map_SRCS
 	src/map/fow_utils.cpp
 	src/map/map.cpp
 	src/map/map_draw.cpp
+	src/map/map_water.cpp
 	src/map/map_fog.cpp
 	src/map/map_radar.cpp
 	src/map/map_wall.cpp
@@ -497,6 +502,7 @@ set(stratagus_generic_HDRS
 	src/video/intern_video.h
 	src/video/renderer.h
 	src/include/actions.h
+	src/include/goal_pull.h
 	src/include/ai.h
 	src/include/animation.h
 	src/include/color.h
@@ -520,8 +526,11 @@ set(stratagus_generic_HDRS
 	src/include/luacallback.h
 	src/include/map.h
 	src/include/mods.h
+	src/include/wc2bot.h
 	src/include/mdns_wrapper.h
 	src/include/menus.h
+	src/include/message_tap.h
+	src/include/touch_drag.h
 	src/include/minimap.h
 	src/include/missile.h
 	src/include/missile_cadence.h
@@ -583,22 +592,55 @@ set(stratagus_generic_HDRS
 set(stratagus_tests_SRCS
 	tests/main.cpp
 	tests/stratagus/test_action_built.cpp
+	tests/stratagus/test_audit_leftovers.cpp
+	tests/stratagus/test_anim_wait.cpp
+	tests/stratagus/test_coil_goal.cpp
+	tests/stratagus/test_corridor_52.cpp
+	tests/stratagus/test_unit_cull_extent.cpp
+	tests/stratagus/test_editor_check.cpp
+	tests/stratagus/test_goal_pull.cpp
 	tests/stratagus/test_command_quit.cpp
 	tests/stratagus/test_depend.cpp
+	tests/stratagus/test_flyer_death.cpp
 	tests/stratagus/test_format.cpp
+	tests/stratagus/test_group_mark.cpp
 	tests/stratagus/test_group_move.cpp
+	tests/stratagus/test_idle_bob.cpp
 	tests/stratagus/test_idle_search.cpp
+	tests/stratagus/test_lan_teams.cpp
 	tests/stratagus/test_lua_libs.cpp
+	tests/stratagus/test_lua_shadow.cpp
 	tests/stratagus/test_luacallback.cpp
+	tests/stratagus/test_message_tap.cpp
+	tests/stratagus/test_touch_drag.cpp
+	tests/stratagus/test_engine_messages.cpp
+	tests/stratagus/test_wc2bot.cpp
+	tests/stratagus/test_release_selection.cpp
+	tests/stratagus/test_rescue_55.cpp
+	tests/stratagus/test_slot_bounds.cpp
 	tests/stratagus/test_missile_fire.cpp
 	tests/stratagus/test_mods.cpp
+	tests/stratagus/test_palette_cycle.cpp
+	tests/stratagus/test_water_anim.cpp
+	tests/stratagus/test_pathfinder.cpp
+	tests/stratagus/test_path_quality.cpp
+	tests/stratagus/test_worker_traffic.cpp
+	tests/stratagus/test_player_limits.cpp
 	tests/stratagus/test_resource_cleanup.cpp
+	tests/stratagus/test_resource_word.cpp
 	tests/stratagus/test_saveload.cpp
+	tests/stratagus/test_ship_hit.cpp
 	tests/stratagus/test_sound.cpp
+	tests/stratagus/test_spell_range.cpp
+	tests/stratagus/test_sync_hash.cpp
 	tests/stratagus/test_trigger.cpp
 	tests/stratagus/test_unitptr.cpp
+	tests/stratagus/test_wc2strings_overlay.cpp
+	tests/stratagus/test_widget_layout.cpp
 	tests/stratagus/test_util.cpp
 	tests/stratagus/test_wc2ai.cpp
+	tests/stratagus/test_wc2ai_ferry.cpp
+	tests/stratagus/test_wc2credits.cpp
 	tests/stratagus/test_wc2mission.cpp
 	tests/network/test_net_lowlevel.cpp
 	tests/network/test_net_mesh.cpp
@@ -607,8 +649,12 @@ set(stratagus_tests_SRCS
 	tests/network/test_netconnect.cpp
 	tests/network/test_network.cpp
 	tests/network/test_udpsocket.cpp
+	tests/video/test_classic_f5_slot.cpp
+	tests/video/test_classic_sprite_map.cpp
+	tests/video/test_classic_calib56.cpp
 	tests/video/test_frame_pace.cpp
 	tests/video/test_hd_atlas.cpp
+	tests/video/test_font_codepage.cpp
 	tests/video/test_hudcanvas.cpp
 	tests/video/test_nineslice.cpp
 	tests/video/test_uianchor.cpp
@@ -722,11 +768,27 @@ else()
 endif()
 
 if(BUILD_VENDORED_MEDIA_LIBS)
+	# LOAD-TIME (work/LOAD_TIME_IMPL.md): the vendored sub-builds get no CMAKE_BUILD_TYPE, so zlib and
+	# libpng were compiled without optimisation (-O0) and libpng's ARM NEON filters were left to a
+	# /proc/cpuinfo "neon" check that fails on arm64 (it says "asimd"). Every HD atlas page goes
+	# through these two: build them optimised, NEON on for arm64. Only these two sub-builds.
+	set(WARGUSHD_SAVED_EXTERNAL_ARGS "${STRATAGUS_EXTERNAL_CMAKE_ARGS}")
+	list(APPEND STRATAGUS_EXTERNAL_CMAKE_ARGS -DCMAKE_BUILD_TYPE:STRING=Release)
+	if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)")
+		list(APPEND STRATAGUS_EXTERNAL_CMAKE_ARGS -DPNG_ARM_NEON:STRING=on)
+	endif()
 	vendored_zlib()
 	vendored_png()
+	set(STRATAGUS_EXTERNAL_CMAKE_ARGS "${WARGUSHD_SAVED_EXTERNAL_ARGS}")
+	# VENDOR-OPT (work/VENDOR_OPT_IMPL.md): the other ExternalProject sub-builds (bzip2, jpeg, lcms,
+	# mng, ogg, vorbis) were -O0 too. They get plain -O2 through CMAKE_C/CXX_FLAGS, with NO build
+	# type, so no -DNDEBUG is added and their defines stay as they were (no fast-math, no other flag).
+	# theora is an in-tree target and already builds with the engine's own flags.
+	list(APPEND STRATAGUS_EXTERNAL_CMAKE_ARGS -DCMAKE_C_FLAGS:STRING=-O2 -DCMAKE_CXX_FLAGS:STRING=-O2)
 	vendored_bzip2()
 	vendored_mng()
 	vendored_oggvorbis()
+	set(STRATAGUS_EXTERNAL_CMAKE_ARGS "${WARGUSHD_SAVED_EXTERNAL_ARGS}")
 	vendored_theora()
 else()
 	find_package(PNG REQUIRED)
@@ -738,9 +800,18 @@ else()
 endif()
 
 if (BUILD_VENDORED_SDL)
+	# VENDOR-OPT: SDL2, SDL2_mixer (with its own vendored ogg/vorbis/timidity) and SDL2_image (with its
+	# own jpeg) were -O0. Same -O2, no build type. SDL_assert.h picks level 2 when __OPTIMIZE__ is not
+	# defined and level 1 when it is; -DSDL_ASSERT_LEVEL=2 keeps the level these three ran with, so the
+	# only change is the optimisation. It is a compile flag of these sub-builds only, not written to
+	# SDL_config.h, so the engine's own SDL_assert level is unchanged.
+	set(WARGUSHD_SAVED_EXTERNAL_ARGS "${STRATAGUS_EXTERNAL_CMAKE_ARGS}")
+	list(APPEND STRATAGUS_EXTERNAL_CMAKE_ARGS "-DCMAKE_C_FLAGS:STRING=-O2 -DSDL_ASSERT_LEVEL=2"
+		"-DCMAKE_CXX_FLAGS:STRING=-O2 -DSDL_ASSERT_LEVEL=2")
 	vendored_sdl()
 	vendored_sdl_mixer()
 	vendored_sdl_image()
+	set(STRATAGUS_EXTERNAL_CMAKE_ARGS "${WARGUSHD_SAVED_EXTERNAL_ARGS}")
 
 	if(DOWNLOAD_FREEPATS)
 		vendored_freepats()
@@ -852,6 +923,11 @@ endif()
 # Stratagus definitions
 
 add_definitions(-DUSE_ZLIB -DPIXMAPS=\"${PIXMAPSDIRABS}\")
+# The debug bridge's command channel (src/debug/debug_bridge.cpp); OFF for a release build.
+option(WARGUSHD_DEBUG_COMMANDS "Compile the debug bridge command channel (debug builds only)" ON)
+if(WARGUSHD_DEBUG_COMMANDS)
+	add_definitions(-DWARGUSHD_DEBUG_COMMANDS)
+endif()
 include_directories(SYSTEM ${LUA_INCLUDE_DIR} ${SDL2_INCLUDE_DIR} ${SDL2_MIXER_INCLUDE_DIRS} ${SDL2_IMAGE_INCLUDE_DIRS} ${TOLUA++_INCLUDE_DIR} ${ZLIB_INCLUDE_DIR} ${PNG_INCLUDE_DIR})
 set(stratagus_LIBS ${stratagus_LIBS} ${LUA_LIBRARIES} ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARIES} ${SDL2_IMAGE_LIBRARIES} ${TOLUA++_LIBRARY} ${ZLIB_LIBRARIES} ${PNG_LIBRARY})
 
@@ -1268,6 +1344,10 @@ if(BUILD_TESTING)
 
 	add_executable(stratagus_tests ${stratagus_tests_SRCS})
 	target_link_libraries(stratagus_tests PUBLIC stratagus_lib doctest)
+	# The device scripts live in the local docs tree; the shadow scan skips itself without them.
+	set(WARGUSHD_DEVICE_SCRIPTS_DIR "C:/Git/wargushdlocaldocs/.wargushd/fulltree-changes/scripts" CACHE PATH
+		"Device Lua scripts scanned by the host tests")
+	target_compile_definitions(stratagus_tests PRIVATE WARGUSHD_DEVICE_SCRIPTS_DIR="${WARGUSHD_DEVICE_SCRIPTS_DIR}")
 	doctest_discover_tests(stratagus_tests)
 endif()
 

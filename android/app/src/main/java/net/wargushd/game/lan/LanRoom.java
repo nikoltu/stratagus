@@ -74,6 +74,13 @@ public final class LanRoom {
     public static final String GATE_COLOUR = "colour_clash";
     public static final String GATE_READY = "not_ready";
     public static final String GATE_TEAMS = "one_team";
+    /** A computer seat plays a mod's computer player and a person lacks that mod as the host has it. */
+    public static final String GATE_BOTS = "bot_mods";
+
+    /** The most gameplay mods one device tells the room of. */
+    public static final int GAMEPLAY_MODS_MAX = 16;
+    /** The longest "<mod>:<id>" of a computer player (the engine's seat name stays under 64 bytes). */
+    public static final int BOT_MAX = 55;
 
     // Refusals of a hello beyond the identity codes of LanIdentity.
     public static final String REFUSE_HELLO = "bad_hello";
@@ -105,6 +112,101 @@ public final class LanRoom {
     }
 
     /** The device's maps, as far as the room needs them. */
+    /**
+     * A gameplay mod as the room compares it (LAW 18.6): its id, version and the SHA-256 of its
+     * manifest.json. Two devices have the same mod when all three are equal.
+     */
+    public static final class GameplayMod {
+        public final String id;
+        public final String version;
+        public final String sha;
+
+        public GameplayMod(String id, String version, String sha) {
+            this.id = id;
+            this.version = version;
+            this.sha = (sha == null) ? "" : sha;
+        }
+
+        boolean same(GameplayMod o) {
+            return o != null && id.equals(o.id) && version.equals(o.version) && sha.equals(o.sha);
+        }
+
+        Map<String, Object> toMap() {
+            final Map<String, Object> m = new LinkedHashMap<String, Object>();
+            m.put("id", id);
+            m.put("v", version);
+            m.put("sha", sha);
+            return m;
+        }
+
+        /** One of a message's list, or null when it is not a sound one. */
+        static GameplayMod from(Object o) {
+            if (!(o instanceof Map)) {
+                return null;
+            }
+            @SuppressWarnings("unchecked")
+            final Map<String, Object> m = (Map<String, Object>) o;
+            final String id = LanWire.str(m, "id");
+            final String v = LanWire.str(m, "v");
+            final String sha = LanWire.str(m, "sha");
+            if (!isModId(id) || v == null || !v.matches("[0-9A-Za-z.+-]{1,32}") || sha == null
+                || sha.length() > 64 || !LanWire.isHex(sha)) {
+                return null;
+            }
+            return new GameplayMod(id, v, sha);
+        }
+
+        /** A message's list; null when it is not a sound one, empty when absent. */
+        static List<GameplayMod> list(List<Object> l) {
+            final List<GameplayMod> out = new ArrayList<GameplayMod>();
+            if (l == null) {
+                return out;
+            }
+            if (l.size() > GAMEPLAY_MODS_MAX) {
+                return null;
+            }
+            for (Object o : l) {
+                final GameplayMod g = from(o);
+                if (g == null) {
+                    return null;
+                }
+                out.add(g);
+            }
+            return out;
+        }
+
+        static List<Object> wire(List<GameplayMod> mods) {
+            final List<Object> l = new ArrayList<Object>();
+            for (GameplayMod g : mods) {
+                l.add(g.toMap());
+            }
+            return l;
+        }
+    }
+
+    /** A mod id: 3 to 40 of a-z 0-9 -. */
+    static boolean isModId(String s) {
+        return s != null && s.matches("[a-z0-9-]{3,40}");
+    }
+
+    /** "" (the original computer) or "<mod>:<id>" of a mod's computer player. */
+    public static boolean isBot(String s) {
+        if (s == null) {
+            return false;
+        }
+        if (s.isEmpty()) {
+            return true;
+        }
+        final int cut = s.indexOf(':');
+        return s.length() <= BOT_MAX && cut > 0 && isModId(s.substring(0, cut)) && isModId(s.substring(cut + 1));
+    }
+
+    /** The mod of a computer player's key, or "" for the original computer. */
+    public static String botMod(String bot) {
+        final int cut = (bot == null) ? -1 : bot.indexOf(':');
+        return (cut > 0) ? bot.substring(0, cut) : "";
+    }
+
     public interface Maps {
         int NO = 0;
         int YES = 1;
@@ -135,11 +237,17 @@ public final class LanRoom {
         public String map = MAP_NONE;
         /** Per cent of the map received while map is "recv". */
         public int pct;
+        /** A computer seat's player: "" the original's, else "<mod>:<id>" of a mod (owner decision 80). */
+        public String bot = "";
+        /** A person's seat has every mod the computer seats' players need, as the host has it. */
+        public boolean modsOk = true;
 
         // Host side only.
         int peer = -1;
         long heldUntil;
         int mapTries;
+        /** The gameplay mods the seat's device told in its hello. */
+        List<GameplayMod> mods = new ArrayList<GameplayMod>();
 
         Seat(int index) {
             this.index = index;
@@ -165,13 +273,16 @@ public final class LanRoom {
             s.host = host;
             s.map = map;
             s.pct = pct;
+            s.bot = bot;
+            s.modsOk = modsOk;
             return s;
         }
 
         Map<String, Object> toMap() {
             return LanWire.msg(kind, "id", id, "name", name, "net", netName,
                 "portrait", portrait, "race", race, "color", colour, "team", team,
-                "clash", clash, "ready", ready, "host", host, "map", map, "pct", pct);
+                "clash", clash, "ready", ready, "host", host, "map", map, "pct", pct,
+                "bot", bot, "mods_ok", modsOk);
         }
     }
 
@@ -244,6 +355,10 @@ public final class LanRoom {
         public int receiving = -1;
         /** The shared state as one line: equal on host and joiners when they agree. */
         public String canon = "";
+        /** The host offers mods' computer players: computer seats show their player. */
+        public boolean bots;
+        /** The host's mods that the computer seats' players need; every person must have them. */
+        public List<GameplayMod> need = new ArrayList<GameplayMod>();
     }
 
     /** The final table of a start: what every device builds its game request from. */
@@ -257,6 +372,8 @@ public final class LanRoom {
             public String race;
             public int colour;
             public int team;
+            /** A computer row's player: "" the original's, else "<mod>:<id>". */
+            public String bot = "";
         }
 
         public String room = "";
@@ -285,6 +402,7 @@ public final class LanRoom {
                 m.put("race", r.race);
                 m.put("color", r.colour);
                 m.put("team", r.team);
+                m.put("bot", r.bot);
                 seats.add(m);
             }
             final Map<String, Object> map = new LinkedHashMap<String, Object>();
@@ -353,7 +471,11 @@ public final class LanRoom {
                 r.race = LanWire.str(s, "race");
                 r.colour = LanWire.range(s, "color", 0, COLOURS - 1);
                 r.team = LanWire.range(s, "team", 1, TEAMS);
+                r.bot = LanWire.str(s, "bot");
                 final boolean human = HUMAN.equals(r.kind);
+                if (r.bot == null || !isBot(r.bot) || (human && !r.bot.isEmpty())) {
+                    return null;
+                }
                 if (r.seat <= last || r.colour < 0 || r.team < 1 || r.netName == null
                     || !(human || COMPUTER.equals(r.kind))
                     || !("human".equals(r.race) || "orc".equals(r.race) || "map".equals(r.race))
@@ -419,7 +541,12 @@ public final class LanRoom {
                         r.append("name = ").append(lua(row.netName)).append(", ");
                     }
                     r.append("race = \"").append(row.race).append("\", color = ")
-                        .append(row.colour).append(", team = ").append(row.team).append(" },\n");
+                        .append(row.colour).append(", team = ").append(row.team);
+                    if (pass == 1 && !row.bot.isEmpty()) {
+                        // A computer player of a mod (launch.lua: the seat's AIScript).
+                        r.append(", bot = ").append(lua(row.bot));
+                    }
+                    r.append(" },\n");
                 }
                 r.append("  },\n");
             }
@@ -498,11 +625,15 @@ public final class LanRoom {
     private boolean fog = true;
     private int reveal;
     private LanIdentity hostIdentity;
+    /** This device's gameplay mods (setGameplayMods); a joiner tells them in its hello. */
+    private List<GameplayMod> ownMods = new ArrayList<GameplayMod>();
+    /** The host offers mods' computer players (setBotsOffered); a joiner reads it from the state. */
+    private boolean botsOffered;
+    /** The host's mods the computer seats' players need (host: worked out in gate()). */
+    private List<GameplayMod> need = new ArrayList<GameplayMod>();
 
     private String gate = GATE_PLAYERS;
     private int[] gateWho = new int[0];
-    /** The gate also takes one person with at least one computer seat; off unless asked for. */
-    private boolean soloStart;
 
     private final List<Chat> chat = new ArrayList<Chat>();
     private int chatSeq;
@@ -565,6 +696,44 @@ public final class LanRoom {
     /** A joiner's room; it starts to live when its connection to the host is reported. */
     public static LanRoom client(LanIdentity identity, Profile me, Maps maps) {
         return new LanRoom(false, identity, me, maps);
+    }
+
+    /**
+     * This device's switched-on gameplay mods for network games, as { id, version, SHA-256 of
+     * manifest.json }. Call before the connection stands (a joiner sends them in its hello); on
+     * the host, before any computer seat plays a mod's player.
+     */
+    public void setGameplayMods(List<String[]> mods) {
+        final List<GameplayMod> l = new ArrayList<GameplayMod>();
+        for (int i = 0; mods != null && i < mods.size() && l.size() < GAMEPLAY_MODS_MAX; ++i) {
+            final String[] m = mods.get(i);
+            if (m != null && m.length == 3 && isModId(m[0]) && m[1] != null
+                && m[1].matches("[0-9A-Za-z.+-]{1,32}") && m[2] != null && m[2].length() <= 64
+                && LanWire.isHex(m[2])) {
+                l.add(new GameplayMod(m[0], m[1], m[2]));
+            }
+        }
+        ownMods = l;
+        if (host) {
+            seats[0].mods = l;
+            dirty = true;
+            flush();
+        }
+    }
+
+    /** Host: whether the computer seats may play mods' computer players (the host has such a mod on). */
+    public void setBotsOffered(boolean offered) {
+        if (!host || botsOffered == offered) {
+            return;
+        }
+        botsOffered = offered;
+        if (!offered) {
+            for (Seat s : seats) {
+                s.bot = "";
+            }
+        }
+        dirty = true;
+        flush();
     }
 
     /** Joiner, before connecting: ask for the seat held in this room after a game. */
@@ -751,7 +920,7 @@ public final class LanRoom {
         }
         return LanWire.msg("state", "room", roomId, "epoch", epoch, "rev", rev,
             "name", roomName, "ident", ident, "map", map, "set", set, "slots", slots,
-            "gate", gate, "who", who);
+            "gate", gate, "who", who, "bots", botsOffered, "need", GameplayMod.wire(need));
     }
 
     public Snapshot snapshot() {
@@ -785,6 +954,8 @@ public final class LanRoom {
         s.chat = new ArrayList<Chat>(chat);
         s.receiving = (rx == null) ? -1 : rx.percent();
         s.canon = LanWire.encode(stateMap());
+        s.bots = botsOffered;
+        s.need = new ArrayList<GameplayMod>(need);
         return s;
     }
 
@@ -895,37 +1066,77 @@ public final class LanRoom {
     }
 
     /**
-     * Host: whether the Start gate takes a room of one person and at least one computer seat.
-     * The rule of two people holds while this is off, which it is unless it is set.
+     * Host: the mods the computer seats' players need, and for every person whether his device
+     * has each of them with the host's version and manifest (LAW 18.6). A person without them is
+     * not ready. With no computer seat on a mod's player nothing is needed: the mods then do not
+     * stand between anybody and the game.
      */
-    public void setSoloStart(boolean allowed) {
-        if (!host || soloStart == allowed) {
-            return;
+    private void fixMods() {
+        final List<GameplayMod> wanted = new ArrayList<GameplayMod>();
+        boolean hostLacks = false;
+        for (Seat s : seats) {
+            if (!s.kind.equals(COMPUTER) || s.index >= mapPlayers || s.bot.isEmpty()) {
+                continue;
+            }
+            final String mod = botMod(s.bot);
+            GameplayMod mine = null;
+            for (GameplayMod g : ownMods) {
+                if (g.id.equals(mod)) {
+                    mine = g;
+                }
+            }
+            if (mine == null) {
+                hostLacks = true;
+                continue;
+            }
+            boolean listed = false;
+            for (GameplayMod g : wanted) {
+                listed |= g.id.equals(mine.id);
+            }
+            if (!listed) {
+                wanted.add(mine);
+            }
         }
-        soloStart = allowed;
-        gate();
-        dirty = true;
-        flush();
+        need = wanted;
+        for (Seat s : seats) {
+            boolean ok = true;
+            if (s.kind.equals(HUMAN)) {
+                if (s.host) {
+                    ok = !hostLacks;
+                } else {
+                    for (GameplayMod g : wanted) {
+                        boolean has = false;
+                        for (GameplayMod h : s.mods) {
+                            has |= g.same(h);
+                        }
+                        ok &= has;
+                    }
+                }
+            }
+            s.modsOk = ok;
+            if (!ok) {
+                s.ready = false;
+            }
+        }
     }
 
     private void gate() {
         fixClash();
+        fixMods();
         final List<Integer> who = new ArrayList<Integer>();
         String g = GATE_OK;
         int people = 0;
-        int computers = 0;
         final Set<Integer> teams = new HashSet<Integer>();
         for (Seat s : seats) {
             if (s.kind.equals(HUMAN) || s.kind.equals(HELD)) {
                 ++people;
-            } else if (s.kind.equals(COMPUTER)) {
-                ++computers;
             }
             if (s.occupied()) {
                 teams.add(Integer.valueOf(s.team));
             }
         }
-        if (people < 2 && !(soloStart && people == 1 && computers > 0)) {
+        // Two people at the least, computers or not: a host alone does not start (owner decision 91, 3A).
+        if (people < 2) {
             g = GATE_PLAYERS;
         }
         if (g.equals(GATE_OK)) {
@@ -946,6 +1157,16 @@ public final class LanRoom {
             }
             if (!who.isEmpty()) {
                 g = GATE_COLOUR;
+            }
+        }
+        if (g.equals(GATE_OK)) {
+            for (Seat s : seats) {
+                if (s.kind.equals(HUMAN) && !s.modsOk) {
+                    who.add(Integer.valueOf(s.index));
+                }
+            }
+            if (!who.isEmpty()) {
+                g = GATE_BOTS;
             }
         }
         if (g.equals(GATE_OK)) {
@@ -1006,6 +1227,8 @@ public final class LanRoom {
         m.put("portrait", Math.max(0, Math.min(255, me.portrait)));
         m.put("race", race(me.race));
         m.put("color", me.colour);
+        // The gameplay mods of this device (protocol 2): the host compares them before Ready.
+        m.put("gm", GameplayMod.wire(ownMods));
         if (!rejoinRoom.isEmpty()) {
             m.put("room", rejoinRoom);
             m.put("epoch", rejoinEpoch);
@@ -1147,8 +1370,9 @@ public final class LanRoom {
             if (on == null || on.booleanValue() == s.ready) {
                 return;
             }
-            // Not with a clashing colour and not before the map is here.
-            if (on.booleanValue() && (s.clash || !s.map.equals(MAP_HAS))) {
+            // Not with a clashing colour, not before the map is here, and not without the mods
+            // the computer seats' players need.
+            if (on.booleanValue() && (s.clash || !s.map.equals(MAP_HAS) || !s.modsOk)) {
                 return;
             }
             s.ready = on.booleanValue();
@@ -1177,7 +1401,8 @@ public final class LanRoom {
             return;
         }
         final LanIdentity theirs = LanIdentity.from(m);
-        if (theirs == null) {
+        final List<GameplayMod> theirMods = GameplayMod.list(LanWire.arr(m, "gm"));
+        if (theirs == null || theirMods == null) {
             refuse(p, REFUSE_HELLO);
             return;
         }
@@ -1235,6 +1460,7 @@ public final class LanRoom {
         s.netName = net;
         s.kind = HUMAN;
         s.peer = p.id;
+        s.mods = theirMods;
         s.ready = false;
         s.map = MAP_NONE;
         s.pct = 0;
@@ -1463,10 +1689,12 @@ public final class LanRoom {
         final List<Object> slots = LanWire.arr(m, "slots");
         final String g = token(LanWire.str(m, "gate"), 24);
         final List<Object> who = LanWire.arr(m, "who");
+        final Boolean offered = LanWire.flag(m, "bots");
+        final List<GameplayMod> needed = GameplayMod.list(LanWire.arr(m, "need"));
         if (room.isEmpty() || ep < 0 || rv < 1 || name == null || name.length() > NAME_MAX + 8
             || !name.equals(clean(name, NAME_MAX + 8)) || ident == null || map == null
             || set == null || slots == null || slots.size() != SEATS || g.isEmpty()
-            || who == null || who.size() > SEATS) {
+            || who == null || who.size() > SEATS || offered == null || needed == null) {
             return;
         }
         // An older snapshot never replaces a newer one.
@@ -1532,6 +1760,8 @@ public final class LanRoom {
         System.arraycopy(fresh, 0, seats, 0, SEATS);
         gate = g;
         gateWho = w;
+        botsOffered = offered.booleanValue();
+        need = needed;
         // A new map: say whether this device has it.
         if (!mapHash.isEmpty() && !mapHash.equals(reportedHash)) {
             reportedHash = mapHash;
@@ -1557,6 +1787,8 @@ public final class LanRoom {
         final Boolean hostFlag = LanWire.flag(m, "host");
         s.map = LanWire.str(m, "map");
         s.pct = LanWire.range(m, "pct", 0, 100);
+        s.bot = LanWire.str(m, "bot");
+        final Boolean modsOk = LanWire.flag(m, "mods_ok");
         final boolean kindOk = OPEN.equals(s.kind) || CLOSED.equals(s.kind)
             || COMPUTER.equals(s.kind) || HUMAN.equals(s.kind) || HELD.equals(s.kind);
         final boolean mapOk = MAP_NONE.equals(s.map) || MAP_HAS.equals(s.map)
@@ -1565,9 +1797,11 @@ public final class LanRoom {
             || !s.name.equals(clean(s.name, NAME_MAX)) || s.netName == null
             || !s.netName.equals(netName(s.netName)) || s.portrait < 0 || !isRace(s.race)
             || s.colour < 0 || s.team < 1 || clash == null || ready == null || hostFlag == null
-            || s.pct < 0) {
+            || s.pct < 0 || !isBot(s.bot) || (!s.bot.isEmpty() && !COMPUTER.equals(s.kind))
+            || modsOk == null) {
             return null;
         }
+        s.modsOk = modsOk.booleanValue();
         s.clash = clash.booleanValue();
         s.ready = ready.booleanValue();
         s.host = hostFlag.booleanValue();
@@ -1676,6 +1910,29 @@ public final class LanRoom {
             s.race = "random";
             s.map = MAP_HAS;
         }
+        flush();
+    }
+
+    /**
+     * Host: the player of a Computer seat: "" the original's, else "<mod>:<id>" of one of the
+     * host's own gameplay mods. Every Ready is cleared: the game is another one.
+     */
+    public void hostSetBot(int seat, String bot) {
+        if (!hostMay() || seat < 1 || seat >= mapPlayers || !seats[seat].kind.equals(COMPUTER)
+            || !isBot(bot) || bot.equals(seats[seat].bot) || (!bot.isEmpty() && !botsOffered)) {
+            return;
+        }
+        if (!bot.isEmpty()) {
+            boolean mine = false;
+            for (GameplayMod g : ownMods) {
+                mine |= g.id.equals(botMod(bot));
+            }
+            if (!mine) {
+                return;
+            }
+        }
+        seats[seat].bot = bot;
+        unreadyAll();
         flush();
     }
 
@@ -1894,6 +2151,7 @@ public final class LanRoom {
             r.race = s.race.equals("random") ? (rnd.nextBoolean() ? "human" : "orc") : s.race;
             r.colour = s.colour;
             r.team = s.team;
+            r.bot = s.kind.equals(COMPUTER) ? s.bot : "";
             t.rows.add(r);
         }
         final String line = t.line();

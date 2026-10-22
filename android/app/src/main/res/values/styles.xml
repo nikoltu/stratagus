@@ -6,4 +6,10 @@
         <item name="android:windowDisablePreview">true</item>
         <item name="android:windowBackground">@android:color/black</item>
     </style>
+    <!-- The launcher's windows: black behind the first frame, no system starting window, so a
+         return from the game or between launcher screens shows no grey frame. -->
+    <style name="LauncherTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

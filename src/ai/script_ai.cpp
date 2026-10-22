@@ -1694,7 +1694,11 @@ static int CclDefineAiPlayer(lua_State *l)
 #if 0
 						[[maybe_unused]]const std::string_view ident = LuaToString(l, -1, subk + 1);
 #endif
-						ai.Force[forceIdx].Units.emplace_back(&UnitManager->GetSlotUnit(num));
+						CUnit *forceUnit = UnitManager->FindSlotUnit(num);
+						if (forceUnit == nullptr) {
+							LuaError(l, "AI force unit %d: no such unit slot", num);
+						}
+						ai.Force[forceIdx].Units.emplace_back(forceUnit);
 					}
 					lua_pop(l, 1);
 				} else if (value == "state") {

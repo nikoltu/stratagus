@@ -173,7 +173,16 @@ public:
 
 	// Position autocast callback
 	LuaCallback<std::tuple<int, int>(const std::vector<int>& unitIds)> PositionAutoCast;
+	/// Position spell: the unit of the candidates on the tile PositionAutoCast chose becomes the
+	/// order's goal, so the caster follows it and the spell lands at its tile of the cast
+	/// (DECODE_COIL: the computer's Death Coil is a unit-target order).
+	bool PositionGoal = false;
 };
+
+/// The goal of a position autocast with "position-goal": the candidate on the chosen tile, or null
+extern CUnit *PositionGoalOf(bool positionGoal, const std::vector<CUnit *> &candidates, const Vec2i &pos);
+/// AUTOCAST-CORPSE-CRASH: true for a unit the autocast pass must leave out (no order, released, no type / owner)
+extern bool IsUnfitAutoCastUnit(const CUnit &unit);
 
 /**
 **  Base structure of a spell type.

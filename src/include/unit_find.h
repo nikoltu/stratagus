@@ -38,6 +38,7 @@
 #include "unit.h"
 #include "unittype.h"
 
+#include <algorithm>
 #include <optional>
 
 /*----------------------------------------------------------------------------
@@ -159,7 +160,7 @@ class OutOfMinRange : public CUnitFilter
 {
 public:
 	explicit OutOfMinRange(const int range, const Vec2i pos) : range(range), pos(pos) {}
-	bool operator()(const CUnit *unit) const { return unit->MapDistanceTo(pos) >= range; }
+	bool operator()(const CUnit *unit) const { return unit->SpellDistanceTo(pos) >= range; }
 private:
 	int range;
 	Vec2i pos;
@@ -371,6 +372,50 @@ inline int IdleSearchRange(bool computer, int attackRange, int reactRangeCompute
 }
 /// Find best enemy for a unit that stands idle
 extern CUnit *AttackUnitsInIdleRange(const CUnit &unit);
+
+/// Candidates of the original's hit reaction of a computer fighter (0x495830 with argument 0):
+/// the remembered attacker first (any distance), then the units of the idle search box in their
+/// order, the attacker not twice. The first of equal scores wins, so the attacker wins a tie.
+template <typename T>
+std::vector<T> HitReactionCandidates(T attacker, const std::vector<T> &box)
+{
+	std::vector<T> res;
+	res.reserve(box.size() + 1);
+	res.push_back(attacker);
+	for (const T &candidate : box) {
+		if (candidate != attacker) {
+			res.push_back(candidate);
+		}
+	}
+	return res;
+}
+/// The original's order of the candidates of a target search: its unit list (0x9101E0) is kept
+/// sorted by pixel y with a stable sort, so the box is walked north to south; units of the same
+/// pixel y stay in the order given (declared: the original's is the one earlier cycles left).
+template <typename T, typename PixelY>
+void SortNorthFirst(std::vector<T> &table, PixelY pixelY)
+{
+	std::stable_sort(table.begin(), table.end(),
+	                 [&pixelY](const T &a, const T &b) { return pixelY(a) < pixelY(b); });
+}
+/// The original's choice among scored candidates (0x495F40): a strictly higher score replaces, so
+/// the first of equal scores stays; a score of 0 is never chosen. end when none is taken.
+template <typename Iterator, typename Score>
+Iterator FirstOfBestScore(Iterator begin, Iterator end, Score score)
+{
+	Iterator best = end;
+	int bestScore = 0;
+	for (Iterator it = begin; it != end; ++it) {
+		const int value = score(*it);
+		if (value > bestScore) {
+			best = it;
+			bestScore = value;
+		}
+	}
+	return best;
+}
+/// Best target of a computer fighter that was hit: its attacker or a unit in its idle search range
+extern CUnit *AttackUnitsInIdleRangeOrAttacker(const CUnit &unit, CUnit &attacker);
 
 
 

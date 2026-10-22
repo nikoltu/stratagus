@@ -36,6 +36,11 @@
 #include "stratagus.h"
 
 #include "action/action_resource.h"
+#include "action/action_move.h"
+
+#include <climits>
+#include <optional>
+#include <vector>
 
 #include "ai.h"
 #include "animation.h"
@@ -53,6 +58,7 @@
 #include "unit_find.h"
 #include "unittype.h"
 #include "video.h"
+#include "wc2ai.h"
 
 #include "../ai/ai_local.h"
 
@@ -237,6 +243,91 @@ bool COrder_Resource::IsGatheringFinished() const
 	return this->State >= SUB_STOP_GATHERING;
 }
 
+bool HarvesterShowsLoad(bool terrainHarvester, int held, bool resourceOrder, int state)
+{
+	const bool chopping = terrainHarvester && resourceOrder && state > SUB_START_GATHERING
+	                      && state < SUB_STOP_GATHERING;
+	return held > 0 && !chopping;
+}
+
+int InterruptedChopLoss(bool terrainHarvester, int held, int state, bool doneHarvesting)
+{
+	const bool chopping = terrainHarvester && state > SUB_START_GATHERING && state < SUB_STOP_GATHERING;
+	return chopping && !doneHarvesting ? std::max(0, held) : 0;
+}
+
+bool HarvestOrderRefused(int held, int heldKind, int orderKind)
+{
+	return held > 0 && heldKind != orderKind;
+}
+
+int DeliveredPerTrip(int held, int income)
+{
+	return held > 0 ? income : 0;
+}
+
+MineTrip MineTripTake(int stock, int capacity)
+{
+	MineTrip trip;
+	if (stock <= 0) {
+		return trip;
+	}
+	trip.load = capacity;
+	trip.stock = std::max(0, stock - capacity);
+	trip.collapse = trip.stock == 0;
+	return trip;
+}
+
+BuilderLoad BuilderFinishLoad(int held, bool depot, bool storesKind, int income)
+{
+	BuilderLoad load;
+	if (!depot || held <= 0) {
+		return load;
+	}
+	load.credited = storesKind ? DeliveredPerTrip(held, income) : 0;
+	load.emptied = true;
+	return load;
+}
+
+int GoldPerTrip(int castles, int keeps)
+{
+	return castles > 0 ? 120 : (keeps > 0 ? 110 : 100);
+}
+
+int LumberPerTrip(int lumberMills)
+{
+	return lumberMills > 0 ? 125 : 100;
+}
+
+int OilPerTrip(int refineries)
+{
+	return refineries > 0 ? 125 : 100;
+}
+
+bool HarvestButtonShown(int held)
+{
+	return held <= 0;
+}
+
+void COrder_Resource::Interrupt(CUnit &unit)
+{
+	const ResourceInfo *resinfo = unit.Type->ResInfo[this->CurrentResource].get();
+	if (resinfo == nullptr || unit.CurrentResource != this->CurrentResource) {
+		return;
+	}
+	const int lost =
+		InterruptedChopLoss(resinfo->TerrainHarvester, unit.ResourcesHeld, this->State, this->DoneHarvesting);
+	if (lost == 0) {
+		return;
+	}
+	unit.ResourcesHeld -= lost;
+	// The original takes the whole load at the last swing: what was cut stays in the tree.
+	if (Map.Info.IsPointOnMap(this->goalPos)
+	    && Map.Field(this->goalPos)->IsTerrainResourceOnMap(this->CurrentResource)) {
+		Map.Field(this->goalPos)->Value += lost;
+	}
+}
+
 bool COrder_Resource::IsGatheringWaiting() const
 {
 	return this->State == SUB_START_GATHERING && this->worker->Wait != 0;
@@ -403,6 +494,9 @@ bool COrder_Resource::OnAiHitUnit(CUnit &unit, CUnit *attacker, int /* damage*/)
 
 
 
+/// Live run 78 R1-R3: see GoldHarvestTurnsToWood. false: the old 10-cycle retry (host tests).
+bool WoodBoxedLooksEachCycle = true;
+
 /**
 **  Move unit to terrain.
 **
@@ -421,9 +515,13 @@ int COrder_Resource::MoveToResource_Terrain(CUnit &unit)
 			return -1;
 		}
 	}
+	const int searchesBefore = AStarSearchCalls;
 	switch (DoActionMove(unit)) {
 		case PF_UNREACHABLE:
-			unit.Wait = 10;
+			// live run 78 R1-R3 (+ run 77 A3): a player's worker boxed in by standing units walks 1 frame
+			// after a ring unit leaves - it looks again the next cycle (a boxed search is cheap: no flood)
+			unit.Wait = (WoodBoxedLooksEachCycle && !unit.Player->AiEnabled && AStarSearchCalls != searchesBefore
+			             && AStarLastFailBoxed) ? 1 : 10;
 			if (unit.Player->AiEnabled) {
 				this->Range++;
 				if (this->Range >= 5) {
@@ -462,17 +560,133 @@ int COrder_Resource::MoveToResource_Terrain(CUnit &unit)
 **
 **  @return      1 if reached, -1 if unreachable, 0 if on the way.
 */
+/**
+**  Live run 77 (work/agent-orig-77/ORIG77.md, CALIB_RUN77.md) with run 76 A7: a Peasant sent to a gold mine
+**  whose way is closed by units that stand (a 1-tile road sealed by idle units: A1, A2; boxed in by 8 idle
+**  units: A3; the head-on pair of run 76 A7 after the other worker dropped) keeps its harvest order but its
+**  goal turns, at the look that finds no way, to the nearest tree measured from the worker (by terrain,
+**  units ignored; 4 of 4): it harvests WOOD from then on - chops a reachable tree at once (A1, A2), waits
+**  for an unreachable one (A3: 30 s boxed; run 76 A7: 130 s), walks as soon as a way opens (A3: 1 frame
+**  after the ring opened), brings the lumber home and goes back to the trees; never back to the mine
+**  (0 of 3). Only for a player's land worker of one tile that carries nothing and can cut wood, and only
+**  when the search failed on standing units (a way held by units on their way keeps the old retry).
+**
+**  Live run 78 (work/agent-orig-78/ORIG78.md, CALIB_RUN78.md): a mine RINGED by idle own units (every
+**  free tile round it held; M1, M2) turns the same way (2 of 2): the worker walked towards the mine as
+**  far as it could (12 / 28 steps), its goal turned 16 frames after its last step to a tree beside that
+**  spot (next to the mine's forest), never back to the mine after a ring unit left. So the goal area
+**  held by units standing for good (AStarFailGoalFull) counts too, and the tree is the reachable one
+**  nearest to the mine (TreeTowardGoal) - the 16-frame walk-and-look itself is not modelled. A worker
+**  boxed in (A3; run 78 R1-R3) walks 1 frame after a ring unit leaves (4 of 4, openings 270 / 323 /
+**  381 frames after the order): the wood order looks again the next cycle (Wait 1, was 10).
+*/
+bool GoldHarvestTurnsToWood = true;
+
+/// Way closed by units standing for good (live runs 77 / 78): a boxed worker, a flood refused only by
+/// standing units, or a goal area whose free tiles are held by standing units.
+static bool ClosedByStandingUnits()
+{
+	return AStarLastFailBoxed || AStarLastFailReason == AStarFailFloodStandingUnits
+	       || (AStarLastFailReason == AStarFailGoalFull && AStarLastFailGoalHeldForGood);
+}
+
+/// Live run 78 M1 / M2: the tree a blocked gold harvester turns to - flood from the worker through the
+/// tiles it can stand on now (units are walls), take the tile nearest to the goal that has a tree
+/// beside it (fewest steps on a tie) and that tree. None (the worker is boxed in or no tree borders
+/// its room): std::nullopt, the caller takes the nearest tree by terrain (run 77 A3).
+static std::optional<Vec2i> TreeTowardGoal(const CUnit &unit, const CUnit &goal)
+{
+	const int w = Map.Info.MapWidth;
+	const int h = Map.Info.MapHeight;
+	std::vector<int> dist(size_t(w) * h, -1);
+	std::vector<Vec2i> queue{unit.tilePos};
+	dist[unit.tilePos.y * w + unit.tilePos.x] = 0;
+	const Vec2i g0 = goal.tilePos;
+	const Vec2i g1 = goal.tilePos + Vec2i(goal.Type->TileWidth - 1, goal.Type->TileHeight - 1);
+	auto toGoal = [&](const Vec2i &p) {
+		const int dx = p.x < g0.x ? g0.x - p.x : p.x > g1.x ? p.x - g1.x : 0;
+		const int dy = p.y < g0.y ? g0.y - p.y : p.y > g1.y ? p.y - g1.y : 0;
+		return std::max(dx, dy);
+	};
+	std::optional<Vec2i> best;
+	int bestGoal = INT_MAX;
+	int bestSteps = INT_MAX;
+	constexpr int MaxSteps = 64;
+	for (size_t k = 0; k != queue.size(); ++k) {
+		const Vec2i at = queue[k];
+		const int d = dist[at.y * w + at.x];
+		for (int dy = -1; dy <= 1; ++dy) {
+			for (int dx = -1; dx <= 1; ++dx) {
+				const Vec2i n = at + Vec2i(dx, dy);
+				if ((!dx && !dy) || n.x < 0 || n.y < 0 || n.x >= w || n.y >= h) {
+					continue;
+				}
+				const CMapField &f = *Map.Field(n);
+				if (!unit.Player->AiEnabled && !f.playerInfo.IsExplored(*unit.Player)) {
+					continue;
+				}
+				if (f.ForestOnMap()) {
+					const int tg = toGoal(at);
+					if (d > 0 && (tg < bestGoal || (tg == bestGoal && d < bestSteps))) {
+						best = n;
+						bestGoal = tg;
+						bestSteps = d;
+					}
+					continue;
+				}
+				int &nd = dist[n.y * w + n.x];
+				if (nd < 0 && d < MaxSteps && CanMoveToMask(n, unit.Type->MovementMask)) {
+					nd = d + 1;
+					queue.push_back(n);
+				}
+			}
+		}
+	}
+	return best;
+}
+
+static bool TurnsToWood(const CUnit &unit, int currentResource, bool searched)
+{
+	const CUnitType &type = *unit.Type;
+	if (!GoldHarvestTurnsToWood || !searched || unit.Player->AiEnabled || currentResource == WoodCost
+	    || type.MoveType != EMovement::Land || type.TileWidth != 1 || type.TileHeight != 1 || unit.ResourcesHeld != 0
+	    || !type.ResInfo[WoodCost] || !type.ResInfo[WoodCost]->TerrainHarvester) {
+		return false;
+	}
+	return ClosedByStandingUnits();
+}
+
 int COrder_Resource::MoveToResource_Unit(CUnit &unit)
 {
 	const CUnit *goal = this->GetGoal();
 	Assert(goal);
 
+	const int searchesBefore = AStarSearchCalls;
 	switch (DoActionMove(unit)) { // reached end-point?
 		case PF_UNREACHABLE:
+			if (TurnsToWood(unit, this->CurrentResource, AStarSearchCalls != searchesBefore)
+			    && !unit.Orders.empty() && unit.Orders[0].get() == this) {
+				auto tree = TreeTowardGoal(unit, *goal); // live run 78 M1 / M2
+				if (!tree) {
+					tree = FindTerrainType(unit.Type->MovementMask, MapFieldForest, 9999, *unit.Player, unit.tilePos);
+				}
+				if (tree) {
+					// live run 77: the order goes on as a wood harvest to the nearest tree (see above)
+					unit.Orders.insert(unit.Orders.begin() + 1, COrder::NewActionResource(unit, *tree));
+					if (CUnit *mine = this->Resource.Mine) {
+						unit.DeAssignWorkerFromMine(*mine);
+						this->Resource.Mine = nullptr;
+					}
+					this->ClearGoal();
+					this->Finished = true;
+					return 0;
+				}
+			}
 			return -1;
 		case PF_REACHED:
 			break;
 		case PF_WAIT:
+			HarvestStepHeld(unit); // live run 68: no queue in a lane (action_move.cpp)
 			if (unit.Player->AiEnabled) {
 				this->Range++;
 				if (this->Range >= 5) {
@@ -535,6 +749,18 @@ int COrder_Resource::StartGathering(CUnit &unit)
 	const ResourceInfo &resinfo = *unit.Type->ResInfo[this->CurrentResource];
 	Assert(!unit.IX);
 	Assert(!unit.IY);
+
+	// A worker that holds a load of the other kind does not take this one: it stands where it
+	// arrived, the load kept as it was (live run 43, item 1).
+	if (HarvestOrderRefused(unit.ResourcesHeld, unit.CurrentResource, this->CurrentResource)) {
+		if (CUnit *mine = this->Resource.Mine) {
+			unit.DeAssignWorkerFromMine(*mine);
+			this->Resource.Mine = nullptr;
+		}
+		this->ClearGoal();
+		this->Finished = true;
+		return 0;
+	}
 
 	if (resinfo.TerrainHarvester) {
 		// This shouldn't happened?
@@ -633,6 +859,18 @@ int COrder_Resource::StartGathering(CUnit &unit)
 		this->TimeToHarvest = 1;
 	}
 	this->DoneHarvesting = 0;
+
+	// A mine / oil platform gives its full trip when the worker goes in (0x4B2AC6, DECODE_B11_ROUND2 2);
+	// the trip that empties it collapses it at once, and every worker inside comes out loaded.
+	if (!resinfo.HarvestFromOutside && unit.Container == goal) {
+		const MineTrip trip = MineTripTake(goal->ResourcesHeld, resinfo.ResourceCapacity);
+		unit.ResourcesHeld = trip.load;
+		goal->ResourcesHeld = trip.stock;
+		if (trip.collapse) {
+			ResourceExhausted(unit, *goal);
+			return 0;
+		}
+	}
 	return 1;
 }
 
@@ -725,6 +963,50 @@ void COrder_Resource::LoseResource(CUnit &unit, CUnit &source)
 
 
 /**
+**  The resource is empty (or gone): every worker in it goes out toward a depot with what it holds,
+**  then the resource dies. A worker that was inside leaves at its next cycle and stands beside the
+**  mine as at a normal exit (0x4D7E10 sets the wait of every unit inside to 1, DECODE_B11_ROUND2 2).
+**
+**  @param unit    harvester that found it empty.
+**  @param source  the resource unit.
+*/
+void COrder_Resource::ResourceExhausted(CUnit &unit, CUnit &source)
+{
+	DebugPrint("%d: Worker %d report: Resource is destroyed\n", unit.Player->Index, UnitNumber(unit));
+	const bool dead = source.IsAlive() == false;
+	const auto leave = [&source](CUnit &worker, COrder_Resource &order) {
+		const bool wasInside = worker.Container == &source;
+		order.LoseResource(worker, source);
+		if (wasInside && !worker.Container && order.State == SUB_MOVE_TO_DEPOT) {
+			worker.Wait = 1 + WC2_WORKER_EXIT_STAND_FRAMES;
+		}
+	};
+
+	// Improved version of DropOutAll that makes workers go to the depot.
+	leave(unit, *this);
+	for (CUnit *uins : source.Resource.AssignedWorkers) {
+		if (uins != &unit && uins->CurrentOrder()->Action == UnitAction::Resource) {
+			COrder_Resource &order = *static_cast<COrder_Resource *>(uins->CurrentOrder());
+			if (!uins->Anim.Unbreakable && order.State == SUB_GATHER_RESOURCE) {
+				leave(*uins, order);
+			}
+		}
+	}
+	// Don't destroy the resource twice.
+	// This only happens when it's empty.
+	if (!dead) {
+		if (Preference.MineNotifications && unit.Player->Index == ThisPlayer->Index
+		    && source.Variable[GIVERESOURCE_INDEX].Max > DefaultIncomes[this->CurrentResource]) {
+			unit.Player->Notify(ColorYellow,
+			                    source.tilePos,
+			                    _("%s has collapsed!"),
+			                    source.Type->Name.c_str());
+		}
+		LetUnitDie(source);
+	}
+}
+
+/**
 **  Gather the resource
 **
 **  @param unit  Pointer to unit.
@@ -805,48 +1087,29 @@ int COrder_Resource::GatherResource(CUnit &unit)
 			Assert(source);
 			Assert(source->ResourcesHeld <= 655350);
 			bool is_visible = source->IsVisibleAsGoal(*unit.Player);
+			bool exhausted = !is_visible;
 			// Target is not dead, getting resources.
-			if (is_visible) {
+			if (is_visible && resinfo.HarvestFromOutside) {
 				// Don't load more that there is.
 				addload = std::min(source->ResourcesHeld, addload);
 				unit.ResourcesHeld += addload;
 				source->ResourcesHeld -= addload;
+				exhausted = source->ResourcesHeld == 0;
+			} else if (is_visible && unit.ResourcesHeld == 0) {
+				// Inside a mine the trip was taken at the entry (StartGathering); a worker that went
+				// in empty (a save from before that rule) takes it now.
+				const MineTrip trip = MineTripTake(source->ResourcesHeld, resinfo.ResourceCapacity);
+				unit.ResourcesHeld = trip.load;
+				source->ResourcesHeld = trip.stock;
+				exhausted = trip.load == 0 || trip.collapse;
 			}
 
 			// End of resource: destroy the resource.
-			// FIXME: implement depleted resources.
-			if ((!is_visible) || (source->ResourcesHeld == 0)) {
+			if (exhausted) {
 				if (unit.Anim.Unbreakable) {
 					return 0;
 				}
-				DebugPrint("%d: Worker %d report: Resource is destroyed\n",
-				           unit.Player->Index,
-				           UnitNumber(unit));
-				bool dead = source->IsAlive() == false;
-
-				// Improved version of DropOutAll that makes workers go to the depot.
-				LoseResource(unit, *source);
-				for (CUnit *uins : source->Resource.AssignedWorkers) {
-					if (uins != &unit && uins->CurrentOrder()->Action == UnitAction::Resource) {
-						COrder_Resource &order = *static_cast<COrder_Resource *>(uins->CurrentOrder());
-						if (!uins->Anim.Unbreakable && order.State == SUB_GATHER_RESOURCE) {
-							order.LoseResource(*uins, *source);
-						}
-					}
-				}
-				// Don't destroy the resource twice.
-				// This only happens when it's empty.
-				if (!dead) {
-					if (Preference.MineNotifications && unit.Player->Index == ThisPlayer->Index
-					    && source->Variable[GIVERESOURCE_INDEX].Max > DefaultIncomes[this->CurrentResource]) {
-						unit.Player->Notify(ColorYellow,
-						                    source->tilePos,
-						                    _("%s has collapsed!"),
-						                    source->Type->Name.c_str());
-					}
-					LetUnitDie(*source);
-					// FIXME: make the workers inside look for a new resource.
-				}
+				ResourceExhausted(unit, *source);
 				source = nullptr;
 				return 0;
 			}
@@ -872,6 +1135,26 @@ int GetNumWaitingWorkers(const CUnit &mine)
 
 		return order.IsGatheringWaiting();
 	});
+}
+
+/// The nearest living depot of the unit's own player for the resource, by map distance from the
+/// unit (from its container when it is inside one); no way test.
+static CUnit *NearestOwnDepot(const CUnit &unit, int resource)
+{
+	const CUnit &from = *GetFirstContainer(unit);
+	CUnit *best = nullptr;
+	int bestDistance = INT_MAX;
+	for (CUnit *dest : unit.Player->GetUnits()) {
+		if (dest->Type->CanStore[resource] && dest->IsAliveOnMap()
+		    && dest->CurrentAction() != UnitAction::Built) {
+			const int distance = from.MapDistanceTo(*dest);
+			if (distance < bestDistance) {
+				best = dest;
+				bestDistance = distance;
+			}
+		}
+	}
+	return best;
 }
 
 /**
@@ -957,6 +1240,13 @@ int COrder_Resource::StopGathering(CUnit &unit)
 
 	// Find and send to resource deposit.
 	CUnit *depot = FindDeposit(unit, 1000, unit.CurrentResource);
+	if (!depot && unit.ResourcesHeld) {
+		// FindDeposit's way test takes every standing unit for a wall: mates standing round the
+		// mine (at its exit, in a lane) made every depot "unreachable" and the order ended beside
+		// the mine (host cases "worker traffic", work/WORKER_STUCK_3476.md). The nearest depot is
+		// taken then; the walk searches its own way and gives up as before when there is none.
+		depot = NearestOwnDepot(unit, unit.CurrentResource);
+	}
 	// There's a bug in the traversal that leads to workers "sometimes" not finding their way to the old depot.
 	// timfel: of course, maybe it's actually nice that workers drop out towards their last depot...
 	if (!depot && (!(resinfo.HarvestFromOutside || resinfo.TerrainHarvester)) && Depot && Depot->IsAlive()) {
@@ -1003,6 +1293,17 @@ int COrder_Resource::StopGathering(CUnit &unit)
 }
 
 /**
+**  Live run 78 (work/agent-orig-78/ORIG78.md, CALIB_RUN78.md) with run 77 A1: a loaded worker (gold 3 of 3,
+**  lumber 3 of 3 by a Return order in a ring of 8 idle units; lumber 1 of 1 at the natural return from the
+**  trees in a sealed pocket) whose way to the hall is closed by units that stand drops its order 3 frames
+**  after the return begins: it stands idle and KEEPS its load (each later Return order again 0x18, and it
+**  delivered once the ring was open); it does not resume when the way opens (7 of 7, watched 8-40 s); no
+**  other depot was reachable in any trial (re-target not measured). Ours before: 30 retries x 5 cycles,
+**  then ResourceGiveUp (load dropped). Only a player's worker, only for a way closed by standing units.
+*/
+bool DepotClosedDropsOrder = true;
+
+/**
 **  Move to resource depot
 **
 **  @param unit  Pointer to unit.
@@ -1016,12 +1317,25 @@ int COrder_Resource::MoveToDepot(CUnit &unit)
 	CUnit &goal = *this->GetGoal();
 	CPlayer &player = *unit.Player;
 
+	const int searchesBefore = AStarSearchCalls;
 	switch (DoActionMove(unit)) { // reached end-point?
 		case PF_UNREACHABLE:
+			if (DepotClosedDropsOrder && !player.AiEnabled && unit.ResourcesHeld > 0
+			    && AStarSearchCalls != searchesBefore && ClosedByStandingUnits()) {
+				// live run 78 G1-G3 / L1-L3 (+ run 77 A1): the order ends at once, the load is kept
+				if (CUnit *mine = this->Resource.Mine) {
+					unit.DeAssignWorkerFromMine(*mine);
+					this->Resource.Mine = nullptr;
+				}
+				this->ClearGoal();
+				this->Finished = true;
+				return 0;
+			}
 			return -1;
 		case PF_REACHED:
 			break;
 		case PF_WAIT:
+			HarvestStepHeld(unit); // live run 68: no queue in a lane (action_move.cpp)
 			if (unit.Player->AiEnabled) {
 				this->Range++;
 				if (this->Range >= 5) {
@@ -1068,6 +1382,11 @@ int COrder_Resource::MoveToDepot(CUnit &unit)
 	}
 
 	this->ClearGoal();
+	if (resinfo.TerrainHarvester && unit.ResourcesHeld == 0) {
+		// Sent home from an interrupted chop: nothing to store, it stands beside the depot (live run 36).
+		this->Finished = true;
+		return 0;
+	}
 	unit.Wait = resinfo.WaitAtDepot;
 
 	// Place unit inside the depot
@@ -1083,10 +1402,11 @@ int COrder_Resource::MoveToDepot(CUnit &unit)
 		unit.Anim.CurrAnim = nullptr;
 	}
 
-	// Update resource.
+	// Update resource: the original credits the trip's fixed amount, whatever the load (0x4B27E0).
 	const int rindex = resinfo.FinalResource;
-	player.ChangeResource(rindex, (unit.ResourcesHeld * player.Incomes[rindex]) / 100, true);
-	player.TotalResources[rindex] += (unit.ResourcesHeld * player.Incomes[rindex]) / 100;
+	const int credited = DeliveredPerTrip(unit.ResourcesHeld, player.Incomes[rindex]);
+	player.ChangeResource(rindex, credited, true);
+	player.TotalResources[rindex] += credited;
 	unit.ResourcesHeld = 0;
 	unit.CurrentResource = 0;
 
@@ -1453,9 +1773,48 @@ void COrder_Resource::Execute(CUnit &unit)
 			//HandleActionResource(order, unit);
 			if (!unit.Container) {
 				unit.Wait = WC2_WORKER_EXIT_STAND_FRAMES; // stands beside the hall first
+				Wc2AiDecideAgain(unit);
 			}
 		}
 	}
+}
+
+/**
+**  A worker of a player run by its original script decides again when it has delivered its goods
+**  (wc2ai::LumberNext): when the split now wants the other resource, the next order goes there and
+**  this one ends. Only here, between two trips; nothing is found, it keeps its resource.
+*/
+void COrder_Resource::Wc2AiDecideAgain(CUnit &unit)
+{
+	if (!unit.Player->AiEnabled || !Wc2AiRuns(unit.Player->Index) || unit.Orders.size() != 1
+		|| unit.Orders[0].get() != this) {
+		return;
+	}
+	const bool canGold = unit.Type->ResInfo[GoldCost] != nullptr;
+	const bool canLumber = unit.Type->ResInfo[WoodCost] != nullptr;
+	if (!canGold || !canLumber
+		|| (this->CurrentResource != GoldCost && this->CurrentResource != WoodCost)) {
+		return;
+	}
+	const bool lumber = wc2ai::LumberNext(Wc2AiOnLumber(*unit.Player, &unit),
+	                                      Wc2AiLumberWanted(*unit.Player), canGold, canLumber);
+	if (lumber == (this->CurrentResource == WoodCost)) {
+		return;
+	}
+	std::unique_ptr<COrder> next;
+	if (lumber) {
+		if (auto forestPos = FindTerrainType(unit.Type->MovementMask, MapFieldForest, 1000, *unit.Player,
+		                                     unit.tilePos)) {
+			next = COrder::NewActionResource(unit, *forestPos);
+		}
+	} else if (CUnit *mine = UnitFindResource(unit, unit, 1000, GoldCost, true)) {
+		next = COrder::NewActionResource(unit, *mine);
+	}
+	if (!next) {
+		return;
+	}
+	unit.Orders.push_back(std::move(next));
+	this->Finished = true;
 }
 
 /**

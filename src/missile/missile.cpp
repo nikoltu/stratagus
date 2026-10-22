@@ -54,6 +54,7 @@
 #include "unittype.h"
 #include "video.h"
 #include "json.h"
+#include "../video/classic_sprite_map.h"
 
 #include <cmath>
 #include <map>
@@ -106,9 +107,14 @@ Vec2i NearestOfUnit(const CUnit &unit, const Vec2i &pos)
 /**
 **  Load the graphics for a missile type
 */
+static bool HDEffectCoversFile(const fs::path &file);
+
 void MissileType::LoadMissileSprite()
 {
 	if (this->G && !this->G->IsLoaded(this->Flip)) {
+		if (HDEffectCoversFile(this->G->File)) {
+			this->G->NoClassicFile = true; // CLASSIC-SHEET-LOOKUPS: no file search for a sheet the HD art replaces
+		}
 		this->G->Load();
 		if (this->Flip) {
 			this->G->Flip();
@@ -203,13 +209,14 @@ Missile::Init(const MissileType &mtype, const PixelPos &startPos, const PixelPos
 		case MissileClass::Continuous: missile = std::make_unique<MissileContinious>(); break;
 		case MissileClass::StraightFly: missile = std::make_unique<MissileStraightFly>(); break;
 		case MissileClass::DeathAndDecay: missile = std::make_unique<MissileDeathAndDecay>(); break;
+		case MissileClass::ClickCross: missile = std::make_unique<MissileClickCross>(); break;
 	}
 	const PixelPos halfSize = mtype.size / 2;
 	missile->position = startPos - halfSize;
 	missile->destination = destPos - halfSize;
 	missile->source = missile->position;
 	missile->Type = &mtype;
-	missile->Wait = mtype.Sleep;
+	missile->Wait = mtype.Sleep + mtype.FirstFrameWait;
 	missile->Delay = mtype.StartDelay;
 	missile->TTL = mtype.TTL;
 	if (mtype.FiredSound.Sound) {
@@ -583,6 +590,10 @@ void FireMissile(CUnit &unit, CUnit *goal, const Vec2i &goalPos)
 	bool overshot = false;
 	const PixelPos destPixelPos = MissileImpactPoint(unit, goal, newgoalPos, overshot);
 	Missile *missile = MakeMissile(*unit.Type->Missile.Missile, startPixelPos, destPixelPos);
+	if (missile->Type->Start.Missile) {
+		// Only drawn: it has no source unit, so it hits nothing.
+		MakeMissile(*missile->Type->Start.Missile, startPixelPos, startPixelPos);
+	}
 	//
 	// Damage of missile
 	//
@@ -845,6 +856,42 @@ static void EnsureHDMissileSprite(const MissileType &type)
 	}
 }
 
+// CLASSIC-SHEET-LOOKUPS: the effect file has an HD map entry and the map's common atlas, which
+// draws every mapped effect, is loaded. Nothing is loaded here. The classic sheets are not part of
+// the game data (the classic view draws from the classic atlas), so such a file is never searched.
+static bool HDEffectCoversFile(const fs::path &file)
+{
+	const std::string ts = CurrentEffectTileset();
+	if (ts.empty() || !HDAtlasResident("units_common_" + ts + "_sprites")) {
+		return false;
+	}
+	LoadHDMissileMap();
+	std::string key = file.string();
+	for (char &c : key) {
+		if (c == '\\') { c = '/'; }
+		c = (char) std::tolower((unsigned char) c);
+	}
+	return g_hdMissileMap.count(key) != 0;
+}
+
+// PRELOAD-PLAN (STUTTER-FIRST-DRAW-LOAD): resolve every mapped effect behind the loading screen,
+// so the first shot of a fight finds its art and its (placeholder) sheet ready. An effect without
+// a map entry is left to its first draw: its sheet search would only add a line for an effect the
+// map may never show.
+int PreloadHDMissileArt()
+{
+	int count = 0;
+	for (auto &[key, type] : MissileTypes) {
+		if (!type || !type->G || !HDEffectCoversFile(type->G->File)) {
+			continue;
+		}
+		type->LoadMissileSprite();
+		EnsureHDMissileSprite(*type);
+		++count;
+	}
+	return count;
+}
+
 // HD-ATLAS-CACHE-GROWS: an effect resolved for a biome other than the map's lets its atlas go and
 // is resolved again at its next draw (the preload drops that atlas from the shared cache).
 void ReleaseHDMissileArtOfOtherBiomes()
@@ -859,6 +906,92 @@ void ReleaseHDMissileArtOfOtherBiomes()
 	}
 }
 
+// Classic view: the group of a missile sprite file in the classic atlas, or -1. First the classic
+// sprite table (classic_sprite_map.h); a file the table lacks, or whose group the atlas lacks, by the
+// HD effect map's prefix for the map's tileset (hdatlas::classicGroupNames, folder Other first).
+static int ResolveClassicMissileGroup(const std::string &key, const CAtlasGraphic &atlas)
+{
+	if (const classicmap::ClassicSpriteRow *row = classicmap::classicSpriteRow(key)) {
+		const int group = atlas.ClassicGroupByName(row->group);
+		if (group >= 0) {
+			return group;
+		}
+		ErrorPrint("Classic effect: '%s' -> '%s' is not in the classic atlas, trying the HD map\n",
+		           key.c_str(), row->group);
+	} else {
+		ErrorPrint("Classic effect: '%s' is not in the classic sprite table, trying the HD map\n", key.c_str());
+	}
+	LoadHDMissileMap();
+	const auto mit = g_hdMissileMap.find(key);
+	if (mit == g_hdMissileMap.end()) {
+		return -1;
+	}
+	const auto oit = mit->second.byTileset.find(CurrentEffectTileset());
+	const std::string &prefix = (oit != mit->second.byTileset.end()) ? oit->second : mit->second.prefix;
+	for (const std::string &name : hdatlas::classicGroupNames("units_common", prefix)) {
+		const int group = atlas.ClassicGroupByName(name);
+		if (group >= 0) {
+			return group;
+		}
+	}
+	return -1;
+}
+
+// Classic view: draw the effect from the classic 8-bit art of the map's classic atlas. The cell is
+// centred on the centre of the missile's logical box (as the HD branch below), one classic pixel =
+// PixelTileSize * zoom / ClassicTilePx screen pixels (the density of the classic terrain and units).
+// Frame numbering and mirroring as the classic sheet blit at the end of DrawMissileType
+// (classicmap::classicMissileFrame). The palette is the tileset .ppl with no team run: the effect's
+// own indices 208..211 stay (the classic sheet is not player-coloured either). False when anything is
+// missing: the caller then draws the Remastered art (logged once per file / frame).
+static bool DrawClassicMissileType(const MissileType &type, int frame, const PixelPos &pos)
+{
+	CAtlasGraphic *atlas = Map.ClassicTileAtlas.get();
+	if (!atlas || !atlas->ClassicSerial() || !type.G) {
+		return false;
+	}
+	struct Latched {
+		unsigned serial = 0;
+		std::string key;
+		int group = -1;
+	};
+	static std::unordered_map<const MissileType *, Latched> latched;
+	static std::set<std::string> reportedClassicMiss; // own set: an HD miss must not silence a classic one
+	// Latched on the atlas serial: every map load makes a new classic atlas (a new serial) and missile
+	// types are defined anew only with a new game, so the draw does no string work.
+	Latched &l = latched[&type];
+	if (l.serial != atlas->ClassicSerial()) {
+		l.serial = atlas->ClassicSerial();
+		l.key = classicmap::classicSpriteKey(type.G->File.string());
+		l.group = ResolveClassicMissileGroup(l.key, *atlas);
+	}
+	const std::string &key = l.key;
+	if (l.group < 0) {
+		if (reportedClassicMiss.insert("group|" + key).second) {
+			ErrorPrint("Classic effect: '%s' has no classic group, it stays Remastered\n", key.c_str());
+		}
+		return false;
+	}
+	bool mirror = false;
+	const int n = classicmap::classicMissileFrame(frame, type.Flip, type.NumDirections, mirror);
+	const CAtlasGraphic *cells = atlas->ClassicGroup(l.group, hdatlas::ClassicTeamFirst);
+	if (!cells || n < 0 || n >= cells->NumFrames() || cells->Frame(n).sw == 0) {
+		if (reportedClassicMiss.insert("frame|" + key + "#" + std::to_string(n)).second) {
+			ErrorPrint("Classic effect: '%s' frame %d is not in its classic group, it stays Remastered\n",
+			           key.c_str(), n);
+		}
+		return false;
+	}
+	const float z = GpuWorldDrawZoom;
+	const float s = PixelTileSize.x * z / ClassicTilePx;
+	const float cx = pos.x + type.size.x * z / 2.0f;
+	// A burning building's fire is made at its measured place (BurningFlameLift, HitUnit_Burning),
+	// so its classic cell needs no correction of its own.
+	const float cy = pos.y + type.size.y * z / 2.0f;
+	cells->DrawAtlasFrameCentred(n, cx, cy, s, mirror);
+	return true;
+}
+
 void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 {
 #ifdef DYNAMIC_LOAD
@@ -866,6 +999,11 @@ void MissileType::DrawMissileType(int frame, const PixelPos &pos) const
 		((MissileType*)this)->LoadMissileSprite();
 	}
 #endif
+
+	// Classic view: the classic art of the map's classic atlas; without it the Remastered art below.
+	if (IsClassicView() && DrawClassicMissileType(*this, frame, pos)) {
+		return;
+	}
 
 	// WargusHD: draw the effect from the native Remastered atlas when one is mapped. The HD frame is
 	// scaled to the classic footprint (size * viewport zoom) and re-centred on the same spot, so the
@@ -1391,6 +1529,17 @@ static bool IsPiercedUnit(const Missile &missile, const CUnit &unit)
 	return false;
 }
 
+bool MissileOfTypeOnTile(const MissileType &mtype, const Vec2i &tilePos)
+{
+	for (const auto &missile : GlobalMissiles) {
+		if (missile->Type == &mtype && missile->TTL != 0
+			&& Map.MapPixelPosToTilePos(missile->position + mtype.size / 2) == tilePos) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
 **  Work for missile hit.
 */
@@ -1628,8 +1777,11 @@ void Missile::NextMissileFrameCycle()
 		neg = 1;
 		this->SpriteFrame = -this->SpriteFrame - 1;
 	}
-	const int totalx = abs(this->destination.x - this->source.x);
-	const int dx = abs(this->position.x - this->source.x);
+	// The share of the flight flown, by its steps: the x way alone gave a flight straight north or
+	// south no change of picture, and the arc's offset bent the shares (ORIG51 s.6: the sizes
+	// small, medium, large, medium, small in equal parts of every flight).
+	const int totalx = this->TotalStep;
+	const int dx = this->CurrentStep;
 	int f = this->Type->SpriteFrames / (this->Type->NumDirections / 2 + 1);
 	f = 2 * f - 1;
 	for (int i = 1, j = 1; i <= f; ++i) {
@@ -1731,6 +1883,23 @@ MissileType *MissileBurningBuilding(int percent)
 	return nullptr;
 }
 
+int BurningBuildingFrameOf(const std::vector<BurningBuildingFrame> &frames, int hp, int maxHp)
+{
+	int frame = -1;
+	for (size_t i = 0; i < frames.size(); ++i) {
+		if (hp >= maxHp * frames[i].Percent / 100) {
+			frame = static_cast<int>(i);
+		}
+	}
+	return frame;
+}
+
+MissileType *MissileBurningBuilding(int hp, int maxHp)
+{
+	const int frame = BurningBuildingFrameOf(BurningBuildingFrames, hp, maxHp);
+	return frame < 0 ? nullptr : BurningBuildingFrames[frame].Missile;
+}
+
 /**
 **  Save a specific pos.
 */
@@ -1814,6 +1983,7 @@ void MissileType::Init()
 		mc.MapMissile();
 	}
 	this->Smoke.MapMissile();
+	this->Start.MapMissile();
 }
 
 /**

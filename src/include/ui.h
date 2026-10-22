@@ -599,6 +599,15 @@ extern void DrawClassicHud();
 extern bool ClassicMenuButtonContains(const PixelPos &screenPos);
 /// True when the screen pixel is inside the classic box.
 extern bool ClassicBoxContains(const PixelPos &screenPos);
+/// True when the screen pixel is on the classic F5 slot (classichud::F5Face) of the box.
+extern bool ClassicF5SlotContains(const PixelPos &screenPos);
+/// The one way the view is switched (the F5 slot, the F5 key, Lua SetClassicView and
+/// Preference.ClassicView): refuses the classic view while the big map mode is on or when the
+/// classic HUD art is not readable in the game folder (the view stays Remastered, logged once);
+/// otherwise SetClassicView(on). Presentation only. Returns the view that is now shown.
+extern bool RequestClassicView(bool on);
+/// The F5 slot / F5 key: RequestClassicView(!IsClassicView()).
+extern void UiToggleClassicView();
 extern void CheckViewportMode();
 #ifdef __ANDROID__
 /// Set the magnification of all in-game map viewports and re-derive geometry

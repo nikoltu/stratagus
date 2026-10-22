@@ -560,7 +560,15 @@ ParseAnimationFrame(lua_State *l, std::string_view str)
 	} else if (op1 == "exact-frame") {
 		anim = std::make_unique<CAnimation_ExactFrame>();
 	} else if (op1 == "wait") {
-		anim = std::make_unique<CAnimation_Wait>();
+		anim = std::make_unique<CAnimation_Wait>(EAnimWaitKind::Fixed);
+	} else if (op1 == "wait-haste-slow") {
+		anim = std::make_unique<CAnimation_Wait>(EAnimWaitKind::HasteSlow);
+	} else if (op1 == "wait-haste") {
+		anim = std::make_unique<CAnimation_Wait>(EAnimWaitKind::Haste);
+	} else if (op1 == "wait-slow") {
+		anim = std::make_unique<CAnimation_Wait>(EAnimWaitKind::Slow);
+	} else if (op1 == "wait-loaded") {
+		anim = std::make_unique<CAnimation_Wait>(EAnimWaitKind::Loaded);
 	} else if (op1 == "random-wait") {
 		anim = std::make_unique<CAnimation_RandomWait>();
 	} else if (op1 == "sound") {

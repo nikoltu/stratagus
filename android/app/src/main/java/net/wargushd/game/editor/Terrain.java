@@ -409,6 +409,46 @@ public final class Terrain {
     }
 
     /**
+     * The top left tiles of a block of size x size tiles at (x, y) and of its images: mirrored
+     * left to right (MIRROR_2), also top to bottom (MIRROR_4), also across the diagonals
+     * (MIRROR_8, only on a square map), as the corners of a stroke are mirrored. The block
+     * itself first; an image that falls on a block already in the list is left out.
+     */
+    public static int[][] images(int x, int y, int size, int w, int h, int mirror) {
+        final int ix = w - x - size, iy = h - y - size;
+        final java.util.ArrayList<int[]> out = new java.util.ArrayList<int[]>();
+        addImage(out, x, y);
+        if (mirror >= MIRROR_2) {
+            addImage(out, ix, y);
+        }
+        if (mirror >= MIRROR_4) {
+            addImage(out, x, iy);
+            addImage(out, ix, iy);
+        }
+        if (mirror >= MIRROR_8 && w == h) {
+            addImage(out, y, x);
+            addImage(out, iy, x);
+            addImage(out, y, ix);
+            addImage(out, iy, ix);
+        }
+        return out.toArray(new int[0][]);
+    }
+
+    private static void addImage(java.util.List<int[]> out, int x, int y) {
+        for (int[] p : out) {
+            if (p[0] == x && p[1] == y) {
+                return;
+            }
+        }
+        out.add(new int[] { x, y });
+    }
+
+    /** The first tile a wall brush of a size (tiles across) covers along one axis, for a finger at a map position. */
+    public static int wallStart(float position, int size) {
+        return (int) Math.floor(position - (size - 1) / 2f);
+    }
+
+    /**
      * One brush stroke: the map's tiles as the stroke has left them so far, and at its end the
      * step that makes the change on the map. The map itself is not changed by the stroke.
      */
@@ -671,6 +711,131 @@ public final class Terrain {
 
         /** How many corners the last fill gave the chosen kind. */
         public int filled() { return filled; }
+
+        // ----- walls -----
+
+        /**
+         * Paint a wall of a race (Walls.HUMAN, Walls.ORC) on the size x size tiles under a map
+         * position and on their images. Each wall tile and each wall beside it takes the tile
+         * its neighbours ask for (Walls.tileFor); the corners round a wall are not changed and
+         * are held from then on, as round any tile outside the corner model.
+         *
+         * @return false when nothing was changed
+         */
+        public boolean wall(float x, float y, int race, int size, int mirror) {
+            final java.util.LinkedHashSet<Integer> set = new java.util.LinkedHashSet<Integer>();
+            for (int[] p : images(wallStart(x, size), wallStart(y, size), size, w, h, mirror)) {
+                for (int ty = p[1]; ty < p[1] + size; ++ty) {
+                    for (int tx = p[0]; tx < p[0] + size; ++tx) {
+                        if (tx >= 0 && ty >= 0 && tx < w && ty < h && Walls.raceOf(tiles[ty * w + tx]) != race) {
+                            set.add(ty * w + tx);
+                        }
+                    }
+                }
+            }
+            if (set.isEmpty()) {
+                return false;
+            }
+            for (int at : set) {
+                // The engine first lays the plain wall of direction 0, then fixes it and its neighbours.
+                tiles[at] = Walls.base(race, 0);
+            }
+            fixWalls(set);
+            return true;
+        }
+
+        /**
+         * Take away the wall on a tile and on its images: the tile becomes the ground the tiles
+         * round it give its four corners (grass where they give none, or where no tile holds
+         * that set), and the walls beside it are fixed.
+         *
+         * @return false when there was no wall
+         */
+        public boolean unwall(int x, int y, int mirror) {
+            final java.util.LinkedHashSet<Integer> set = new java.util.LinkedHashSet<Integer>();
+            for (int[] p : images(x, y, 1, w, h, mirror)) {
+                if (p[0] >= 0 && p[1] >= 0 && p[0] < w && p[1] < h && Walls.isWall(tiles[p[1] * w + p[0]])) {
+                    set.add(p[1] * w + p[0]);
+                }
+            }
+            if (set.isEmpty()) {
+                return false;
+            }
+            final int cw = w + 1;
+            for (int at : set) {
+                final int tx = at % w, ty = at / w;
+                // The corners as the other tiles round them read them: the wall itself gives none.
+                final int[] k = { c.kind[ty * cw + tx], c.kind[ty * cw + tx + 1], c.kind[(ty + 1) * cw + tx],
+                    c.kind[(ty + 1) * cw + tx + 1] };
+                for (int i = 0; i < 4; ++i) {
+                    if (k[i] < 0) {
+                        k[i] = GRASS;
+                    }
+                }
+                int tile = tileFor(k[0], k[1], k[2], k[3], rng);
+                if (tile < 0) {
+                    tile = variant(SOLID_BASE[GRASS], rng);
+                }
+                tiles[at] = (tile < 0) ? SOLID_BASE[GRASS] : tile;
+            }
+            fixWalls(set);
+            return true;
+        }
+
+        /** Fix the walls among the changed tiles and beside them; mark the changes; read their corners anew. */
+        private void fixWalls(java.util.Set<Integer> changed) {
+            final java.util.LinkedHashSet<Integer> fix = new java.util.LinkedHashSet<Integer>();
+            for (int at : changed) {
+                final int tx = at % w, ty = at / w;
+                fix.add(at);
+                if (tx > 0) {
+                    fix.add(at - 1);
+                }
+                if (tx < w - 1) {
+                    fix.add(at + 1);
+                }
+                if (ty > 0) {
+                    fix.add(at - w);
+                }
+                if (ty < h - 1) {
+                    fix.add(at + w);
+                }
+            }
+            final int[] was = new int[fix.size()];
+            int n = 0;
+            for (int at : fix) {
+                was[n++] = tiles[at];
+            }
+            // Directions from the tiles as they stand, written after all are found (the engine fixes one by one,
+            // which gives the same: a wall's direction depends only on which neighbours are walls, not on their tiles).
+            final int[] to = new int[fix.size()];
+            n = 0;
+            for (int at : fix) {
+                final int race = Walls.raceOf(tiles[at]);
+                to[n++] = (race < 0) ? tiles[at]
+                    : Walls.tileFor(race, Walls.direction(tiles, w, h, at % w, at / w, race), tiles[at], Terrain.this);
+            }
+            n = 0;
+            for (int at : fix) {
+                tiles[at] = to[n++];
+            }
+            n = 0;
+            for (int at : fix) {
+                final int tx = at % w, ty = at / w;
+                final boolean other = changed.contains(at) || to[n] != was[n];
+                ++n;
+                if (!other) {
+                    continue;
+                }
+                minX = Math.min(minX, tx);
+                minY = Math.min(minY, ty);
+                maxX = Math.max(maxX, tx);
+                maxY = Math.max(maxY, ty);
+                for (int j = 0; j < 4; ++j) {
+                    readCorner(tiles, c, tx + (j & 1), ty + (j >> 1));
+                }
+            }
+        }
 
         /** Settle the corners set so far and write the tiles they ask for; all or nothing. */
         private boolean derive() {

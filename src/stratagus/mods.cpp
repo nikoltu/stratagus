@@ -36,6 +36,9 @@
 static std::vector<std::string> EnabledMods;
 /// The mods directory when it is not the default one
 static fs::path RootOverride;
+/// Per enabled mod that gives unit voices, in load order: its id and the game file names it
+/// replaces (each one present in its sounds/units/ and not empty)
+static std::vector<std::pair<std::string, std::vector<std::string>>> UnitSounds;
 
 /// A definition file larger than this is not read
 constexpr long ModsJsonLimit = 1024 * 1024;
@@ -82,15 +85,64 @@ static bool IsEnabled(const std::string &id)
 	return std::find(EnabledMods.begin(), EnabledMods.end(), id) != EnabledMods.end();
 }
 
+/// A game sound file's own name as a mod's unit voice: letters, digits, '_' and '-', ".wav"
+static bool IsUnitSoundName(std::string_view name)
+{
+	if (name.size() < 5 || name.size() > 64) {
+		return false;
+	}
+	const std::string_view stem = name.substr(0, name.size() - 4);
+	const std::string_view ext = name.substr(name.size() - 4);
+	if (ext != ".wav") {
+		return false;
+	}
+	for (const char ch : stem) {
+		if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+		      || ch == '_' || ch == '-')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/// Read what an enabled mod declares as unit voices: defs/voices.json "units", a list of the
+/// game's file names, each found as sounds/units/<name> in the mod
+static void ReadUnitSounds(const std::string &id)
+{
+	content::JsonValue defs;
+	if (!ModsReadJson("mods/" + id + "/defs/voices.json", defs)) {
+		return;
+	}
+	const content::JsonValue *units = defs.find("units");
+	if (units == nullptr || !units->isArray()) {
+		return;
+	}
+	std::vector<std::string> names;
+	for (const content::JsonValue &item : units->items()) {
+		if (item.isString() && IsUnitSoundName(item.string)
+		    && std::find(names.begin(), names.end(), item.string) == names.end()
+		    && ModsFileSize("mods/" + id + "/sounds/units/" + item.string) > 0) {
+			names.push_back(item.string);
+		}
+	}
+	if (!names.empty()) {
+		UnitSounds.emplace_back(id, std::move(names));
+	}
+}
+
 void ModsSetEnabled(const std::vector<std::string> &ids)
 {
 	EnabledMods.clear();
+	UnitSounds.clear();
 	const fs::path root = ModsRoot();
 	for (const std::string &id : ids) {
 		std::error_code ec;
 		if (IsModId(id) && fs::is_directory(root / id, ec) && !IsEnabled(id)) {
 			EnabledMods.push_back(id);
 		}
+	}
+	for (const std::string &id : EnabledMods) {
+		ReadUnitSounds(id);
 	}
 }
 
@@ -163,6 +215,21 @@ bool ModsReadJson(std::string_view file, content::JsonValue &out)
 		return false;
 	}
 	return true;
+}
+
+std::string ModsUnitSound(std::string_view file)
+{
+	if (UnitSounds.empty() || ModsIsPath(file)) {
+		return {};
+	}
+	const size_t slash = file.find_last_of("/\\");
+	const std::string_view name = slash == std::string_view::npos ? file : file.substr(slash + 1);
+	for (const auto &[id, names] : UnitSounds) {
+		if (std::find(names.begin(), names.end(), name) != names.end()) {
+			return "mods/" + id + "/sounds/units/" + std::string(name);
+		}
+	}
+	return {};
 }
 
 /// Push a JSON value as the Lua value of the same shape (an array counts from 1)

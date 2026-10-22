@@ -36,6 +36,8 @@
 
 #include "script.h"
 #include "map.h"
+#include "missile.h"
+#include "missile_cadence.h"
 #include "unit.h"
 #include "unit_find.h"
 
@@ -63,6 +65,8 @@ void Spell_Demolish::Parse(lua_State *l, int startIndex, int endIndex) /* overri
 			this->Damage = LuaToNumber(l, -1, j + 1);
 		} else if (value == "damage-range") {
 			this->DamageRange = LuaToNumber(l, -1, j + 1);
+		} else if (value == "unit-missile") {
+			this->UnitMissile = &MissileTypeByIdent(LuaToString(l, -1, j + 1));
 		} else {
 			LuaError(l, "Unsupported demolish tag: %s", value.data());
 		}
@@ -120,6 +124,13 @@ int Spell_Demolish::Cast(CUnit &caster,
 			if (unit->Type->MoveType != EMovement::Fly && unit->IsAlive()
 			    && unit->MapDistanceTo(goalPos) <= (this->DamageRange >= 0 ? this->DamageRange : this->Range)) {
 				// Don't hit flying units!
+				// The original makes one explosion at every unit it hits, before the hit
+				// (0x4969F0 -> 0x49B790), 8 classic pixels above the unit's centre.
+				if (this->UnitMissile) {
+					const PixelPos pixelPos =
+						unit->GetMapPixelPosCenter() - PixelPos(0, UnitExplosionLift(PixelTileSize.y));
+					MakeMissile(*this->UnitMissile, pixelPos, pixelPos);
+				}
 				HitUnit(&caster, *unit, this->Damage);
 			}
 		}

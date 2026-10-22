@@ -214,7 +214,8 @@ void COrder_Train::Execute(CUnit &unit) /* override */
 	CUnit *newUnit = MakeUnit(nType, &player);
 
 	if (newUnit == nullptr) { // No more memory :/
-		player.Notify(ColorYellow, unit.tilePos, _("Unable to train %s"), nType.Name.c_str());
+		player.Notify(ColorYellow, unit.tilePos, "%s",
+		              WC2Or("message_cannot_create_unit", "Unable to create unit.").c_str());
 		unit.Wait = CYCLES_PER_SECOND / 6;
 		return ;
 	}

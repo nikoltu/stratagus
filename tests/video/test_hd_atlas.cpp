@@ -1998,14 +1998,14 @@ TEST_CASE("hd_atlas stored canvas: a reduced family is stretched to its rule can
 
 TEST_CASE("hd_atlas flyer shadow: the Remastered square from the unit's tile")
 {
-	// 64 px a tile: the blot's centre is +1, +89 from the tile centre (32, 32), side 92.
+	// 64 px a tile: the blot's centre is +1, +87 from the tile centre (32, 32), side 92.
 	hdatlas::FlyerShadowRect r = hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 0, 1.0f);
 	CHECK(r.size == 92);
 	CHECK(r.x == -13);
-	CHECK(r.y == 75);
+	CHECK(r.y == 73);
 	CHECK(2 * r.x + r.size == 2 * (32 + 1));
-	CHECK(2 * r.y + r.size == 2 * (32 + 89));
-	// 32 px a tile: whole pixels of +0.5, +44.5.
+	CHECK(2 * r.y + r.size == 2 * (32 + 87));
+	// 32 px a tile: whole pixels of +0.5, +43.5.
 	r = hdatlas::hdFlyerShadowRect(1, 1, 32, 32, 0, 0, 0, 1.0f);
 	CHECK(r.size == 46);
 	CHECK(r.x == -7);
@@ -2014,17 +2014,23 @@ TEST_CASE("hd_atlas flyer shadow: the Remastered square from the unit's tile")
 	r = hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 0, 1.5f);
 	CHECK(r.size == 138);
 	CHECK(r.x == -20);
-	CHECK(r.y == 113);
+	CHECK(r.y == 110);
 	r = hdatlas::hdFlyerShadowRect(1, 1, 32, 32, 0, 0, 0, 1.5f);
 	CHECK(r.size == 69);
-	CHECK(r.x == -11);
-	CHECK(r.y == 56);
+	CHECK(r.x == -10);
+	CHECK(r.y == 55);
+	// Live run 58 (96 px a tile = 32 px a tile at zoom 3): the blot's centre 131 px below the tile
+	// centre (measured +126.8 .. +133.4, case means +130.0 .. +131.3) and 1 px right (-1.3 .. +1.6).
+	r = hdatlas::hdFlyerShadowRect(1, 1, 32, 32, 0, 0, 0, 3.0f);
+	CHECK(r.size == 138);
+	CHECK(r.x + r.size / 2 - 48 == 1);
+	CHECK(r.y + r.size / 2 - 48 == 131);
 	// The type's draw offset moves it; the hover height keeps its sign and factor.
 	r = hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 3, -5, 0, 1.0f);
 	CHECK(r.x == -10);
-	CHECK(r.y == 70);
-	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 1, 1.0f).y == 73);
-	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, -1, 1.0f).y == 77);
+	CHECK(r.y == 68);
+	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 1, 1.0f).y == 71);
+	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, -1, 1.0f).y == 75);
 	CHECK(hdatlas::hdFlyerShadowRect(1, 1, 64, 64, 0, 0, 1, 1.0f).x == -13);
 }
 
@@ -2779,6 +2785,75 @@ TEST_CASE("classichud tooltipBox: the box under the hint")
 	CHECK(low.line[3].h == box.line[3].h);
 }
 
+TEST_CASE("classichud tooltipBoxBlend: run 59 line, fill and outer ring")
+{
+	using namespace classichud;
+	// Measured: line (241, 243, 221) at alpha 0.272..0.277, fill black 0.34 (85 of 255 kept,
+	// CLASSIC_CALIB56), ring black 0.15..0.25.
+	CHECK(TooltipBoxLineRGB[0] == 241);
+	CHECK(TooltipBoxLineRGB[1] == 243);
+	CHECK(TooltipBoxLineRGB[2] == 221);
+	CHECK(TooltipBoxLineAlpha / 255.0 >= 0.272);
+	CHECK(TooltipBoxLineAlpha / 255.0 <= 0.277);
+	CHECK(TooltipBoxRingAlpha / 255.0 >= 0.15);
+	CHECK(TooltipBoxRingAlpha / 255.0 <= 0.25);
+	for (int lines = 1; lines <= 4; ++lines) {
+		const TooltipBox outer = tooltipBox(768, lines);
+		const TooltipBoxBlend b = tooltipBoxBlend(768, lines);
+		std::vector<Rect> all;
+		for (const Rect &r : b.inner) { all.push_back(r); }
+		for (const Rect &r : b.line) { all.push_back(r); }
+		for (const Rect &r : b.ring) { all.push_back(r); }
+		// No pixel in two rects (nothing blended twice), none empty.
+		for (size_t i = 0; i < all.size(); ++i) {
+			CHECK(all[i].w > 0);
+			CHECK(all[i].h > 0);
+			for (size_t j = i + 1; j < all.size(); ++j) {
+				const Rect &l = all[i];
+				const Rect &m = all[j];
+				CHECK_FALSE((l.x < m.x + m.w && m.x < l.x + l.w && l.y < m.y + m.h && m.y < l.y + l.h));
+			}
+		}
+		// Pixel by pixel over the box and one pixel round it: inner + line = the old box, the
+		// line is what the old line covered, the ring is outside the box and touches the line.
+		auto in = [](const Rect *rs, int n, int x, int y) {
+			for (int i = 0; i < n; ++i) {
+				if (contains(rs[i], x, y)) { return true; }
+			}
+			return false;
+		};
+		for (int y = outer.fill[0].y - 2; y <= outer.fill[0].y + outer.fill[0].h + 1; ++y) {
+			for (int x = outer.fill[1].x - 2; x <= outer.fill[1].x + outer.fill[1].w + 1; ++x) {
+				const bool box = in(outer.fill, TooltipBoxFills, x, y);
+				const bool oldLine = in(outer.line, TooltipBoxLines, x, y);
+				const bool line = in(b.line, TooltipBoxLines, x, y);
+				const bool inner = in(b.inner, 3, x, y);
+				const bool ring = in(b.ring, TooltipBoxLines, x, y);
+				CHECK(line == oldLine);
+				CHECK((inner || line) == box);
+				bool nearLine = false;
+				for (int dy = -1; dy <= 1; ++dy) {
+					for (int dx = -1; dx <= 1; ++dx) {
+						nearLine = nearLine || in(b.line, TooltipBoxLines, x + dx, y + dy);
+					}
+				}
+				CHECK(ring == (!box && nearLine));
+			}
+		}
+	}
+	// One line at 1366 x 768 (logical x = screen x - 171): the ring rows 691 / 740, columns
+	// 358 / 591 on the screen.
+	const TooltipBoxBlend one = tooltipBoxBlend(768);
+	CHECK(one.ring[0].y == 691);
+	CHECK(one.ring[6].y == 740);
+	CHECK(one.ring[9].x + 171 == 358);
+	CHECK(one.ring[3].x + 171 == 591);
+	// The blend over a ground g gives the fit's a = 1 - alpha and k = alpha * colour.
+	const double a = 1.0 - TooltipBoxLineAlpha / 255.0;
+	CHECK(a == doctest::Approx(0.7255).epsilon(0.005));
+	CHECK(TooltipBoxLineRGB[0] * (1.0 - a) == doctest::Approx(241 * 0.2745).epsilon(0.01));
+}
+
 TEST_CASE("classichud greyOf: the frame under a window is its luma")
 {
 	using namespace classichud;
@@ -2915,6 +2990,38 @@ TEST_CASE("hd_atlas classicMinimapMarkPixels: the measured marks of the original
 	CHECK(hdatlas::classicMinimapMarkPixels(4, 192, fac) == 16);
 	// the Remastered view keeps its rule
 	CHECK(hdatlas::minimapMarkPixels(1, 192, fac) == 5);
+}
+
+TEST_CASE("hd_atlas remasteredMinimapMarkPixels: the original's Remastered minimap marks (run 71)")
+{
+	constexpr int fac = 48;
+	// scale as CMinimap::Create makes it: ceil(surface * fac / n)
+	auto scaleFor = [](int surface, int n) { return (surface * fac + n - 1) / n; };
+	struct Row { int n; int peasant; int farm; int hall; int mine; };
+	// Measured on the original's 128-pixel minimap (ORIG71 "Retry", M).
+	const Row rows[] = {
+		{32, 4, 8, 16, 12},
+		{64, 2, 4, 8, 6},
+		{128, 2, 2, 4, 3},
+	};
+	for (const Row &r : rows) {
+		CAPTURE(r.n);
+		const int s = scaleFor(128, r.n);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(1, s, fac, 128) == r.peasant);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(2, s, fac, 128) == r.farm);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(4, s, fac, 128) == r.hall);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(3, s, fac, 128) == r.mine);
+		// A larger surface (3 screen pixels per logical minimap pixel): everything x 3, the
+		// one-tile floor too.
+		const int s3 = scaleFor(384, r.n);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(1, s3, fac, 384) == 3 * r.peasant);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(2, s3, fac, 384) == 3 * r.farm);
+		CHECK(hdatlas::remasteredMinimapMarkPixels(4, s3, fac, 384) == 3 * r.hall);
+	}
+	// Footman on 64 (1593 at 34,23): 2 x 2
+	CHECK(hdatlas::remasteredMinimapMarkPixels(1, scaleFor(128, 64), fac, 128) == 2);
+	// a tiny surface never draws under 2
+	CHECK(hdatlas::remasteredMinimapMarkPixels(1, scaleFor(64, 128), fac, 64) == 2);
 }
 
 TEST_CASE("hd_atlas classicMinimapViewPixels: the view rectangle of every measured capture")
@@ -3157,6 +3264,24 @@ TEST_CASE("hd_atlas stemIsOfOtherBiome: the pages of another biome, by whole tok
 	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("units_common_xswamp_sprites", "xswamp"));
 	CHECK(hdatlas::stemIsOfOtherBiome("units_common_winter_sprites", "forest"));
 	CHECK_FALSE(hdatlas::stemIsOfOtherBiome("", "forest"));
+}
+
+TEST_CASE("hd_atlas stemInBiome: a roster atlas of another tileset is looked for in the map's biome")
+{
+	// LOAD-CRASH-3473: the Wasteland Town Hall uses the summer file, whose roster atlas is the forest
+	// one; on a Wasteland map (effect tileset "swamp") the family is looked for in units_human_swamp.
+	CHECK(hdatlas::stemInBiome("units_human_forest", "swamp") == "units_human_swamp");
+	CHECK(hdatlas::stemInBiome("units_orc_forest", "swamp") == "units_orc_swamp");
+	CHECK(hdatlas::stemInBiome("units_human_winter", "xswamp") == "units_human_xswamp");
+	CHECK(hdatlas::stemInBiome("units_common_swamp", "forest") == "units_common_forest");
+	// Whole tokens: "swamp" inside "xswamp" is not replaced, and the same biome stays.
+	CHECK(hdatlas::stemInBiome("units_human_xswamp", "xswamp") == "units_human_xswamp");
+	CHECK(hdatlas::stemInBiome("units_human_swamp", "swamp") == "units_human_swamp");
+	// A race's common pages have no biome; an unknown map biome changes nothing.
+	CHECK(hdatlas::stemInBiome("units_human_common", "swamp") == "units_human_common");
+	CHECK(hdatlas::stemInBiome("units_human_forest", "") == "units_human_forest");
+	CHECK(hdatlas::stemInBiome("units_human_forest", "wasteland") == "units_human_forest");
+	CHECK(hdatlas::stemInBiome("", "swamp").empty());
 }
 
 TEST_CASE("hd_atlas runOrdered: a window of three lets a third page start, never a fourth")
@@ -3486,4 +3611,130 @@ TEST_CASE("icon strip cache: a written strip is read back byte for byte, a damag
 	}
 	CHECK_FALSE(WriteHDIconStripCache(blocked / "strip.bin", key, strip, true));
 	SDL_FreeSurface(strip);
+}
+
+TEST_CASE("hd_atlas preloadBaseStems: the atlases every map of a biome loads, local race first")
+{
+	// PRELOAD-PLAN (work/PRELOAD_IMPL.md): a forest map, an orc player against humans.
+	const std::vector<std::string> both = hdatlas::preloadBaseStems("forest", {"orc", "human"});
+	REQUIRE(both.size() == 5);
+	CHECK(both[0] == "units_common_forest");
+	CHECK(both[1] == "units_orc_common");
+	CHECK(both[2] == "units_orc_forest");
+	CHECK(both[3] == "units_human_common");
+	CHECK(both[4] == "units_human_forest");
+	// Wasteland maps are the "swamp" biome of the unit atlases; one race gives three stems.
+	const std::vector<std::string> one = hdatlas::preloadBaseStems("swamp", {"human"});
+	REQUIRE(one.size() == 3);
+	CHECK(one[0] == "units_common_swamp");
+	CHECK(one[2] == "units_human_swamp");
+	// A race without atlases of its own and a repeated race add nothing.
+	CHECK(hdatlas::preloadBaseStems("winter", {"neutral", "orc", "orc"}).size() == 3);
+	// An unknown biome: nothing (the map's tileset is not known yet).
+	CHECK(hdatlas::preloadBaseStems("", {"human"}).empty());
+	CHECK(hdatlas::preloadBaseStems("wasteland", {"human"}).empty());
+}
+
+TEST_CASE("hd_atlas preloadExtraStems: the atlases the map's types need beyond the held ones")
+{
+	const std::vector<std::string> have = {"units_common_swamp", "units_human_common", "units_human_swamp"};
+	// Types resolve mostly to held stems; a family the swamp atlas lacks stays in the forest one.
+	const std::vector<std::string> wanted = {"units_human_common", "", "units_human_swamp",
+	                                         "units_human_forest", "units_common_forest",
+	                                         "units_human_forest", "units_human_common"};
+	const std::vector<std::string> extra = hdatlas::preloadExtraStems(wanted, have);
+	REQUIRE(extra.size() == 2);
+	CHECK(extra[0] == "units_human_forest");
+	CHECK(extra[1] == "units_common_forest");
+	CHECK(hdatlas::preloadExtraStems({"units_human_common"}, have).empty());
+	CHECK(hdatlas::preloadExtraStems({}, have).empty());
+}
+
+TEST_CASE("hd_atlas scriptPlayUnitIdents: the types a map's triggers create during play")
+{
+	// No trigger: the script's units are all created at load (planned from the map then).
+	CHECK(hdatlas::scriptPlayUnitIdents("unit = CreateUnit(\"unit-footman\", 0, {1, 2})\n").empty());
+	CHECK(hdatlas::scriptPlayUnitIdents("").empty());
+	const std::string text =
+		"unit = CreateUnit(\"unit-footman\", 0, {1, 2})\n"           // placed unit: skipped
+		"unit = CreateUnit(\"unit-peasant\", 0, {3, 2})\n"
+		"AddTrigger(function() return GameCycle > 100 end,\n"
+		"  function()\n"
+		"    CreateUnit(\"unit-grunt\", 1, {5, 5})\n"                 // created in play
+		"    local u = CreateUnit( 'unit-ogre', 1, {6, 5})\n"         // other quote, a space
+		"    CreateUnit(\"unit-grunt\", 1, {7, 5})\n"                 // repeat: once
+		"    OldCreateUnit(\"unit-dragon\", 1, {8, 5})\n"
+		"    CreateUnit(kind, 1, {9, 5})\n"                           // a variable: not readable
+		"    CreateUnit(\"\", 1, {9, 5})\n"                           // empty: nothing
+		"    return false end)\n";
+	const std::vector<std::string> idents = hdatlas::scriptPlayUnitIdents(text);
+	REQUIRE(idents.size() == 3);
+	CHECK(idents[0] == "unit-grunt");
+	CHECK(idents[1] == "unit-ogre");
+	CHECK(idents[2] == "unit-dragon");
+	// An unclosed literal at the end and one broken by a line end are not read.
+	CHECK(hdatlas::scriptPlayUnitIdents("AddTrigger()\nCreateUnit(\"unit-gr").empty());
+	CHECK(hdatlas::scriptPlayUnitIdents("AddTrigger()\nCreateUnit(\"unit-a\nb\", 1)").empty());
+}
+
+TEST_CASE("hd_atlas pngRgbaBytes: the decoded size of an atlas page from its PNG header")
+{
+	// units_human_common_sprites.png: 8161 x 7580 -> 247 446 520 bytes of RGBA (236 MiB).
+	unsigned char head[24] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 'I', 'H', 'D', 'R',
+	                          0, 0, 0x1F, 0xE1, 0, 0, 0x1D, 0x9C};
+	CHECK(hdatlas::pngRgbaBytes(head, 24) == 8161ull * 7580ull * 4ull);
+	CHECK(hdatlas::pngRgbaBytes(head, 23) == 0);
+	CHECK(hdatlas::pngRgbaBytes(nullptr, 24) == 0);
+	head[1] = 'X';
+	CHECK(hdatlas::pngRgbaBytes(head, 24) == 0);
+	head[1] = 'P';
+	head[12] = 'J';
+	CHECK(hdatlas::pngRgbaBytes(head, 24) == 0);
+}
+
+TEST_CASE("hd_atlas preload budget: a quarter of the RAM up to the cap; what does not fit waits")
+{
+	// The cap holds one biome's whole two-race set (measured 1040 - 1046 MiB).
+	CHECK(hdatlas::HdPreloadBudgetCapMiB >= 1046);
+	CHECK(hdatlas::hdPreloadBudgetMiB(0) == hdatlas::HdPreloadBudgetCapMiB);
+	CHECK(hdatlas::hdPreloadBudgetMiB(6 * 1024) == hdatlas::HdPreloadBudgetCapMiB);
+	CHECK(hdatlas::hdPreloadBudgetMiB(12 * 1024) == hdatlas::HdPreloadBudgetCapMiB);
+	CHECK(hdatlas::hdPreloadBudgetMiB(4 * 1024) == 1024);
+	const uint64_t MiB = 1024 * 1024;
+	// 1043 MiB held, cap 1100: a 118 MiB building atlas does not fit, a 50 MiB one after it does.
+	const std::vector<int> kept = hdatlas::fitPreloadBudget(1043 * MiB, {118 * MiB, 50 * MiB, 10 * MiB},
+	                                                        1100 * MiB);
+	REQUIRE(kept.size() == 1);
+	CHECK(kept[0] == 1);
+	// One race in play (559 MiB): two other-biome atlases fit, in order.
+	const std::vector<int> two = hdatlas::fitPreloadBudget(559 * MiB, {118 * MiB, 100 * MiB}, 1100 * MiB);
+	REQUIRE(two.size() == 2);
+	CHECK(two[0] == 0);
+	CHECK(two[1] == 1);
+	// A page of unknown size is not loaded ahead.
+	CHECK(hdatlas::fitPreloadBudget(0, {0}, 1100 * MiB).empty());
+}
+
+TEST_CASE("hd_atlas preload decode order: largest page first, equal sizes in list order")
+{
+	const uint64_t MiB = 1024 * 1024;
+	// The winter two-race list as preloadBaseStems gives it (sprites, masks per stem), RGBA MiB.
+	const std::vector<uint64_t> bytes = {94 * MiB, 1 * MiB,  236 * MiB, 28 * MiB, 85 * MiB,
+	                                     9 * MiB,  232 * MiB, 38 * MiB, 85 * MiB, 4 * MiB};
+	const std::vector<int> order = hdatlas::preloadDecodeOrder(bytes);
+	const std::vector<int> expected = {2, 6, 0, 4, 8, 7, 3, 5, 9, 1};
+	CHECK(order == expected); // 4 and 8 tie: list order kept
+	CHECK(hdatlas::preloadDecodeOrder({}).empty());
+	const std::vector<int> unknown = hdatlas::preloadDecodeOrder({0, 5, 0});
+	CHECK(unknown == std::vector<int>{1, 0, 2});
+}
+
+TEST_CASE("hd_atlas preload decode workers: three only on a big device")
+{
+	CHECK(hdatlas::preloadDecodeWorkers(11 * 1024, 8) == 3); // S8U / S20+
+	CHECK(hdatlas::preloadDecodeWorkers(7 * 1024, 6) == 3);
+	CHECK(hdatlas::preloadDecodeWorkers(5600, 8) == 2);      // S7+ 6 GB
+	CHECK(hdatlas::preloadDecodeWorkers(3 * 1024, 4) == 2);  // emulator
+	CHECK(hdatlas::preloadDecodeWorkers(12 * 1024, 4) == 2);
+	CHECK(hdatlas::preloadDecodeWorkers(0, 0) == 2);         // unknown
 }

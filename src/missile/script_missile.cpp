@@ -58,6 +58,7 @@ static const std::map<std::string_view, MissileClass> MissileClassNames = {
 	{"missile-class-clip-to-target", MissileClass::ClipToTarget},
 	{"missile-class-continious", MissileClass::Continuous},
 	{"missile-class-cycle-once", MissileClass::CycleOnce},
+	{"missile-class-click-cross", MissileClass::ClickCross},
 	{"missile-class-death-and-decay", MissileClass::DeathAndDecay},
 	{"missile-class-death-coil", MissileClass::DeathCoil},
 	{"missile-class-fire", MissileClass::Fire},
@@ -139,6 +140,8 @@ void MissileType::Load(lua_State *l)
 			this->StartDelay = LuaToNumber(l, -1);
 		} else if (value == "Sleep") {
 			this->Sleep = LuaToNumber(l, -1);
+		} else if (value == "FirstFrameWait") {
+			this->FirstFrameWait = LuaToNumber(l, -1);
 		} else if (value == "Speed") {
 			this->Speed = LuaToNumber(l, -1);
 		} else if (value == "BlizzardSpeed") {
@@ -173,6 +176,8 @@ void MissileType::Load(lua_State *l)
 			}
 		} else if (value == "SmokeMissile") {
 			this->Smoke.Name = LuaToString(l, -1);
+		} else if (value == "StartMissile") {
+			this->Start.Name = LuaToString(l, -1);
 		} else if (value == "ImpactParticle") {
 			this->ImpactParticle.init(l, -1);
 		} else if (value == "SmokeParticle") {
@@ -410,8 +415,11 @@ static int CclCreateMissile(lua_State *l)
 	const int destUnitId = LuaToNumber(l, 5);
 	const bool dealDamage = LuaToBoolean(l, 6);
 	const bool mapRelative = arg == 7 ? LuaToBoolean(l, 7) : false;
-	CUnit *sourceUnit = sourceUnitId != -1 ? &UnitManager->GetSlotUnit(sourceUnitId) : nullptr;
-	CUnit *destUnit = destUnitId != -1 ? &UnitManager->GetSlotUnit(destUnitId) : nullptr;
+	CUnit *sourceUnit = sourceUnitId != -1 ? UnitManager->FindSlotUnit(sourceUnitId) : nullptr;
+	CUnit *destUnit = destUnitId != -1 ? UnitManager->FindSlotUnit(destUnitId) : nullptr;
+	if ((sourceUnitId != -1 && sourceUnit == nullptr) || (destUnitId != -1 && destUnit == nullptr)) {
+		LuaError(l, "no unit with the number %d / %d", sourceUnitId, destUnitId);
+	}
 
 	if (mapRelative == false) {
 		if (sourceUnit != nullptr) {

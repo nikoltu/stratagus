@@ -38,6 +38,7 @@
 
 #include "wc2strings.h"
 #include "player.h"
+#include "script.h"
 
 #include "action/action_upgradeto.h"
 #include "actions.h"
@@ -53,6 +54,7 @@
 #include "unit.h"
 #include "ui.h"
 #include "video.h"
+#include "wc2ai.h"
 
 #include <algorithm>
 #include <set>
@@ -470,7 +472,8 @@ void CPlayer::Save(CFile &file) const
 {
 	const CPlayer &p = *this;
 	file.printf("Player(%d,\n", this->Index);
-	file.printf("  \"name\", \"%s\",\n", p.Name.c_str());
+	// The name is the profile's: any character may be in it (audit EA-403).
+	file.printf("  \"name\", \"%s\",\n", EscapeLuaString(p.Name).c_str());
 	file.printf("  \"type\", ");
 	switch (p.Type) {
 		case PlayerTypes::PlayerNeutral:       file.printf("\"neutral\",");         break;
@@ -482,7 +485,7 @@ void CPlayer::Save(CFile &file) const
 		default:                  file.printf("%d,", (int)p.Type); break;
 	}
 	file.printf(" \"race\", \"%s\",", PlayerRaces.Name[p.Race].c_str());
-	file.printf(" \"ai-name\", \"%s\",\n", p.AiName.c_str());
+	file.printf(" \"ai-name\", \"%s\",\n", EscapeLuaString(p.AiName).c_str());
 	file.printf("  \"team\", %d,", p.Team);
 
 	file.printf(" \"enemy\", \"");
@@ -607,14 +610,17 @@ void CPlayer::Save(CFile &file) const
 	// UnitColors done by init code.
 	// Allow saved by allow.
 
-	file.printf("\n  \"timers\", {");
+	// One write for the whole list (UpgradeMax numbers for each player), not two each.
+	std::string timers = "\n  \"timers\", {";
+	timers.reserve(UpgradeMax * 4);
 	for (int j = 0; j < UpgradeMax; ++j) {
 		if (j) {
-			file.printf(" ,");
+			timers += " ,";
 		}
-		file.printf("%d", p.UpgradeTimers.Upgrades[j]);
+		timers += std::to_string(p.UpgradeTimers.Upgrades[j]);
 	}
-	file.printf("}");
+	timers += '}';
+	file.write(timers);
 
 	file.printf(")\n\n");
 
@@ -1036,12 +1042,11 @@ ECheckLimit CPlayer::CheckLimits(const CUnitType &type) const
 		Notify("%s", WC2Msg("message_cannot_create_units", _("Unit Limit Reached")));
 		return ECheckLimit::UnitLimitReached;
 	}
-	if (this->Demand + type.Stats[this->Index].Variables[DEMAND_INDEX].Value > this->Supply
-	    && type.Stats[this->Index].Variables[DEMAND_INDEX].Value) {
+	if (FoodRefuses(this->Supply, this->Demand, type.Stats[this->Index].Variables[DEMAND_INDEX].Value)) {
 		// NG48: the Remastered's own wording. `Data/Strings/enUS.json` ships
 		// stat_txt_438 = "Not enough food...build more farms." beside the resource
 		// messages stat_txt_439/440/441, which CPlayer::CheckCosts composes.
-		Notify("%s", _("Not enough food...build more farms."));
+		Notify("%s", WC2Or("stat_txt_438", "Not enough food...build more farms.").c_str());
 		return ECheckLimit::InsufficientSupply;
 	}
 	if (this->GetUnitCount() >= TotalUnitLimit) {
@@ -1049,10 +1054,38 @@ ECheckLimit CPlayer::CheckLimits(const CUnitType &type) const
 		return ECheckLimit::TotalUnitLimitReached;
 	}
 	if (GetUnitTotalCount(type) >= Allow.Units[type.Slot]) {
-		Notify(_("Limit of %d reached for this unit type"), Allow.Units[type.Slot]);
+		// The game has no line of its own for a per-type limit; its general refusal fits.
+		Notify("%s", WC2Msg("message_cannot_create_units", _("Cannot create more units.")));
 		return ECheckLimit::SpecificUnitLimitReached;
 	}
 	return ECheckLimit::Ok;
+}
+
+/**
+**  U-16: the key of the original's refusal line for a missing cost in the game's string table
+**  (Data/Strings/<lang>.json): stat_txt_439 gold, stat_txt_440 lumber, stat_txt_441 oil.
+**  nullptr for a cost the original has no line for. (Declared where it is used and in
+**  tests/stratagus/test_engine_messages.cpp.)
+*/
+const char *WC2CostRefusalKey(int cost)
+{
+	switch (cost) {
+		case GoldCost: return "stat_txt_439";
+		case WoodCost: return "stat_txt_440";
+		case OilCost: return "stat_txt_441";
+		default: return nullptr;
+	}
+}
+
+/// The English wording of that line in enUS.json, the fallback when the string file is absent.
+const char *WC2CostRefusalEnglish(int cost)
+{
+	switch (cost) {
+		case GoldCost: return "Not enough gold...mine more gold.";
+		case WoodCost: return "Not enough lumber...chop more trees.";
+		case OilCost: return "Not enough oil...drill for oil.";
+		default: return nullptr;
+	}
 }
 
 /**
@@ -1072,10 +1105,11 @@ int CPlayer::CheckCosts(const int (&costs)[MaxCosts], bool notify) const
 			continue;
 		}
 		if (notify) {
-			const auto &name = DefaultResourceNames[i];
-			const auto &actionName = DefaultActions[i];
-
-			Notify(_("Not enough %s...%s more %s."), _(name), _(actionName), _(name));
+			// U-16: the original's own message per resource (stat_txt_439 / 440 / 441); a cost
+			// the original has no line for (Cost4..Cost6, unused by the game) gets none.
+			if (const char *own = WC2CostRefusalKey(i)) {
+				Notify("%s", WC2Or(own, WC2CostRefusalEnglish(i)).c_str());
+			}
 
 			if (this == ThisPlayer && GameSounds.NotEnoughRes[this->Race][i].Sound) {
 				PlayGameSound(GameSounds.NotEnoughRes[this->Race][i].Sound.get(), MaxSampleVolume);
@@ -1211,18 +1245,17 @@ void PlayersInitAi()
 */
 void PlayersEachCycle()
 {
+	// The original's casting pass: every 50 cycles, all computers together, casters in slot order
+	if (wc2ai::CastPassDue(GameCycle)) {
+		AiCheckMagicAll();
+	}
 	for (int player = 0; player < NumPlayers; ++player) {
 		CPlayer &p = Players[player];
 		if (CPlayer::IsRevelationEnabled()) {
 			if (p.LostMainFacilityTimer && !p.IsRevealed() && p.LostMainFacilityTimer < ((int) GameCycle)) {
 				p.SetRevealed(true);
-				for (int j = 0; j < NumPlayers; ++j) {
-					if (player != j && Players[j].Type != PlayerTypes::PlayerNobody) {
-						Players[j].Notify(_("%s has not rebuilt their base and is being revealed!"), p.Name.c_str());
-					} else {
-						Players[j].Notify("%s", _("You have not rebuilt your base and have been revealed!"));
-					}
-				}
+				// U-16: no line. The game's string table has no text for this event; the rule
+				// itself is unchanged.
 			}
 		}
 		if (p.AiEnabled) {

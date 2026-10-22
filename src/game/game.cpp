@@ -36,6 +36,7 @@
 
 #include "stratagus.h"
 #include "launcher_bridge.h"
+#include "launchresult.h"
 
 #include "game.h"
 
@@ -71,8 +72,11 @@
 #include "trigger.h"
 #include "ui.h"
 #include "unit.h"
+#include "goal_pull.h"
 #include "wc2mission.h"
+#include "wc2strings.h"
 #include "wc2ai.h"
+#include "wc2bot.h"
 
 #include <algorithm>
 #include "unit_manager.h"
@@ -155,7 +159,6 @@ void StartMap(const std::string &filename, bool clean)
 	// Start with a clean status line in-game; the engine version/copyright (NameLine)
 	// belongs on the title/menu, not stamped across the HUD footer during play.
 	UI.StatusLine.Set("");
-	SetMessage("%s", _("Do it! Do it now!"));
 
 	//  Play the game.
 	GameMainLoop(clean);
@@ -832,44 +835,15 @@ static bool has_any_extension(fs::path filename, std::initializer_list<fs::path>
 }
 
 /**
-**  CreateGame.
+**  Create every player slot from the map's player types and the game settings' presets.
 **
-**  Load map, graphics, sounds, etc
-**
-**  @param filename  map filename
-**  @param map       map loaded
-**
-**  @todo FIXME: use in this function InitModules / LoadModules!!!
+**  A preset team (the LAN room's team per seat, LAN-TEAMS-2V1 / LAN-TEAMS-VS-AI) makes the
+**  players of one team allied with shared vision both ways, and the players of different teams
+**  enemies, people and computers alike. Slots without a preset team keep the defaults
+**  CreatePlayer gives them. Moved here unchanged from CreateGame so it can be tested alone.
 */
-void CreateGame(const fs::path &filename, CMap *map)
+void CreatePresetPlayers()
 {
-	if (SaveGameLoading) {
-		SaveGameLoading = false;
-		// Load game, already created game with Init/LoadModules
-		CommandLog(nullptr, nullptr, EFlushMode::On, -1, -1, nullptr, nullptr, -1);
-		return;
-	}
-
-	InitPlayers();
-
-	if (IsNetworkGame()) {
-		// if is a network game, it is necessary to reinitialize the syncrand
-		// variables before beginning to load the map, due to random map
-		// generation
-		SyncHash = 0;
-		InitSyncRand();
-	}
-
-	if (Map.Info.Filename.empty()) {
-		// Load the map presentation (Map.Info + player types) BEFORE the player-setup loop below. Campaign
-		// .smp requests and custom raw .PUD maps both resolve through LuaLoadFile -> the native PUD loader
-		// (LibraryFileName leaves the path intact; ResolveMapPud serves it from the original .PUD).
-		if (has_any_extension(filename, {".smp", ".SMP"}) || !ResolveMapPud(filename.string()).empty()) {
-			const std::string path = LibraryFileName(filename.string());
-			LuaLoadFile(path);
-		}
-	}
-
 	for (int i = 0; i < PlayerMax; ++i) {
 		PlayerTypes playertype = Map.Info.PlayerType[i];
 		if (GameSettings.Presets[i].Type != PlayerTypes::MapDefault) {
@@ -897,6 +871,55 @@ void CreateGame(const fs::path &filename, CMap *map)
 			}
 		}
 	}
+}
+
+/**
+**  CreateGame.
+**
+**  Load map, graphics, sounds, etc
+**
+**  @param filename  map filename
+**  @param map       map loaded
+**
+**  @todo FIXME: use in this function InitModules / LoadModules!!!
+*/
+void CreateGame(const fs::path &filename, CMap *map)
+{
+	if (SaveGameLoading) {
+		SaveGameLoading = false;
+		// Load game, already created game with Init/LoadModules
+		CommandLog(nullptr, nullptr, EFlushMode::On, -1, -1, nullptr, nullptr, -1);
+		// STALL-HUNT (work/STALL_HUNT.md): a loaded save never ran the preload, so every HD atlas
+		// was decoded on the main thread at the first draw of its family: S8U 3.4.69, a save of
+		// Hillsbrad, first frame 19.8 s late (human common 4.6 s, orc common 4.8 s, ...), and an
+		// enemy first seen later froze play for its race's atlases (~6-8 s). Here the loading
+		// screen is up (StartMap), the units are placed and the tileset is known.
+		PreloadHDArtForMap();
+		PreloadHDTerrainForMap();
+		return;
+	}
+
+	InitPlayers();
+
+	if (IsNetworkGame()) {
+		// if is a network game, it is necessary to reinitialize the syncrand
+		// variables before beginning to load the map, due to random map
+		// generation
+		SyncHash = 0;
+		InitSyncRand();
+	}
+
+	if (Map.Info.Filename.empty()) {
+		// Load the map presentation (Map.Info + player types) BEFORE the player-setup loop below. Campaign
+		// .smp requests and custom raw .PUD maps both resolve through LuaLoadFile -> the native PUD loader
+		// (LibraryFileName leaves the path intact; ResolveMapPud serves it from the original .PUD).
+		if (has_any_extension(filename, {".smp", ".SMP"}) || !ResolveMapPud(filename.string()).empty()) {
+			const std::string path = LibraryFileName(filename.string());
+			LuaLoadFile(path);
+		}
+	}
+
+	CreatePresetPlayers();
 	if (!ThisPlayer) {
 		if (!IsNetworkGame()) {
 			// In demo or kiosk mode, pick first empty slot
@@ -943,6 +966,8 @@ void CreateGame(const fs::path &filename, CMap *map)
 		// and victory rule live in the original engine's own tables. Read them for this level (a no-op
 		// for custom/melee maps, which the original leaves fully unlocked).
 		LoadWC2MissionRules(filename);
+		// The map's region map, read by the goal pull of every move / attack-move / patrol order.
+		LoadGoalRegionMap(filename);
 		InitUnitTypes(1);
 		UpdateLoadingScreen();
 		LoadMap(filename, *map);
@@ -1041,7 +1066,12 @@ void CreateGame(const fs::path &filename, CMap *map)
 	LoadConstructions();
 	LoadUnitTypes();
 	LoadDecorations();
-	PreloadHDArtForMap();   // STUTTER-FIRST-DRAW-LOAD: behind the loading screen, not in play
+	// The launcher editor's validate run never draws and leaves at GameStarting: no preload
+	// (~15 s of Test, work/EDITOR_STATUS.md "Validate without preload"). On for every game.
+	const bool preloadHD = HDArtPreloadOn();
+	if (preloadHD) {
+		PreloadHDArtForMap();   // STUTTER-FIRST-DRAW-LOAD: behind the loading screen, not in play
+	}
 
 	InitUserInterface();
 	UI.Load();
@@ -1049,6 +1079,9 @@ void CreateGame(const fs::path &filename, CMap *map)
 	Map.Init();
 	UI.Minimap.Create();
 	PreprocessMap();
+	if (preloadHD) {
+		PreloadHDTerrainForMap(); // STALL-HUNT: terrain + water behind the loading screen, not in the first frame
+	}
 
 	//
 	// Sound part
@@ -1169,7 +1202,9 @@ void CleanGame()
 	UnitUnderCursor = nullptr;
 	GameEstablishing = false;
 	ClearMissionRules();
+	ClearGoalRegionMap();
 	Wc2AiClearIds();
+	Wc2BotClear();
 }
 
 /**
@@ -1602,6 +1637,7 @@ static int CclSavedGameInfo(lua_State *l)
 			// victory rule; without it the triggers built for the save fall back to the generic
 			// destroy-all rule. Read it here, before the map's own script runs.
 			LoadWC2MissionRules(CurrentMapPath);
+			LoadGoalRegionMap(CurrentMapPath);
 			if (LuaLoadFile(fs::path(StratagusLibPath) / filename) == -1) {
 				ErrorPrint("Load failed: '%s'\n", filename.data());
 			}
@@ -1717,6 +1753,7 @@ void LuaRegisterModules()
 	MapCclRegister();
 	MissileCclRegister();
 	ModsCclRegister();
+	WC2StringsCclRegister();
 	NetworkCclRegister();
 	PathfinderCclRegister();
 	PlayerCclRegister();
@@ -1732,6 +1769,7 @@ void LuaRegisterModules()
 	WC2DataCclRegister();
 	WC2MissionCclRegister(); // NG23: native per-mission victory rule for the trigger layer
 	Wc2AiCclRegister();      // the original's computer-player definitions (game folder)
+	Wc2BotCclRegister();     // computer players described by an enabled mod (defs/bots.json)
 	UpgradesCclRegister();
 	UserInterfaceCclRegister();
 	VideoCclRegister();

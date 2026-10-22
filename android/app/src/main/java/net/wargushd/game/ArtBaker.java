@@ -34,8 +34,11 @@ final class ArtBaker {
     private static final String[] ATLAS = { "Data/skins/Modern_Widgets_Human", "Data/skins/Modern_Widgets_Orc" };
     /** Panels, rim and banner are the same for both races. */
     private static final String GRAPHICS = "Data/skins/Modern_Graphics";
-    /** Every picture goes to both places the scripts name it by. */
-    private static final String[] ROOTS = { "ui/", "" };
+    /**
+     * Where the pictures go: every script request names them under ui/. The copies once also
+     * written at the data root were never read (APK_CONTENT_IMPL F2); the next unpack prunes them.
+     */
+    private static final String ROOT = "ui/";
 
     private static final int BUTTON_EDGE = 14;
     /** How much darker than its grey value a disabled button is drawn (the game has no such frame). */
@@ -77,11 +80,23 @@ final class ArtBaker {
         }
         for (String race : RACES) {
             if (!new File(dataDir, "ui/" + race + "/widgets/button-half-grayed.png").isFile()
-                    || !new File(dataDir, "ui/" + race + "/remaster/frame-light-bracket-r.png").isFile()) {
+                    || !new File(dataDir, "ui/" + race + "/remaster/frame-light-bracket-r.png").isFile()
+                    || !new File(dataDir, "ui/" + race + "/remaster/textinput-active.png").isFile()
+                    || !new File(dataDir, "ui/" + race + "/remaster/textinput-hover.png").isFile()) {
                 return false;
             }
         }
         return true;
+    }
+
+    /** Written into the data directory when a bake has ended well: its date is the art's. In
+     *  one of the makers' places (Provision.madePlace), so that it is kept with the pictures. */
+    private static final String STAMP = "ui/rm/art_baked";
+
+    /** When the pictures were last made, in epoch milliseconds; 0 when no bake has left its stamp. */
+    static long bakedAt(File dataDir) {
+        final File f = new File(dataDir, STAMP);
+        return f.isFile() ? f.lastModified() : 0L;
     }
 
     /** Make the pictures; false when an atlas cannot be read or a file cannot be written. */
@@ -128,6 +143,13 @@ final class ArtBaker {
             scrim.eraseColor(SCRIM_ALPHA << 24);
             new Out(dataDir, null, made).saveAt("ui/rm/briefing/scrim.png", scrim);
             android.util.Log.i("WargusHD", "ART made " + made[0] + " in " + (System.currentTimeMillis() - t0) + " ms");
+            final File stampFile = new File(dataDir, STAMP);
+            try (java.io.FileOutputStream stamp = new java.io.FileOutputStream(stampFile)) {
+                stamp.write(String.valueOf(System.currentTimeMillis()).getBytes("US-ASCII"));
+                Provision.wrote(stampFile);
+            } catch (Exception e) {
+                // The pictures are made; Options then shows the content's date instead.
+            }
             return true;
         } catch (Exception | OutOfMemoryError e) {
             android.util.Log.i("WargusHD", "ART not made after " + made[0] + ": " + e);
@@ -198,6 +220,15 @@ final class ArtBaker {
         }
 
         o.save("remaster/textinput.png", nineSlice(a.frame("textinput_normal"), 1008, 64, 32, 20, 32, 15));
+        // The field's sprites at their own size (252 x 126), for a field the engine nine-slices
+        // itself (skin "widget_edit": 9slice 32, 20, 32, 15): the 1008 x 64 picture above squeezes
+        // the sprite's 91-row middle into 29 rows. New names, so an install that holds only the
+        // older picture makes its pictures again.
+        o.save("remaster/textinput-normal.png", a.frame("textinput_normal"));
+        o.save("remaster/textinput-active.png", a.frame("textinput_active"));
+        // The unfocused field: the original draws flat (36, 36, 56) = the textinput_hover sprite
+        // (ORIG47 section 1, Save window just opened / after a list row is picked).
+        o.save("remaster/textinput-hover.png", a.frame("textinput_hover"));
         a.close();
 
         // A window: the parchment with its torn corners kept, the gold rim over it.
@@ -252,7 +283,7 @@ final class ArtBaker {
         hud.close();
     }
 
-    /** Where a set's pictures go: under both roots, inside the race's folder when there is one. */
+    /** Where a set's pictures go: under ui/, inside the race's folder when there is one. */
     private static final class Out {
         private final File dataDir;
         private final String prefix;
@@ -267,9 +298,7 @@ final class ArtBaker {
         }
 
         void save(String path, Bitmap b) throws Exception {
-            for (String root : ROOTS) {
-                write(root + prefix + path, b);
-            }
+            write(ROOT + prefix + path, b);
             ++made[0];
         }
 

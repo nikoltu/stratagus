@@ -69,7 +69,8 @@ enum class ClfType
 	Invalid, /// invalid file handle
 	Plain, /// plain text file handle
 	Gzip, /// gzip file handle
-	Bzip2 /// bzip2 file handle
+	Bzip2, /// bzip2 file handle
+	Memory /// text kept in memory (CL_WRITE_MEMORY)
 };
 
 class CFile::PImpl
@@ -87,10 +88,17 @@ public:
 	int seek(long offset, int whence);
 	long tell();
 	int write(const void *buf, size_t len);
+	std::string TakeText()
+	{
+		std::string out;
+		out.swap(cl_text);
+		return out;
+	}
 
 private:
 	ClfType cl_type = ClfType::Invalid; /// type of CFile
 	FILE *cl_plain = nullptr;  /// standard file pointer
+	std::string cl_text;       /// what a CL_WRITE_MEMORY file holds
 #ifdef USE_ZLIB
 	gzFile cl_gz;    /// gzip file pointer
 #endif // !USE_ZLIB
@@ -169,6 +177,11 @@ long CFile::tell()
 void CFile::write(std::string_view data)
 {
 	pimpl->write(data.data(), data.size());
+}
+
+std::string CFile::TakeText()
+{
+	return pimpl->TakeText();
 }
 
 static Sint64 sdl_size(SDL_RWops *context)
@@ -303,6 +316,12 @@ int CFile::PImpl::open(const char *name, long openflags)
 
 	cl_type = ClfType::Invalid;
 
+	if ((openflags & CL_OPEN_WRITE) && (openflags & CL_WRITE_MEMORY)) {
+		cl_text.clear();
+		cl_text.reserve(1 << 20); // a 128x128 map's save text is about 1.4 MB
+		cl_type = ClfType::Memory;
+		return 0;
+	}
 	if (openflags & CL_OPEN_WRITE) {
 #ifdef USE_BZ2LIB
 		if ((openflags & CL_WRITE_BZ2)
@@ -383,6 +402,9 @@ int CFile::PImpl::close()
 	ClfType tp = cl_type;
 
 	if (tp != ClfType::Invalid) {
+		if (tp == ClfType::Memory) {
+			ret = 0;
+		}
 		if (tp == ClfType::Plain) {
 			ret = fclose(cl_plain);
 		}
@@ -455,6 +477,10 @@ int CFile::PImpl::write(const void *buf, size_t size)
 	int ret = -1;
 
 	if (tp != ClfType::Invalid) {
+		if (tp == ClfType::Memory) {
+			cl_text.append(static_cast<const char *>(buf), size);
+			ret = (int)size;
+		}
 		if (tp == ClfType::Plain) {
 			ret = fwrite(buf, size, 1, cl_plain);
 		}

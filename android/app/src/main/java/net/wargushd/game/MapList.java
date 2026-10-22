@@ -9,7 +9,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * A list of maps under its source filter (All / Built-in / My maps), as the Multiplayer page's
+ * A list of maps under its source filter (owner's rule: All / Remastered / My maps), as the Multiplayer page's
  * Create segment and the room's map sheet show it. The folders, their order and the rows are
  * those of the Custom Scenario page's list.
  */
@@ -106,7 +106,7 @@ final class MapList {
 
     /** The filter at (x, y) and the rows from under it down to bottom. */
     void draw(Canvas c, SkinKit kit, float x, float y, float bottom) {
-        final String[] sources = { kit.own("All"), kit.own("Built-in"), kit.own("My maps") };
+        final String[] sources = { kit.own("All"), kit.own("Remastered"), kit.own("My maps") };
         LanKit.segments(c, kit, sources, source, x, y, W, SRC_H, LanKit.CAP_MID);
         final float top = y + ROWS_DY;
         scroll = Math.min(scroll, maxScroll(y, bottom));

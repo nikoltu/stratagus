@@ -273,8 +273,52 @@ static char CalculateStereo(const CUnit &unit)
 **  @param unit   Sound initiator, unit speaking
 **  @param voice  Type of sound wanted (Ready,Die,Yes,...)
 */
+/**
+**  Whether the Options -> Sound switches let a unit voice play (OPTIONS-SOUND-SWITCHES-INERT).
+**
+**  The plain meaning of each caption; what the original gates with each is UNMEASURED.
+**  - Building Sound: everything a building says of itself -- its selection sound, the
+**    construction-site sound, its "ready" voice.
+**  - Unit Speech: a unit's own talk -- selection (and the annoyed lines it leads to), the
+**    "ready" of a trained unit, the worker's "job's done".
+**  - Unit Acknowledgements: a unit's answer to an order -- acknowledge, attack, build, repair,
+**    harvest.
+**  Never gated: dying (an effect), help (the under-attack alert), docking (an effect).
+**
+**  @param voice          the voice asked for
+**  @param isBuilding     the speaking unit is a building
+*/
+bool UnitVoiceEnabled(EUnitVoice voice, bool isBuilding, bool unitSpeech, bool unitAck,
+                      bool buildingSound)
+{
+	switch (voice) {
+		case EUnitVoice::Building:
+			return buildingSound;
+		case EUnitVoice::Selected:
+		case EUnitVoice::Ready:
+			return isBuilding ? buildingSound : unitSpeech;
+		case EUnitVoice::WorkCompleted:
+			return unitSpeech;
+		case EUnitVoice::Acknowledging:
+		case EUnitVoice::Attack:
+		case EUnitVoice::Build:
+		case EUnitVoice::Repairing:
+		case EUnitVoice::Harvesting:
+			return isBuilding ? buildingSound : unitAck;
+		case EUnitVoice::HelpMe:
+		case EUnitVoice::Dying:
+		case EUnitVoice::Docking:
+			return true;
+	}
+	return true;
+}
+
 void PlayUnitSound(const CUnit &unit, EUnitVoice voice, bool sampleUnique)
 {
+	if (!UnitVoiceEnabled(voice, unit.Type && unit.Type->Building, Preference.UnitSpeech,
+	                      Preference.UnitAck, Preference.BuildingSound)) {
+		return;
+	}
 	auto sound = ChooseUnitVoiceSound(unit, voice);
 	if (!sound) {
 		return;

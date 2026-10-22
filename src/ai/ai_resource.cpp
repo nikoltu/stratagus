@@ -54,6 +54,7 @@
 #include "upgrade.h"
 #include "network.h"
 #include "wc2ai.h"
+#include "wc2bot.h"
 
 /*----------------------------------------------------------------------------
 --  Defines
@@ -131,7 +132,7 @@ static bool AiCheckSupply(const PlayerAi &pai, const CUnitType &type)
 	}
 
 	// We are already out of food.
-	remaining += pai.Player->Supply - pai.Player->Demand - type.Stats[pai.Player->Index].Variables[DEMAND_INDEX].Value;
+	remaining += std::min(pai.Player->Supply, FoodSupplyCap) - pai.Player->Demand - type.Stats[pai.Player->Index].Variables[DEMAND_INDEX].Value;
 	if (remaining < 0) {
 		return false;
 	}
@@ -555,10 +556,15 @@ static bool AiRequestSupply()
 		std::sort(&cache[0], &cache[j], cnode_cmp);
 	}
 	if (j) {
-		if (!cache[0].needmask) {
+		// A computer player of a mod pays the order of a farm placed (its rate cap; a try that finds
+		// no place costs nothing), and asks none while a building it wants first has no place.
+		// Without one, both true.
+		const int index = AiPlayer->Player->Index;
+		if (!cache[0].needmask && Wc2BotFarmAllowed(index) && Wc2BotMayTake(index)) {
 			CUnitType &type = *cache[0].type;
 			Vec2i invalidPos(-1, -1);
 			if (AiMakeUnit(type, invalidPos)) {
+				Wc2BotTake(index);
 				AiBuildQueue newqueue;
 				newqueue.Type = &type;
 				newqueue.Want = 1;
@@ -993,11 +999,57 @@ static bool AiAssignHarvesterFromUnit(CUnit &unit, int resource)
 {
 	// Try to find the nearest depot first.
 	CUnit *depot = FindDeposit(unit, 1000, resource);
+	// A tanker of a player run by its original script takes its own finished platform with oil
+	// left that has the lowest d(depot, platform) + d(platform, tanker) / 2 (wc2ai::PlatformPick).
+	if (resource == OilCost && depot && Wc2AiRuns(unit.Player->Index)) {
+		std::vector<CUnit *> platforms;
+		std::vector<wc2ai::PlatformView> views;
+		for (CUnit *platform : unit.Player->GetUnits()) {
+			if (platform && platform->Type->GivesResource == OilCost && platform->Type->Building) {
+				wc2ai::PlatformView view;
+				view.usable = platform->IsAliveOnMap() && platform->CurrentAction() != UnitAction::Built
+				              && platform->ResourcesHeld > 0;
+				view.toDepot = depot->MapDistanceTo(*platform);
+				view.toTanker = platform->MapDistanceTo(unit);
+				view.building = platform->IsAliveOnMap() && platform->CurrentAction() == UnitAction::Built;
+				platforms.push_back(platform);
+				views.push_back(view);
+			}
+		}
+		const int pick = wc2ai::PlatformPick(views);
+		if (pick >= 0) {
+			CommandResource(unit, *platforms[pick], EFlushMode::On);
+			return true;
+		}
+		// None finished yet: the tanker waits on water beside the one under construction (live run
+		// 62, 2 of 2); action_built.cpp sends it in the moment the platform is done.
+		const int wait = wc2ai::PlatformWaitPick(views);
+		if (wait >= 0) {
+			const CUnit &site = *platforms[wait];
+			if (unit.MapDistanceTo(site) > 1) {
+				for (int y = site.tilePos.y - 1; y <= site.tilePos.y + site.Type->TileHeight; ++y) {
+					for (int x = site.tilePos.x - 1; x <= site.tilePos.x + site.Type->TileWidth; ++x) {
+						const Vec2i pos(x, y);
+						if (Map.Info.IsPointOnMap(pos) && UnitCanBeAt(unit, pos)) {
+							CommandMove(unit, pos, EFlushMode::On);
+							return true;
+						}
+					}
+				}
+			}
+			return true;
+		}
+	}
 	// Find a resource to harvest from.
 	CUnit *mine = UnitFindResource(unit, depot ? *depot : unit, 1000, resource, true);
 
 	if (mine) {
 		CommandResource(unit, *mine, EFlushMode::On);
+		// A worker of a player run by its original script sent to gold marks its haul road as
+		// reserved (0x4C35B0, DECODE_B8 item 2).
+		if (resource == GoldCost && depot && Wc2AiRuns(unit.Player->Index)) {
+			Wc2AiReserveRoad(depot->tilePos.x, depot->tilePos.y, mine->tilePos.x, mine->tilePos.y);
+		}
 		return true;
 	}
 
@@ -1116,16 +1168,30 @@ static void AiCollectResources()
 	// record AI-SPLIT-002), else to gold, failing that to lumber. A worker that gathers is never
 	// taken off its resource. The original asks per worker when that worker decides; here all
 	// idle workers are asked once a second.
-	if (Wc2AiRuns(AiPlayer->Player->Index)) {
-		const int lumberWanted = Wc2AiLumberWanted(*AiPlayer->Player);
+	// A computer player of a mod splits the same way by its profile's lumber number, and each
+	// worker sent is an order it pays (its rate cap); a worker with nowhere to go costs nothing.
+	const bool bot = Wc2BotRuns(AiPlayer->Player->Index);
+	if (bot || Wc2AiRuns(AiPlayer->Player->Index)) {
+		const int lumberWanted = bot ? Wc2BotLumberWanted(AiPlayer->Player->Index)
+		                             : Wc2AiLumberWanted(*AiPlayer->Player);
 		int onLumber = num_units_assigned[WoodCost] + num_units_with_resource[WoodCost];
+		const int index = AiPlayer->Player->Index;
+		const auto sentOne = [bot, index]() {
+			if (bot) {
+				Wc2BotTake(index);
+			}
+		};
 		for (CUnit *unit : units_free) {
+			if (bot && !Wc2BotMayTake(index)) {
+				break;
+			}
 			const bool gold = unit->Type->ResInfo[GoldCost] != nullptr;
 			const bool lumber = unit->Type->ResInfo[WoodCost] != nullptr;
 			if (!gold && !lumber) {
 				// no worker (a tanker): its one resource, as before
 				for (int c = 1; c < MaxCosts; ++c) {
 					if (unit->Type->ResInfo[c] && AiAssignHarvester(*unit, c)) {
+						sentOne();
 						break;
 					}
 				}
@@ -1133,13 +1199,43 @@ static void AiCollectResources()
 			}
 			if (lumber && onLumber < lumberWanted && AiAssignHarvester(*unit, WoodCost)) {
 				++onLumber;
+				sentOne();
 				continue;
 			}
 			if (gold && AiAssignHarvester(*unit, GoldCost)) {
+				sentOne();
 				continue;
 			}
 			if (lumber && AiAssignHarvester(*unit, WoodCost)) {
 				++onLumber;
+				sentOne();
+			}
+		}
+		// A computer player of a mod also moves one gathering worker a pass when its split changed
+		// (more workers, the stocks): from lumber to gold while more cut wood than it wants, from
+		// gold to lumber while fewer, one that carries nothing and stands on the map (a worker in
+		// the mine or with goods in hand finishes its trip first). Each move is an order it pays.
+		// Without this a worker stays on its resource for ever: seen, two workers both on lumber,
+		// no gold, no worker could be trained again (round 3.4.65).
+		if (bot) {
+			const int onGold = num_units_assigned[GoldCost] + num_units_with_resource[GoldCost];
+			const auto moveOne = [&](int from, int to) {
+				for (CUnit *unit : units_assigned[from]) {
+					if (!Wc2BotMayTake(index)) {
+						return false;
+					}
+					if (unit->ResourcesHeld == 0 && !unit->Removed && unit->Type->ResInfo[to]
+					    && AiAssignHarvester(*unit, to)) {
+						sentOne();
+						return true;
+					}
+				}
+				return false;
+			};
+			if (onLumber > lumberWanted) {
+				moveOne(WoodCost, GoldCost);
+			} else if (onLumber < lumberWanted && onGold > 1) {
+				moveOne(GoldCost, WoodCost);
 			}
 		}
 		return;
@@ -1532,8 +1628,11 @@ void AiResourceManager()
 		AiCollectResources();
 	}
 
-	// Check repair.
-	AiCheckRepair();
+	// Check repair. A computer player of a mod does not send workers to repair (its profiles of
+	// this format have no repair rule).
+	if (!Wc2BotRuns(AiPlayer->Player->Index)) {
+		AiCheckRepair();
+	}
 
 	AiPlayer->NeededMask = 0;
 }

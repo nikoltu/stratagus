@@ -438,6 +438,8 @@ extern void SetMessage(const char *fmt, ...) PRINTF_VAARG_ATTRIBUTE(1, 2);
 extern void SetMessageEvent(const Vec2i &pos, const char *fmt, ...) PRINTF_VAARG_ATTRIBUTE(2, 3);
 /// Center view-point on last event message
 extern void CenterOnMessage();
+/// A tap on the message line's text centres the view on its event; true when the tap was taken
+extern bool CenterOnTappedMessage(const PixelPos &screenPos);
 /// Cleanup all messages
 extern void CleanMessages();
 /// show/hide messages

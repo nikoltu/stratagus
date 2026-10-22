@@ -422,7 +422,15 @@ public final class MapGen {
         return out;
     }
 
-    private static Draft draft(Options opt, long seed) {
+    /** The oil patches found no water: on a coast map the middle mines may be the cause. */
+    private static final String NO_OIL = "no water for the oil patches";
+
+    /**
+     * One try. With nearBase the contested mines are not put in the middle but one next to each
+     * player's base (owner's decision 84: the fallback when the middle mines leave the sea no
+     * room for oil).
+     */
+    private static Draft draft(Options opt, long seed, boolean nearBase) {
         final Rng rng = new Rng(seed), place = new Rng(seed ^ 0x5DEECE66DL);
         final int size = opt.size, n = opt.players, n1 = size + 1, count = n1 * n1;
         final double scale = size / 128.0;
@@ -522,6 +530,29 @@ public final class MapGen {
         }
         disc(kit, n1, s0, rClear, LG);
         disc(kit, n1, mine0, 3.3, LG);
+
+        // The contested mine next to the base instead of in the middle (nearBase): as far from the
+        // start as the home mine, on another side of the clearing, apart from the home mine.
+        double[] side0 = null;
+        if (nearBase && amounts[2] > 0 && size >= 64 && opt.kind != ISLANDS) {
+            for (int deg : new int[] { 100, -100, 135, -135, 70, -70, 170, -170 }) {
+                final double[] v = turned(outward, mineTurn + deg);
+                final double[] cand = snap(new double[] { s0[0] + rMine * v[0], s0[1] + rMine * v[1] }, 3);
+                boolean ok = cand[0] >= 3.5 && cand[0] <= size - 3.5 && cand[1] >= 3.5 && cand[1] <= size - 3.5
+                    && dist(cand, mine0) >= 6.0;
+                for (int k = 1; k < n && ok; ++k) {
+                    ok = dist(cand, starts[k]) >= dist(cand, s0);
+                }
+                if (ok) {
+                    side0 = cand;
+                    break;
+                }
+            }
+            if (side0 == null) {
+                throw new Rejected("no room for the mine next to the base");
+            }
+            disc(kit, n1, side0, 3.3, LG);
+        }
 
         // The expansion: toward the centre and to one side, nearer to this player than to any other.
         double[] exp0 = null;
@@ -655,6 +686,10 @@ public final class MapGen {
                 final double[] e = snap(lay.apply(k, exp0[0], exp0[1]), 3);
                 out.mines.add(new double[] { e[0], e[1], amounts[1] });
             }
+            if (side0 != null) {
+                final double[] m = snap(lay.apply(k, side0[0], side0[1]), 3);
+                out.mines.add(new double[] { m[0], m[1], amounts[2] });
+            }
         }
         for (double[] m : out.mines) {
             disc(t, n1, m, 3.3, LG);
@@ -662,7 +697,7 @@ public final class MapGen {
         for (double[] s : starts) {
             disc(t, n1, s, 2.2, LG);
         }
-        if (amounts[2] > 0 && size >= 64 && opt.kind != ISLANDS) {
+        if (side0 == null && amounts[2] > 0 && size >= 64 && opt.kind != ISLANDS) {
             final double rMid = 0.09 * size + 3.0;
             final double angle = StrictMath.atan2(s0[1] - c, s0[0] - c) + Math.PI / n + 0.2;
             final double[] mid0 = snap(new double[] { c + rMid * StrictMath.cos(angle), c + rMid * StrictMath.sin(angle) }, 3);
@@ -797,7 +832,7 @@ public final class MapGen {
                 }
             }
             if (chosen == null) {
-                throw new Rejected("no water for the oil patches");
+                throw new Rejected(NO_OIL);
             }
             for (double[] q : chosen) {
                 out.patches.add(new double[] { q[0], q[1], amounts[3] });
@@ -836,7 +871,7 @@ public final class MapGen {
             final int sx = topLeft(d.starts[k][0], 1), sy = topLeft(d.starts[k][1], 1);
             units.add(new MapModel.Unit(sx, sy, orc ? MapRules.ORC_START : MapRules.HUMAN_START, k, 0));
             units.add(new MapModel.Unit(sx + ((d.starts[k][0] < d.lay.c) ? 1 : -1), sy,
-                                        orc ? MapRules.PEON : MapRules.PEASANT, k, 1));
+                                        orc ? MapRules.PEON : MapRules.PEASANT, k, MapRules.PASSIVE));
         }
         for (double[] mine : d.mines) {
             units.add(new MapModel.Unit(topLeft(mine[0], 3), topLeft(mine[1], 3), MapRules.GOLD_MINE,
@@ -894,7 +929,17 @@ public final class MapGen {
     /** One try with one number; null when the number gives no map, and why[0] says why. */
     private static Result attempt(Options opt, long seed, Terrain terrain, String[] why) {
         try {
-            final Draft d = draft(opt, seed);
+            Draft d;
+            try {
+                d = draft(opt, seed, false);
+            } catch (Rejected e) {
+                // A coast map whose middle mines leave the sea no room for oil: the same number
+                // again with those mines next to the players' bases (decision 84).
+                if (!NO_OIL.equals(e.getMessage()) || opt.kind != COAST || RESOURCES[opt.resources][2] <= 0) {
+                    throw e;
+                }
+                d = draft(opt, seed, true);
+            }
             final Result r = new Result();
             r.map = model(opt, seed, d, terrain);
             r.measure = MapMetrics.measure(r.map);

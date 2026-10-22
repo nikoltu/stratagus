@@ -68,6 +68,16 @@ void ComputeNineSlice(int srcW, int srcH,
 					  const SDL_Rect &dest,
 					  NineSlicePatch patches[9]);
 
+/**
+**  As ComputeNineSlice, but the border is drawn at `scale` times its size in the source
+**  (rounded), e.g. a skin sprite whose "9slice" insets are in sprite pixels drawn at the
+**  screen's scale. The border still shrinks to fit a destination too small for it.
+*/
+void ComputeNineSliceScaled(int srcW, int srcH,
+							int left, int top, int right, int bottom, double scale,
+							const SDL_Rect &dest,
+							NineSlicePatch patches[9]);
+
 //@}
 
 #endif // !__NINESLICE_H__

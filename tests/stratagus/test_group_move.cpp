@@ -208,6 +208,19 @@ TEST_CASE("group move of ships: an axis of four tiles or more is folded")
 	CheckShipGoals({{10, 10}, {14, 10}, {10, 16}}, {31, 31}, Tiles(3, Vec2i(30, 30)));
 }
 
+TEST_CASE("group move of ships: ORIG51 s.3 - the land rule, Move and Attack alike (6 of 6)")
+{
+	// SG1a: a 2 x 2 block of ships (66..68, 110..112) to 82,117: translated by T - c with c = floor
+	// mean 67,111; the live goals are odd (81 / 83) and each ship ends one short on x - on the grid
+	CheckShipGoals({{66, 110}, {68, 110}, {66, 112}, {68, 112}}, {82, 117}, {{80, 116}, {82, 116}, {80, 118}, {82, 118}});
+	// SG1b: back to 67,109 from 80 / 82, 116 / 118 (c 81,117): even goals, exactly on them
+	CheckShipGoals({{80, 116}, {82, 116}, {80, 118}, {82, 118}}, {67, 109}, {{66, 108}, {68, 108}, {66, 110}, {68, 110}});
+	// SG1c (Attack, the same goal rule): 83,117 from the SG1b block -> 82..84, 116..118
+	CheckShipGoals({{66, 108}, {68, 108}, {66, 110}, {68, 110}}, {83, 117}, {{82, 116}, {84, 116}, {82, 118}, {84, 118}});
+	// SL4a-c: a row of four 2 apart (64..70, 110), extent 6: folded, all onto T 84,112
+	CheckShipGoals({{64, 110}, {66, 110}, {68, 110}, {70, 110}}, {84, 112}, Tiles(4, Vec2i(84, 112)));
+}
+
 TEST_CASE("group move of ships: one ship")
 {
 	CheckShipGoals({{28, 122}}, {12, 124}, {{12, 124}});

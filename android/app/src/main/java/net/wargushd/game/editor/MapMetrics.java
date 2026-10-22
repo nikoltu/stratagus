@@ -61,6 +61,8 @@ public final class MapMetrics {
         public double enemyLine, enemyMeanLine, enemyMeanPath;
         /** Width of the way to the nearest opponent. */
         public int choke;
+        /** The other starts this one is joined to over land, one bit a slot (bit 0 = slot 0). */
+        public int reach;
     }
 
     /** The measurements of a map. */
@@ -409,6 +411,9 @@ public final class MapMetrics {
                 p.enemyLine = Math.min(p.enemyLine, line);
                 lineSum += line;
                 pathSum += path;
+                if (!Double.isInfinite(path)) {
+                    p.reach |= 1 << out.per[k].slot;
+                }
                 if (path < nearestPath) {
                     nearestPath = path;
                     nearest = k;

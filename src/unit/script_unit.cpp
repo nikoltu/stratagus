@@ -42,6 +42,7 @@
 #include "construct.h"
 #include "home_leash.h"
 #include "interface.h"
+#include "launchresult.h"
 #include "map.h"
 #include "netconnect.h"
 #include "network.h"
@@ -182,7 +183,23 @@ static CUnit *CclGetUnit(lua_State *l)
 		}
 		return nullptr;
 	}
-	return &UnitManager->GetSlotUnit(num);
+	// A number from a script (a trigger, a mod, the debug bridge) may name a slot that was never
+	// made in this game: refuse it here instead of reading past the slot table.
+	CUnit *unit = UnitManager->FindSlotUnit(num);
+	if (unit == nullptr) {
+		LuaError(l, "no unit with the number %d (unit slots: %d)", num, static_cast<int>(UnitManager->GetUsedSlotCount()));
+	}
+	return unit;
+}
+
+/**
+**  Is the unit a script got from CclGetUnit gone (nothing selected for -1, or a released slot)?
+**  The callers then do nothing and give nil back: a released slot holds the stale data of a dead
+**  unit and may be handed to a new unit later.
+*/
+static bool CclUnitGone(const CUnit *unit)
+{
+	return unit == nullptr || unit->Released || unit->Type == nullptr;
 }
 
 /**
@@ -195,9 +212,12 @@ static CUnit *CclGetUnit(lua_State *l)
 CUnit *CclGetUnitFromRef(lua_State *l)
 {
 	const std::string_view value = LuaToString(l, -1);
-	unsigned int slot = to_number(value.substr(1), 16);
-	Assert(slot < UnitManager->GetUsedSlotCount());
-	return &UnitManager->GetSlotUnit(slot);
+	const unsigned int slot = to_number(value.substr(1), 16);
+	CUnit *unit = slot < UnitManager->GetUsedSlotCount() ? UnitManager->FindSlotUnit(slot) : nullptr;
+	if (unit == nullptr) {
+		LuaError(l, "no unit with the reference '%s'", std::string(value).c_str());
+	}
+	return unit;
 }
 
 
@@ -274,6 +294,10 @@ void PathFinderOutput::Load(lua_State *l)
 				--i;
 			}
 			lua_pop(l, 1);
+		} else if (tag == "waited") {
+			this->Waited = LuaToNumber(l, -1, i);
+		} else if (tag == "last-wait") {
+			this->LastWait = LuaToNumber(l, -1, i);
 		} else if (tag == "overflow-length") {
 			this->OverflowLength = LuaToNumber(l, -1, i);
 		} else if (tag == "path") {
@@ -351,7 +375,10 @@ static int CclUnit(lua_State *l)
 		LuaError(l, "incorrect argument");
 	}
 
-	CUnit *unit = &UnitManager->GetSlotUnit(slot);
+	CUnit *unit = UnitManager->FindSlotUnit(slot);
+	if (unit == nullptr) {
+		LuaError(l, "Unit(%d): no such unit slot (unit slots: %d)", slot, static_cast<int>(UnitManager->GetUsedSlotCount()));
+	}
 	bool hadType = unit->Type != nullptr;
 	CUnitType *type = nullptr;
 	CUnitType *seentype = nullptr;
@@ -403,20 +430,15 @@ static int CclUnit(lua_State *l)
 			if (!lua_istable(l, -1) || lua_rawlen(l, -1) != 4) {
 				LuaError(l, "incorrect argument");
 			}
-			Vec2i pos;
-			int w;
-			int h;
-
-			pos.x = LuaToNumber(l, -1, 1);
-			pos.y = LuaToNumber(l, -1, 2);
-			w = LuaToNumber(l, -1, 3);
-			h = LuaToNumber(l, -1, 4);
-			MapSight(*player, *unit, pos, w, h, unit->CurrentSightRange, MapMarkTileSight);
-			// Detectcloak works in container
-			if (unit->Type->BoolFlag[DETECTCLOAK_INDEX].value) {
-				MapSight(*player, *unit, pos, w, h, unit->CurrentSightRange, MapMarkTileDetectCloak);
-			}
-			// Radar(Jammer) not.
+			// FOW-SAVE (work/FOW_BUG.md): the sight is no longer marked here. The container's
+			// record may come later in the file, so unit->Container can still be unset, and
+			// CFieldOfView::Refresh would light a one-tile shape from the container's corner that
+			// leaving the container never takes back. LoadGame marks it once every unit is read
+			// (MapMarkInsideUnitSightAfterLoad). The four numbers are still read and checked.
+			(void) LuaToNumber(l, -1, 1);
+			(void) LuaToNumber(l, -1, 2);
+			(void) LuaToNumber(l, -1, 3);
+			(void) LuaToNumber(l, -1, 4);
 			lua_pop(l, 1);
 		} else if (value == "tile") {
 			lua_rawgeti(l, 2, j + 1);
@@ -658,7 +680,19 @@ static int CclUnit(lua_State *l)
 			unit->NewOrder = CclParseOrder(l, *unit);
 			lua_pop(l, 1);
 		} else if (value == "goal") {
-			unit->Goal = &UnitManager->GetSlotUnit(LuaToNumber(l, 2, j + 1));
+			const int goalSlot = LuaToNumber(l, 2, j + 1);
+			CUnit *goal = UnitManager->FindSlotUnit(goalSlot);
+			if (goal == nullptr) {
+				LuaError(l, "Unit goal %d: no such unit slot", goalSlot);
+			}
+			unit->Goal = goal;
+		} else if (value == "last-attacker") {
+			// Written by older builds (a ship's last attacker, since removed): ignored.
+		} else if (value == "remembered-attacker") {
+			// The hit memory (unit.h LastAttacker); a file without it remembers none.
+			lua_rawgeti(l, 2, j + 1);
+			unit->LastAttacker = CclGetUnitFromRef(l);
+			lua_pop(l, 1);
 		} else if (value == "auto-cast") {
 			const std::string_view s = LuaToString(l, 2, j + 1);
 			if (unit->AutoCastSpell.empty()) {
@@ -750,6 +784,10 @@ static int CclMoveUnit(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		lua_pushnil(l);
+		return 1;
+	}
 
 	Vec2i ipos;
 	CclGetPos(l, &ipos, 2);
@@ -803,7 +841,7 @@ static int CclRemoveUnit(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
-	if (unit) {
+	if (!CclUnitGone(unit)) {
 		unit->Remove(nullptr);
 		LetUnitDie(*unit);
 	}
@@ -863,6 +901,9 @@ static int CclCreateUnit(lua_State *l)
 
 			unit->tilePos = ipos;
 			DropOutOnSide(*unit, heading, nullptr);
+			// The launcher's map check reports a unit the map asks for where it cannot stand.
+			EditorNoteUnitMoved(unittype->Ident, player->Index, ipos.x, ipos.y,
+			                    unit->tilePos.x, unit->tilePos.y, unit->Removed);
 		}
 		UpdateForNewUnit(*unit, 0);
 
@@ -899,7 +940,7 @@ static int CclTransformUnit(lua_State *l)
 	lua_pushvalue(l, 2);
 	CUnitType *unittype = CclGetUnitType(l);
 	lua_pop(l, 1);
-	if (unittype && targetUnit) {
+	if (unittype && !CclUnitGone(targetUnit)) {
 		CommandUpgradeTo(*targetUnit, *unittype, EFlushMode::On, true);
 	}
 	lua_pushvalue(l, 1);
@@ -929,12 +970,21 @@ static int CclDamageUnit(lua_State *l)
 	const int attacker = LuaToNumber(l, 1);
 	CUnit *attackerUnit = nullptr;
 	if (attacker != -1) {
-		attackerUnit = &UnitManager->GetSlotUnit(attacker);
+		attackerUnit = UnitManager->FindSlotUnit(attacker);
+		if (attackerUnit == nullptr) {
+			LuaError(l, "DamageUnit: no unit with the number %d", attacker);
+		}
+		if (CclUnitGone(attackerUnit)) {
+			attackerUnit = nullptr; // a dead attacker: the damage has no source
+		}
 	}
 	lua_pushvalue(l, 2);
 	CUnit *targetUnit = CclGetUnit(l);
 	lua_pop(l, 1);
 	const int damage = LuaToNumber(l, 3);
+	if (CclUnitGone(targetUnit)) {
+		return 0;
+	}
 	HitUnit(attackerUnit, *targetUnit, damage);
 
 	return 1;
@@ -956,6 +1006,9 @@ static int CclSetUnitMapFixed(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		return 0;
+	}
 	SetUnitMapFixed(*unit);
 
 	return 0;
@@ -977,6 +1030,9 @@ static int CclSetResourcesHeld(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		return 0;
+	}
 	const int value = LuaToNumber(l, 2);
 	unit->ResourcesHeld = value;
 	unit->Variable[GIVERESOURCE_INDEX].Value = value;
@@ -998,13 +1054,16 @@ static int CclSetTeleportDestination(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		return 0;
+	}
 	if (unit->Type->BoolFlag[TELEPORTER_INDEX].value == false) {
 		LuaError(l, "Unit not a teleporter");
 	}
 	lua_pushvalue(l, 2);
 	CUnit *dest = CclGetUnit(l);
 	lua_pop(l, 1);
-	if (dest->IsAliveOnMap()) {
+	if (!CclUnitGone(dest) && dest->IsAliveOnMap()) {
 		unit->Goal = dest;
 	}
 
@@ -1273,13 +1332,20 @@ static int CclGetUnitsAroundUnit(lua_State *l)
 	}
 
 	const int slot = LuaToNumber(l, 1);
-	const CUnit &unit = UnitManager->GetSlotUnit(slot);
+	const CUnit *unitPtr = UnitManager->FindSlotUnit(slot);
+	if (unitPtr == nullptr) {
+		LuaError(l, "GetUnitsAroundUnit: no unit with the number %d", slot);
+	}
+	const CUnit &unit = *unitPtr;
 	const int range = LuaToNumber(l, 2);
 	bool allUnits = false;
 	if (nargs == 3) {
 		allUnits = LuaToBoolean(l, 3);
 	}
 	lua_newtable(l);
+	if (CclUnitGone(unitPtr)) {
+		return 1; // a released unit has nobody around it
+	}
 	std::vector<CUnit *> table =
 		allUnits ? SelectAroundUnit(unit, range, HasNotSamePlayerAs(Players[PlayerNumNeutral]))
 				 : SelectAroundUnit(unit, range, HasSamePlayerAs(*unit.Player));
@@ -1309,6 +1375,10 @@ static int CclGetUnitBoolFlag(lua_State *l)
 	lua_pushvalue(l, 1);
 	const CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		lua_pushnil(l);
+		return 1;
+	}
 
 	const std::string_view value = LuaToString(l, 2);
 	int index = UnitTypeVar.BoolFlagNameLookup[value];// User bool flags
@@ -1351,7 +1421,7 @@ static int CclGetUnitVariable(lua_State *l)
 	if (unit == nullptr) {
 		return 1;
 	}
-	if (unit->Destroyed || unit->Type == nullptr) {
+	if (unit->Destroyed || CclUnitGone(unit)) {
 		// a released unit slot: nothing to read
 		lua_pop(l, 1);
 		lua_pushnil(l);
@@ -1483,6 +1553,11 @@ static int CclSetUnitVariable(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		// nothing selected, or a released slot: nothing to write
+		lua_pushnil(l);
+		return 1;
+	}
 	const std::string_view name = LuaToString(l, 2);
 	int value = 0;
 	if (name == "Player") {
@@ -1636,6 +1711,9 @@ static int CclSelectSingleUnit(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		return 0;
+	}
 	SelectSingleUnit(*unit);
 	SelectionChanged();
 	return 0;
@@ -1663,6 +1741,10 @@ static int CclFindNextResource(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		lua_pushnil(l);
+		return 1;
+	}
 
 	lua_pushvalue(l, 2);
 	const int resource = CclGetResourceByName(l);
@@ -1718,6 +1800,9 @@ static int CclTurnTowardsLocation(lua_State *l)
 	lua_pushvalue(l, 1);
 	CUnit *unit = CclGetUnit(l);
 	lua_pop(l, 1);
+	if (CclUnitGone(unit)) {
+		return 0;
+	}
 
 	Vec2i dir;
 	if (lua_istable(l, 2)) {
@@ -1727,6 +1812,9 @@ static int CclTurnTowardsLocation(lua_State *l)
 		lua_pushvalue(l, 2);
 		CUnit *target = CclGetUnit(l);
 		lua_pop(l, 1);
+		if (CclUnitGone(target)) {
+			return 0;
+		}
 		dir = target->tilePos + target->Type->GetHalfTileSize() - unit->tilePos;
 	}
 

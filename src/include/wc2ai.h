@@ -283,6 +283,14 @@ constexpr int LumberWorkers(int gold, int lumber, int workers)
 	       : (lumber < 500 ? 3 * (workers + 1) / 4 : workers / 2);
 }
 
+/// What a worker takes next when it has delivered its goods (run 34, item 4: the original's worker
+/// decides again after every delivery, so the split follows the stocks trip by trip). True: lumber.
+/// `othersOnLumber` counts the player's other workers on lumber, the worker itself left out.
+constexpr bool LumberNext(int othersOnLumber, int wanted, bool canGold, bool canLumber)
+{
+	return canLumber && (!canGold || othersOnLumber < wanted);
+}
+
 /// How many workers of `workers` may repair at one time (kept in a byte, as found).
 constexpr int RepairersAllowed(int workers)
 {
@@ -297,7 +305,7 @@ struct RepairView {
 	bool sameGround = false;        ///< a worker can walk to it
 	int hp = 0, maxHp = 0;
 	bool enemyFighterNear = false;  ///< an enemy that can attack in the 9 x 9 tiles from (x - 3, y - 3)
-	int priority = 0;               ///< the type's priority; 0 is never repaired
+	int priority = 0;               ///< the type's annoy-computer factor; 0 is never repaired
 };
 
 /// The building a worker goes to repair: while fewer than RepairersAllowed repair, among the
@@ -330,12 +338,235 @@ constexpr int PlaceStep(int buildingType)
 Place PlaceWalk(int refX, int refY, int step, int mapSide, bool (*sameGround)(int x, int y, void *context),
                 bool (*fits)(int x, int y, void *context), void *context);
 
+/// The candidate nearest to a reference, from one distance per candidate (-1: not a candidate).
+/// Of equals the later one when `laterOnTie` (the shipyard's oil patch, nearest to the worker),
+/// else the first (the first hall's gold mine). -1 when there is no candidate.
+int NearestOf(const std::vector<int> &distances, bool laterOnTie);
+
+/// A foundry or a refinery (0x4E, 0x4F, 0x54, 0x55) is placed only while the slot has a finished
+/// shipyard of either race; every other type does not ask.
+constexpr bool ShipyardWorkAllowed(int buildingType, int finishedShipyards)
+{
+	return finishedShipyards > 0
+	       || !(buildingType == 0x4E || buildingType == 0x4F || buildingType == 0x54 || buildingType == 0x55);
+}
+
+/// What a tanker's choice of its own oil platform sees of one platform.
+struct PlatformView {
+	bool usable = false;   ///< finished, the slot's own, oil left
+	int toDepot = 0;       ///< distance from the tanker's depot
+	int toTanker = 0;      ///< distance from the tanker
+	bool building = false; ///< the slot's own, still under construction
+};
+/// The platform a tanker goes to: the lowest toDepot + toTanker / 2 of the usable ones, the first
+/// of equals. -1 when none is usable.
+int PlatformPick(const std::vector<PlatformView> &platforms);
+/// With no usable platform: the unfinished one a tanker waits beside (live run 62: the second
+/// tanker stood beside the platform under construction and entered it the moment it was done,
+/// 2 of 2), by the same score, the first of equals. -1 when none is being built.
+int PlatformWaitPick(const std::vector<PlatformView> &platforms);
+
+/// A site another worker of the slot is on its way to build on (top-left tile and size).
+struct Site {
+	int x = 0, y = 0, w = 1, h = 1;
+};
+/// Does the square of size w x h at (x, y) overlap one of the planned sites?
+bool SiteTaken(int x, int y, int w, int h, const std::vector<Site> &sites);
+
+/// The port's haul way between a depot and a resource it is harvested from (a port rule, not the
+/// original's): the tiles of the straight line from the depot's centre tile to the resource's
+/// centre tile, each step rounded to the nearest tile, the tiles under either building left out.
+std::vector<Place> HaulLineTiles(const Site &depot, const Site &resource);
+/// Does a building of size w x h at (x, y) stand on the haul way: it covers a tile of the line, or
+/// it lies beside a line tile whose tile across the line is not open (`open`, with `context`), so
+/// that the way would be one tile wide there. A building that only touches the line - beside it or
+/// at a corner - with open ground across is allowed (live run 43, item 2: the original's computer
+/// put a Pig Farm right beside its mine-hall line).
+bool HaulLineBlocked(int x, int y, int w, int h, const std::vector<Place> &line,
+                     bool (*open)(int x, int y, void *context), void *context);
+
+// ---- A further hall (0x4C4B10, DECODE_B8 item 1).
+
+/// Gold per unit of a mine's stock word (+0x82). Not read: hundreds is the decode's likely unit
+/// (NEEDS LIVE: a mine with 4,000 gold left).
+constexpr int MineStockUnit = 100;
+/// A gold mine is looked at for a further hall when its stock word is at least 50.
+constexpr bool FurtherHallMineStock(int gold)
+{
+	return gold >= 50 * MineStockUnit;
+}
+/// Does a hall-class building (box x, y, w, h) have a tile in the 13 x 13 square from
+/// (mineX - 5, mineY - 5)? Any player's hall counts.
+constexpr bool FurtherHallWindowHit(int mineX, int mineY, int x, int y, int w, int h)
+{
+	return x <= mineX + 7 && x + w - 1 >= mineX - 5 && y <= mineY + 7 && y + h - 1 >= mineY - 5;
+}
+/// 0x4A1140: the greater axis distance from a tile to the nearest tile of a box.
+int PointToBoxDistance(int px, int py, int bx, int by, int bw, int bh);
+/// A further hall's place is kept when its top-left tile is at most 10 tiles from the mine.
+constexpr bool FurtherHallKeeps(int distance)
+{
+	return distance <= 10;
+}
+
+// ---- Reserved tiles (tile flag 0x400, DECODE_B8 item 2): set by a scripted slot's build orders,
+// haul roads and new buildings, read only by the scripted slots' placement walk.
+
+/// What a new building of a scripted slot marks (table 0x8A1AD8): nothing (farm, scout tower,
+/// platform, mine and every type not numbered), its footprint with a one-tile border (land
+/// buildings and halls), or the coast tiles of the 13 x 13 square from (x - 6, y - 6) (shipyard,
+/// foundry, refinery).
+enum class ReserveKind { None, Border, Coast };
+constexpr ReserveKind ReserveKindOf(int typeNumber)
+{
+	return (typeNumber == 0x48 || typeNumber == 0x49 || typeNumber == 0x4E || typeNumber == 0x4F
+	        || typeNumber == 0x54 || typeNumber == 0x55) ? ReserveKind::Coast
+	       : ((typeNumber >= 0x3C && typeNumber <= 0x3F) || (typeNumber >= 0x42 && typeNumber <= 0x47)
+	          || (typeNumber >= 0x4A && typeNumber <= 0x4D) || (typeNumber >= 0x50 && typeNumber <= 0x53)
+	          || (typeNumber >= 0x58 && typeNumber <= 0x5B)) ? ReserveKind::Border
+	       : ReserveKind::None;
+}
+/// Mark (value 1) the square (x - grow, y - grow) of side size + 2 * grow, cut to the map; with
+/// `footprint` false the inner size x size square is left as it is (only the border is marked).
+void ReserveSquare(std::vector<uint8_t> &tiles, int mapWidth, int mapHeight, int x, int y, int size, int grow,
+                   bool footprint);
+/// Is any tile of the w x h box at (x, y) marked? Tiles off the map are not.
+bool ReservedAny(const std::vector<uint8_t> &tiles, int mapWidth, int mapHeight, int x, int y, int w, int h);
+/// The haul road of a worker sent to gold (0x4C35B0): the tiles a line stepper visits from the
+/// depot's top-left tile toward the mine's top-left tile, each after its step, until a step
+/// reaches the mine's column or row (that tile included). None when the two share a column or a row.
+std::vector<Place> RoadTiles(int x0, int y0, int x1, int y1);
+/// The marked tiles as text for a saved game: pairs "start,count" of runs of marked tiles in map
+/// order, separated by commas; empty when none is marked.
+std::string ReservedText(const std::vector<uint8_t> &tiles);
+/// The marks back from ReservedText for a map of `size` tiles; runs off the map are cut.
+std::vector<uint8_t> ReservedFromText(const std::string &text, size_t size);
+
+// ---- A computer's unit that is hit (0x495600, DECODE_B7 item 3).
+
+/// The kinds that run from a blow instead of fighting: the workers, Mage / Death Knight and their
+/// heroes, Dwarves / Sappers (their original type numbers).
+constexpr bool FleeKind(int typeNumber)
+{
+	return typeNumber == 0x02 || typeNumber == 0x03 || typeNumber == 0x0A || typeNumber == 0x0B
+	       || typeNumber == 0x0E || typeNumber == 0x0F || typeNumber == 0x15 || typeNumber == 0x18;
+}
+/// One of the eight directions N, NE, E, SE, S, SW, W, NW (0..7) from an engine heading (0..255,
+/// 0 = north, clockwise).
+constexpr int Direction8(int heading)
+{
+	return ((heading + 16) >> 5) & 7;
+}
+/// Where a fleeing unit on (x, y) runs: four tiles along the direction its attacker faces, then
+/// -2 + `randX` / `randY` (each taken as 0..7) on the two axes, kept on the map.
+Place FleePoint(int x, int y, int direction8, int randX, int randY, int mapWidth, int mapHeight);
+
+// ---- The target score of a unit looking for an enemy (0x495F40, DECODE_B8_ROUND2 item 1): the
+// same formula for a person's and a computer's unit; the highest score wins, 0 is never chosen.
+
+/// The score after the refusals: an enemy that cannot attack 0; one that can, farther than the
+/// searcher's attack range 0x10000; within it 0x20000, or 0x30000 when it flies or dives; plus the
+/// target type's Priority, minus d * d / 4 (d = tiles), at least 1.
+constexpr int TargetScore(bool targetCanAttack, bool targetAirOrSub, bool inRange, int priority, int d)
+{
+	const int cls = !targetCanAttack ? 0 : !inRange ? 0x10000 : targetAirOrSub ? 0x30000 : 0x20000;
+	const int score = cls + priority - d * d / 4;
+	return score > 1 ? score : 1;
+}
+/// Targets nearer than this are refused (byte table 0x89C8EC by missile, minus 1): 2 for the
+/// ballista and the catapult, 1 for the destroyers, the battleship, the juggernaut and the cannon
+/// towers, else 0. By the original's type number.
+constexpr int MinSearchDistance(int typeNumber)
+{
+	return (typeNumber == 0x04 || typeNumber == 0x05) ? 2
+	       : (typeNumber == 0x1E || typeNumber == 0x1F || typeNumber == 0x20 || typeNumber == 0x21
+	          || typeNumber == 0x62 || typeNumber == 0x63) ? 1
+	       : 0;
+}
+/// The submarines (Gnomish Submarine, Giant Turtle), by the original's type number.
+constexpr bool SubmarineKind(int typeNumber)
+{
+	return typeNumber == 0x26 || typeNumber == 0x27;
+}
+
 /// The casting pass of a computer's units falls on every fiftieth game cycle (local evidence
-/// record PAI-001).
+/// record PAI-001), the first on the first game cycle: 1, 51, 101, ... (its counter starts at 1).
 constexpr int CastPassCycles = 50;
 constexpr bool CastPassDue(unsigned long cycle)
 {
-	return cycle % CastPassCycles == 0;
+	return cycle % CastPassCycles == 1;
+}
+
+/// A person's units never cast by themselves: the original's only automatic casting is the computer's
+/// casting pass (0x4B5F9E tests the computer slot); a person's caster casts only on an order
+/// (DECODE_B11_ROUND2 4, owner 2026-10-15: no autocast for the person, 1:1).
+constexpr bool UnitMayAutoCast(bool personOwned)
+{
+	return !personOwned;
+}
+
+/// Nor do they repair by themselves: the original has no auto-repair for the person (no Ctrl + click
+/// toggle on Repair); a person's Peasant or Peon repairs only on an order (owner 2026-10-15,
+/// TOUCH_KEYBOARD_AUDIT). The computer repairs through its own pass (AiCheckRepair), not this flag.
+constexpr bool UnitMayAutoRepair(bool personOwned)
+{
+	return !personOwned;
+}
+
+/// The cool-down counter 20 of order 0x0A: set when a remembered attack-move is sent again at the
+/// end of a fight or a cast, it bars the next re-issue for this many game cycles. It is no polling
+/// period: a blocked attack-move is not tried again on a timer (ORIG46 item 2).
+constexpr int AttackMoveRetryWait = 20;
+
+/// A person's ship on an attack-move to a point whose target has died stays in its fight, without
+/// a target, for this many game cycles: no search, no re-issue. Then it takes the next target or,
+/// with none in reach, is sent on to its point. Calibrated on the original's unit memory read live
+/// (frames = game cycles, as the counter 20 above): from the kill to the re-issue run 49 H1 112,
+/// H2 111; to the next target taken run 49 H2 109, H3 112, ORIG47 E4 110 / 113 - 6 cases.
+/// A land unit's attack-move went on 15 frames after its kill (ORIG47 A4, 1 case), so the wait
+/// is a ship's only.
+constexpr int ShipKillHold = 111;
+constexpr bool HoldsAfterKill(bool person, bool naval, bool attackMoveToPoint)
+{
+	return person && naval && attackMoveToPoint;
+}
+/// An attack-move is kept (blocked, or at a re-issue check) while the unit's tile is 2 or more tiles
+/// from the point on either axis; within 1 on both it is done.
+constexpr bool AttackMoveRetry(int dx, int dy)
+{
+	return dx >= 2 || dx <= -2 || dy >= 2 || dy <= -2;
+}
+
+/// The answer of a remembered order at the re-issue check (0x4D87E0 with order 2): send it again now,
+/// stand and keep it (its counter runs), or stand and forget it.
+enum class Reissue : uint8_t { Ready = 0, Wait = 1, Forget = 2 };
+
+/// A remembered attack-move (memory 0x0A) at the end of a fight or a cast (0x4D8890-0x4D891B): while its
+/// counter runs the unit stands and keeps it; with the counter at 0 it is sent again when the unit's tile
+/// is 2 or more tiles from the point on either axis (counter 20 again), else it is forgotten.
+/// reissueAt is the game cycle at which the counter is 0 (0 = at 0).
+constexpr Reissue AttackMoveReissue(unsigned long cycle, unsigned long reissueAt, int dx, int dy)
+{
+	if (cycle < reissueAt) {
+		return Reissue::Wait;
+	}
+	return AttackMoveRetry(dx, dy) ? Reissue::Ready : Reissue::Forget;
+}
+
+/// A patrol leg is remembered (order 5 kept for the re-issue after a fight) for every land unit; a flyer
+/// or a ship only when the leg is off both axes by more than one tile (patrol start 0x4C1550, type flags
+/// 0x0A).
+constexpr bool PatrolRememberLeg(bool airOrSea, int dx, int dy)
+{
+	return !airOrSea || ((dx > 1 || dx < -1) && (dy > 1 || dy < -1));
+}
+
+/// A remembered patrol is sent again only when its counter is 0; the re-issue sets it to 40 game cycles
+/// (0x4D8849-0x4D8883), so the next one is due 40 cycles later.
+constexpr int PatrolReissueWait = 40;
+constexpr bool PatrolReissueReady(unsigned long cycle, unsigned long reissueAt)
+{
+	return cycle >= reissueAt;
 }
 
 /// Conditions 4 / 5 / 6 ("enough fighters, ships, flyers for the next wave") count every living
@@ -370,11 +601,17 @@ void Wc2AiPlaceReference(const CUnit &worker, int &x, int &y);
 /// The player's workers (no tankers) and how many of them wc2ai::LumberWorkers wants on lumber.
 int Wc2AiWorkerCount(const CPlayer &player);
 int Wc2AiLumberWanted(const CPlayer &player);
+/// The player's workers on lumber as the split counts them (a lone gather order on wood, or idle
+/// with wood in hand), `except` left out.
+int Wc2AiOnLumber(const CPlayer &player, const CUnit *except);
 /// The building wc2ai::RepairPick sends a worker to, or nullptr. `unreachable`: buildings no
 /// worker could be sent to in this pass (they count as not on the workers' ground).
 CUnit *Wc2AiRepairTarget(const CPlayer &player, const std::vector<const CUnit *> &unreachable);
 /// Forget the ids (a new map is about to be loaded).
 void Wc2AiClearIds();
+/// Forget the id of one slot: a computer player of a mod runs that seat (wc2bot.h), so the map's
+/// original script must not run beside it.
+void Wc2AiDropId(int player);
 /// Lua: SetWc2AiId(player, id), GetWc2AiId(player), GetWc2AiInfo().
 void Wc2AiCclRegister();
 /// One game cycle of the player's original script, when it has one (parameters only: no effect on play yet).
@@ -393,5 +630,17 @@ const wc2ai::CellMap &Wc2AiCells();
 /// player goes out.
 class CUnit;
 void Wc2AiBuildingLost(const CUnit &building);
+/// Reserved tiles of the scripted slots (DECODE_B8 item 2). A worker of a scripted slot is sent
+/// to build at (x, y): the one-tile border round the site is marked for good (a farm: nothing; the
+/// bare site is a planned site while the order lives).
+void Wc2AiReservePlanned(const CUnitType &type, int x, int y);
+/// A worker of a scripted slot is sent to gold: its haul road is marked.
+void Wc2AiReserveRoad(int depotX, int depotY, int mineX, int mineY);
+/// A building of a scripted slot came into being: its marks (wc2ai::ReserveKindOf). `mapPlaced`:
+/// placed with the map (its footprint marked too); else a foundation laid by a worker, whose
+/// footprint the end of the worker's task leaves unmarked.
+void Wc2AiReserveBuilding(const CUnit &building, bool mapPlaced);
+/// Is a tile of the w x h box at (x, y) reserved?
+bool Wc2AiReservedAt(int x, int y, int w, int h);
 
 #endif // WC2AI_H

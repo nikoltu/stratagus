@@ -52,6 +52,8 @@
 #include "unit.h"
 #include "unit_manager.h"
 #include "unittype.h"
+#include "wc2ai.h"
+#include "wc2strings.h"
 
 /*----------------------------------------------------------------------------
 --  Functions
@@ -331,6 +333,9 @@ void CommandAutoRepair(CUnit &unit, int on)
 {
 	if (IsUnitValidForNetwork(unit) == false) {
 		return ;
+	}
+	if (on && !wc2ai::UnitMayAutoRepair(unit.Player->Type == PlayerTypes::PlayerPerson)) {
+		return; // a person's unit has no auto-repair (owner 2026-10-15)
 	}
 	unit.AutoRepair = on;
 }
@@ -954,6 +959,9 @@ void CommandAutoSpellCast(CUnit &unit, int spellid, int on)
 		           unit.AutoCastSpell.size());
 		return;
 	}
+	if (on && !wc2ai::UnitMayAutoCast(unit.Player->Type == PlayerTypes::PlayerPerson)) {
+		return; // a person's unit has no autocast (DECODE_B11_ROUND2 4)
+	}
 	unit.AutoCastSpell[spellid] = on;
 }
 
@@ -1011,7 +1019,8 @@ void CommandSharedVision(int playerIndex, bool state, int opponentIndex)
 
 	// Do a real hardcore seen recount. First we unmark sight for all units of the player.
 	for (CUnit *const unit : player->GetUnits()) {
-		if (!unit->Destroyed) {
+		// FOW-BUG2: an inside unit goes with its container (MapMarkUnitSightRec); twice was a stray +1.
+		if (!unit->Destroyed && !unit->Container) {
 			MapUnmarkUnitSight(*unit);
 		}
 	}
@@ -1039,7 +1048,8 @@ void CommandSharedVision(int playerIndex, bool state, int opponentIndex)
 
 	// Do a real hardcore seen recount. Now we remark sight for all units of the player
 	for (CUnit *const unit : player->GetUnits()) {
-		if (!unit->Destroyed) {
+		// FOW-BUG2: an inside unit goes with its container (MapMarkUnitSightRec); twice was a stray +1.
+		if (!unit->Destroyed && !unit->Container) {
 			MapMarkUnitSight(*unit);
 		}
 	}
@@ -1158,9 +1168,11 @@ void CommandQuit(int player, int reason)
 	CommandQuitUnits(Players[player]);
 
 	if (hadNoUnits) {
-		SetMessage(_("Player \"%s\" has been killed"), Players[player].Name.c_str());
+		SetMessage(WC2Or("message_player_eliminated", "Player %s was eliminated.").c_str(),
+		           Players[player].Name.c_str());
 	} else {
-		SetMessage(_("Player \"%s\" has left the game"), Players[player].Name.c_str());
+		SetMessage(WC2Or("message_player_left", "Player %s left the game.").c_str(),
+		           Players[player].Name.c_str());
 	}
 }
 

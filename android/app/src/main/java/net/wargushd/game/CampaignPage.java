@@ -140,11 +140,15 @@ final class CampaignPage {
             new Thread(new Runnable() {
                 @Override
                 public void run() {
+                    final long began = android.os.SystemClock.uptimeMillis();
                     logos[0] = k.atlasFrame("Modern_Graphics", "logo_tod", lw, lh);
                     logos[1] = k.atlasFrame("Modern_Graphics", "logo_btdp", lw, lh);
                     for (int i = 0; i < campaigns.length; ++i) {
                         sketches[i] = k.atlasFrame("Modern_Graphics", campaigns[i].sketch, sw, sh);
                     }
+                    // CAMPAIGN-PAGE-FIRST-OPEN-SLOW: the first open's cost, beside the tap's own log.
+                    android.util.Log.i("WargusHD", "LAUNCHER campaign pictures in "
+                        + (android.os.SystemClock.uptimeMillis() - began) + " ms");
                     if (redraw != null) {
                         redraw.run();
                     }

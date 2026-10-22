@@ -56,6 +56,7 @@
 #include "unit.h"
 #include "unittype.h"
 #include "video.h"
+#include "wc2strings.h"
 
 #include <set>
 
@@ -139,6 +140,8 @@ bool COrder_SpellCast::ParseSpecificData(lua_State *l,
 		this->Range = LuaToNumber(l, -1, j + 1);
 	} else if (value == "autocast") {
 		this->isAutocast = true;
+	} else if (value == "keeps-patrol-memory") {
+		// Older saves: the flag is no longer used, every cast ends through the re-issue check.
 	} else if (value == "state") {
 		++j;
 		this->State = LuaToNumber(l, -1, j + 1);
@@ -248,6 +251,20 @@ static void AnimateActionSpellCast(CUnit &unit, COrder_SpellCast &order)
 }
 
 /**
+**  Go back to the saved order at the end of the cast.
+**
+**  Every cast ends through the original's re-issue check (0x4D87E0 with order 2, DECODE_B11_ROUND2 1):
+**  a remembered patrol whose counter is 0 is sent again, one in its cool-down stays saved and the
+**  unit stands. A person's ordered cast cleared the memory when it was given (CommandSpellCast).
+**
+**  @return      true if the saved order was restored.
+*/
+bool COrder_SpellCast::RestoreAfterCast(CUnit &unit)
+{
+	return unit.RestoreOrder();
+}
+
+/**
 **  Check for dead goal.
 **
 **  @warning  The caller must check, if he likes the restored SavedOrder!
@@ -271,11 +288,16 @@ bool COrder_SpellCast::CheckForDeadGoal(CUnit &unit)
 	// Goal could be destroyed or unseen
 	// So, cannot use type.
 	this->goalPos = goal->tilePos;
-	this->Range = 0;
+	// A position spell with a goal (the computer's Death Coil, "position-goal") keeps its range
+	// to the goal's last tile: the original's order keeps the goal's tile when the goal is
+	// cleared (DECODE_COIL, 0x4C2B60 / 0x4C224E). Any other spell walks onto the tile.
+	if (this->Spell == nullptr || this->Spell->Target != ETarget::Position) {
+		this->Range = 0;
+	}
 	this->ClearGoal();
 
 	// If we have a saved order continue this saved order.
-	if (unit.RestoreOrder()) {
+	if (this->RestoreAfterCast(unit)) {
 		return true;
 	}
 	return false;
@@ -301,12 +323,12 @@ bool COrder_SpellCast::SpellMoveToTarget(CUnit &unit)
 	// FIXME: use return codes from pathfinder
 	CUnit *goal = this->GetGoal();
 
-	if (goal && unit.MapDistanceTo(*goal) <= this->Range) {
+	if (goal && unit.SpellDistanceTo(*goal) <= this->Range) {
 		// there is goal and it is in range
 		UnitHeadingFromDeltaXY(unit, goal->tilePos + goal->Type->GetHalfTileSize() - unit.tilePos);
 		this->State++; // cast the spell
 		return false;
-	} else if (!goal && unit.MapDistanceTo(this->goalPos) <= this->Range) {
+	} else if (!goal && unit.SpellDistanceTo(this->goalPos) <= this->Range) {
 		// there is no goal and target spot is in range
 		UnitHeadingFromDeltaXY(unit, this->goalPos - unit.tilePos);
 		this->State++; // cast the spell
@@ -336,9 +358,8 @@ void COrder_SpellCast::Execute(CUnit &unit) /* override */
 				if (unit.Variable[MANA_INDEX].Value < spell.ManaCost) {
 					unit.Player->Notify(ColorYellow,
 					                    unit.tilePos,
-					                    _("%s: not enough mana for spell: %s"),
-					                    unit.Type->Name.c_str(),
-					                    spell.Name.c_str());
+					                    "%s",
+					                    WC2Or("stat_txt_435", "Not enough mana to cast spell.").c_str());
 				} else if (spell.Slot >= unit.SpellCoolDownTimers.size()) {
 					WarnInvalidSpellCastCooldown(unit, spell);
 				} else if (unit.SpellCoolDownTimers[spell.Slot]) {
@@ -364,7 +385,7 @@ void COrder_SpellCast::Execute(CUnit &unit) /* override */
 				if (unit.Player->AiEnabled) {
 					DebugPrint("FIXME: do we need an AI callback?\n");
 				}
-				if (!unit.RestoreOrder()) {
+				if (!this->RestoreAfterCast(unit)) {
 					this->Finished = true;
 				}
 				return ;
@@ -379,9 +400,9 @@ void COrder_SpellCast::Execute(CUnit &unit) /* override */
 		case 1:                         // Move to the target.
 			if (spell.Range != INFINITE_RANGE) {
 				if (SpellMoveToTarget(unit) == true) {
-					if (!unit.RestoreOrder()) {
-						this->Finished = true;
-					}
+					// Target out of reach: plain idle, the saved order stays as the memory
+					// (0x4D8720 with order 2, DECODE_B11_ROUND2 1).
+					this->Finished = true;
 					return ;
 				}
 				return ;
@@ -415,7 +436,7 @@ void COrder_SpellCast::Execute(CUnit &unit) /* override */
 
 			// Check, if goal has moved (for ReCast)
 			if (unit.ReCast) {
-				if (order.GetGoal() && unit.MapDistanceTo(*order.GetGoal()) > this->Range) {
+				if (order.GetGoal() && unit.SpellDistanceTo(*order.GetGoal()) > this->Range) {
 					this->State = 0;
 					return;
 				}
@@ -424,7 +445,7 @@ void COrder_SpellCast::Execute(CUnit &unit) /* override */
 						order.goalPos = order.GetGoal()->tilePos;
 					}
 					if (unit.Player->AiEnabled) {
-						if (!unit.RestoreOrder()) {
+						if (!this->RestoreAfterCast(unit)) {
 							this->Finished = true;
 						}
 						return ;
@@ -432,7 +453,7 @@ void COrder_SpellCast::Execute(CUnit &unit) /* override */
 				}
 			}
 			if (!unit.ReCast && unit.CurrentAction() != UnitAction::Die) {
-				if (!unit.RestoreOrder()) {
+				if (!this->RestoreAfterCast(unit)) {
 					this->Finished = true;
 				}
 				return ;

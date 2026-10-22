@@ -40,6 +40,7 @@
 #include "cursor.h"
 #include "ui.h"
 #include "widgets.h"
+#include "nineslice.h"
 #include "network.h"
 #include "netconnect.h"
 #include "editor.h"
@@ -230,6 +231,50 @@ void freeGuichan()
 	Input = nullptr;
 }
 
+#ifdef __ANDROID__
+/**
+**  Raise the Android soft keyboard for the text field the player tapped and drop it once that
+**  field loses the focus or its window closes. Text input is off at start (sdl.cpp): on, it
+**  shows the keyboard over the game. The field's rectangle goes to SDL, whose input view sits
+**  there, so the window pans (adjustPan) to keep the field above the keyboard.
+*/
+static void SyncScreenKeyboard()
+{
+	static bool active = false;
+	static unsigned shownForTap = 0;
+
+	CTextField *field = Gui ? TextFieldWantingKeyboard(Gui->getTop()) : nullptr;
+	if (field == nullptr) {
+		if (active) {
+			SDL_StopTextInput();
+			active = false;
+		}
+		return;
+	}
+	if (active && shownForTap == TextFieldTapCount()) {
+		return;
+	}
+	int x = 0;
+	int y = 0;
+	field->getAbsolutePosition(x, y);
+	int ww = 0;
+	int wh = 0;
+	SDL_GetWindowSize(TheWindow, &ww, &wh);
+	if (Video.Width > 0 && Video.Height > 0 && ww > 0 && wh > 0) {
+		// the game fills the window (touch maps the same way: finger * Video.Width)
+		SDL_Rect rect;
+		rect.x = x * ww / Video.Width;
+		rect.y = y * wh / Video.Height;
+		rect.w = std::max(1, field->getWidth() * ww / Video.Width);
+		rect.h = std::max(1, field->getHeight() * wh / Video.Height);
+		SDL_SetTextInputRect(&rect);
+	}
+	SDL_StartTextInput(); // shows the keyboard again also when Back had hidden it
+	active = true;
+	shownForTap = TextFieldTapCount();
+}
+#endif
+
 /**
 **  Handle input events
 **
@@ -249,7 +294,19 @@ void handleInput(const SDL_Event *event)
 		if (Gui) {
 			Gui->logic();
 		}
+#ifdef __ANDROID__
+		SyncScreenKeyboard();
+#endif
 	}
+}
+
+bool InGameWindowUp()
+{
+	if (!Gui) {
+		return false;
+	}
+	gcn::Widget *top = Gui->getTop();
+	return GameRunning && top && top->isVisible() && !MenuStack.empty();
 }
 
 void DrawGuichanWidgets()
@@ -267,7 +324,7 @@ void DrawGuichanWidgets()
 		}
 		// Behind an in-game window the game is shown in greys (not behind the briefing or any
 		// screen shown while no game runs).
-		const bool window = GameRunning && top && top->isVisible() && !MenuStack.empty();
+		const bool window = InGameWindowUp();
 		// HUD-PAUSE-GREY: the same greys while the game stands paused with no window up (the
 		// header's Pause button); the frame is then read again every frame, see the function.
 		const bool pausedBare = GameRunning && GamePaused && !window && !Editor.Running;
@@ -413,6 +470,11 @@ CImageButton::CImageButton(const std::string &caption) : Button(caption)
 **
 **  @param graphics  Graphics object to draw with
 */
+gcn::Color ImageButtonDisabledCaption()
+{
+	return gcn::Color(128, 128, 128);
+}
+
 void CImageButton::draw(gcn::Graphics *graphics) /* override */
 {
 	if (!normalImage) {
@@ -439,7 +501,9 @@ void CImageButton::draw(gcn::Graphics *graphics) /* override */
 	graphics->drawImage(img, 0, 0, 0, 0,
 						img->getWidth(), img->getHeight());
 
-	graphics->setColor(getForegroundColor());
+	// A switched-off button greys its caption too, not only its face (E3): mid grey whatever the
+	// foreground, which CFont::drawString applies as a colour modulation of the glyphs.
+	graphics->setColor(isEnabled() ? getForegroundColor() : ImageButtonDisabledCaption());
 
 	int textX;
 	int textY = getHeight() / 2 - getFont()->getHeight() / 2;
@@ -462,7 +526,7 @@ void CImageButton::draw(gcn::Graphics *graphics) /* override */
 
 	graphics->setFont(getFont());
 
-	const bool is_normal = !mHasMouse;
+	const bool is_normal = !mHasMouse || !isEnabled();
 	if (auto* font = dynamic_cast<CFont*>(getFont())) {
 		font->setIsNormal(is_normal);
 	}
@@ -1051,6 +1115,30 @@ void MultiLineLabel::wordWrap()
 
 	this->mTextRows.clear();
 
+	// FONT-CJK: a caption with Japanese / Chinese text has almost no spaces to break at. Such a
+	// caption is broken by the font module's rule (spaces, newlines, between CJK characters);
+	// every other caption keeps the word wrap below unchanged.
+	{
+		bool cjk = false;
+		for (size_t p = 0; p < str.size() && !cjk;) {
+			cjk = FontIsCJKBreakChar(FontDecodeUTF8(str, p));
+		}
+		if (cjk) {
+			std::string_view rest = str;
+			const auto width = [font](std::string_view t) { return font->getWidth(std::string(t)); };
+			while (!rest.empty()) {
+				size_t next = rest.size();
+				const size_t len = FontLineBreak(rest, std::max(1, lineWidth + 1), width, next);
+				this->mTextRows.emplace_back(rest.substr(0, len));
+				if (next == 0) {
+					next = 1;   // never loop on the same text
+				}
+				rest.remove_prefix(std::min(next, rest.size()));
+			}
+			return;
+		}
+	}
+
 	while (!done) {
 		if (str.find('\n') != std::string::npos || font->getWidth(str) > lineWidth) {
 			// string too wide or has a newline, split it up
@@ -1431,8 +1519,8 @@ void CTextBox::keyPressed(gcn::KeyEvent &event) /* override */
 				mText->insert(c);
 			}
 		}
-	} else if (key.isCharacter() && !event.isAltPressed() && !event.isControlPressed()
-	           && mEditable) {
+	} else if (TextFieldTakesCharacter(key.getValue()) && !event.isAltPressed()
+	           && !event.isControlPressed() && mEditable) {
 		for (auto c : to_utf8(key.getValue())) {
 			mText->insert(c);
 		}
@@ -1446,6 +1534,48 @@ void CTextBox::keyPressed(gcn::KeyEvent &event) /* override */
 /*----------------------------------------------------------------------------
 --  CTextField
 ----------------------------------------------------------------------------*/
+
+/// The text field the player last tapped (cleared when it goes away)
+static CTextField *TappedTextField = nullptr;
+static unsigned TappedTextFieldCount = 0;
+
+CTextField::~CTextField()
+{
+	if (TappedTextField == this) {
+		TappedTextField = nullptr;
+	}
+}
+
+bool TextFieldTakesCharacter(int value)
+{
+	if (value >= 32 && value <= 126) {
+		return true;
+	}
+	// past the C1 controls; no lone surrogate halves, nothing beyond Unicode
+	return value >= 160 && !(value >= 0xD800 && value <= 0xDFFF) && value <= 0x10FFFF;
+}
+
+CTextField *TextFieldWantingKeyboard(const gcn::Widget *top)
+{
+	CTextField *field = TappedTextField;
+	if (field == nullptr || top == nullptr || !field->isFocused() || !field->isEditable()) {
+		return nullptr;
+	}
+	for (const gcn::Widget *widget = field; widget != nullptr; widget = widget->getParent()) {
+		if (!widget->isVisible()) {
+			return nullptr;
+		}
+		if (widget == top) {
+			return field;
+		}
+	}
+	return nullptr;
+}
+
+unsigned TextFieldTapCount()
+{
+	return TappedTextFieldCount;
+}
 
 void CTextField::draw(gcn::Graphics *graphics) /* override */
 {
@@ -1486,6 +1616,8 @@ void CTextField::mousePressed(gcn::MouseEvent &event) /* override */
 	TextField::mousePressed(event);
 
 	if (event.getButton() == gcn::MouseInput::Left) {
+		TappedTextField = this;
+		++TappedTextFieldCount;
 		mSelectStart = mText->getCaretPosition();
 		mSelectEndOffset = 0;
 	} else if (event.getButton() == gcn::MouseInput::Middle) {
@@ -1612,8 +1744,8 @@ void CTextField::keyPressed(gcn::KeyEvent &event) /* override */
 		setText("");
 		mSelectStart = mText->getCaretPosition();
 		mSelectEndOffset = 0;
-	} else if (key.isCharacter() && !event.isAltPressed() && !event.isControlPressed()
-	           && mEditable) {
+	} else if (TextFieldTakesCharacter(key.getValue()) && !event.isAltPressed()
+	           && !event.isControlPressed() && mEditable) {
 		if (selLen > 0) {
 			deleteSelection();
 		}
@@ -1641,31 +1773,142 @@ void CTextField::getTextSelectionPositions(unsigned int *first, unsigned int *le
 --  ImageTextField
 ----------------------------------------------------------------------------*/
 
+/**
+**  Top of the text line in an image text field: the line centred in the field's height.
+**  The original (ORIG46, Save name field at 1100 / 1366 / 1800): lower-case text ~2 px below the
+**  field's centre line at a 40 px field; the faces bake a capital centred in the cell, so the
+**  lower-case band of a centred line already sits that much below the centre.
+*/
+int ImageTextFieldTextY(int fieldHeight, int fontHeight)
+{
+	return std::max(0, (fieldHeight - fontHeight) / 2);
+}
+
+/**
+**  Left inset of the text in an image text field: the original's Save name field starts its
+**  text 9 px inside the field's black edge at a 40 px high field (7 at 33, 11 at 46: ORIG46),
+**  the field's frame scaling with the field.
+*/
+int ImageTextFieldTextX(int fieldHeight)
+{
+	return std::max(1, (fieldHeight * 9 + 20) / 40);
+}
+
+/**
+**  The text cursor: a bar about 2/3 of the field's height, centred in it (ORIG46: 25 of 40 px,
+**  21 of 33, 35 of 46), drawn a small gap after the text (3 px after the last glyph at 40 px).
+*/
+ImageTextFieldCaret ImageTextFieldCaretAt(int fieldHeight, int textRight)
+{
+	ImageTextFieldCaret caret;
+	caret.height = std::max(1, (fieldHeight * 2 + 1) / 3);
+	caret.top = (fieldHeight - caret.height) / 2;
+	caret.x = textRight + std::max(1, (fieldHeight + 10) / 20);
+	return caret;
+}
+
+int ImageTextFieldTextOffsetAt(int fieldHeight, int xScroll, int pointerX)
+{
+	return std::max(0, pointerX - ImageTextFieldTextX(fieldHeight) + xScroll);
+}
+
+/**
+**  The art of an image text field: the focused one while the field has keyboard focus.
+**  The original's Save name field (focused when the window opens) shows the skin's
+**  textinput_active sprite (Modern_Widgets_<race>.json; ORIG46 w1366_savename field column profile).
+*/
+bool ImageTextFieldUsesFocusedArt(bool hasFocusedArt, bool focused)
+{
+	return hasFocusedArt && focused;
+}
+
+void ImageTextField::setItemImageSlice(int left, int top, int right, int bottom, double scale)
+{
+	sliced = true;
+	sliceLeft = left;
+	sliceTop = top;
+	sliceRight = right;
+	sliceBottom = bottom;
+	sliceScale = scale;
+}
+
+unsigned ImageTextField::caretIndexAt(int pointerX)
+{
+	// The same string and origin the draw uses, so a tap lands where the glyphs are drawn.
+	const std::string drawText =
+		isPassword ? std::string(mText->getContent().size(), '*') : mText->getContent();
+	return getFont()->getStringIndexAt(drawText,
+	                                   ImageTextFieldTextOffsetAt(getHeight(), mXScroll, pointerX));
+}
+
+void ImageTextField::mousePressed(gcn::MouseEvent &event) /* override */
+{
+	CTextField::mousePressed(event);
+	if (event.getButton() == gcn::MouseInput::Left) {
+		// guisan placed the caret from x 0 of the widget; the text starts at the inset.
+		mText->setCaretPosition(caretIndexAt(event.getX()));
+		fixScroll();
+		mSelectStart = mText->getCaretPosition();
+		mSelectEndOffset = 0;
+	}
+}
+
+void ImageTextField::mouseDragged(gcn::MouseEvent &event) /* override */
+{
+	if (event.getButton() == gcn::MouseInput::Left) {
+		mText->setCaretPosition(caretIndexAt(event.getX()));
+		mSelectEndOffset = static_cast<int>(mText->getCaretPosition()) - mSelectStart;
+	}
+}
+
 void ImageTextField::draw(gcn::Graphics *graphics) /* override */
 {
 	gcn::Font *font;
 	int x, y;
 	std::string drawText =
 		isPassword ? std::string(mText->getContent().size(), '*') : mText->getContent();
-	CGraphic *img = this->itemImage.get();
+	CGraphic *img = ImageTextFieldUsesFocusedArt(itemImageFocused != nullptr, isFocused())
+		? itemImageFocused.get()
+		: itemImage.get();
 	if (!img) {
 		ErrorPrint("Not all graphics for ImageTextField were set\n");
 		ExitFatal(1);
 	}
-	img->Resize(getWidth(), img->getHeight());
-	graphics->drawImage(img, 0, 0, 0, 0, getWidth(), img->getHeight());
-
-	if (isFocused())
-	{
-		drawCaret(graphics, getFont()->getWidth(drawText.substr(0, mText->getCaretPosition())) - mXScroll);
+	// The art fills the field's own size: the Remastered save window's name field is 119 high
+	// (save-menu-3440x1440.png) while the field art is 64.
+	auto *sdlGraphics = dynamic_cast<gcn::SDLGraphics *>(graphics);
+	if (sliced && sdlGraphics && sdlGraphics->getTarget()) {
+		// Nine-sliced as the skin states it (skins.json widget_edit "9slice"): the frame keeps
+		// its size at the drawing's scale and only the inside grows with the field.
+		img->SetOriginalSize();
+		const gcn::ClipRectangle &clip = graphics->getCurrentClipArea();
+		const SDL_Rect dest = {clip.xOffset, clip.yOffset, getWidth(), getHeight()};
+		NineSlicePatch patches[9];
+		ComputeNineSliceScaled(img->GetGraphicWidth(), img->GetGraphicHeight(), sliceLeft, sliceTop, sliceRight,
+		                       sliceBottom, sliceScale, dest, patches);
+		for (NineSlicePatch &p : patches) {
+			if (p.src.w > 0 && p.src.h > 0 && p.dst.w > 0 && p.dst.h > 0) {
+				SDL_BlitScaled(img->getSurface(), &p.src, sdlGraphics->getTarget(), &p.dst);
+			}
+		}
+	} else {
+		img->Resize(getWidth(), getHeight());
+		graphics->drawImage(img, 0, 0, 0, 0, getWidth(), getHeight());
 	}
 
 	graphics->setColor(getForegroundColor());
 	font = getFont();
 	graphics->setFont(font);
 
-	x = 1 - mXScroll;
-	y = 1;
+	x = ImageTextFieldTextX(getHeight()) - mXScroll;
+	y = ImageTextFieldTextY(getHeight(), font->getHeight());
+
+	if (isFocused())
+	{
+		const ImageTextFieldCaret caret = ImageTextFieldCaretAt(
+			getHeight(), x + font->getWidth(drawText.substr(0, mText->getCaretPosition())));
+		graphics->drawLine(caret.x, caret.top + caret.height - 1, caret.x, caret.top);
+	}
 
 	if (mSelectEndOffset != 0)
 	{

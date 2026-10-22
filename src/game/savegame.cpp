@@ -45,6 +45,7 @@
 #include "parameters.h"
 #include "player.h"
 #include "replay.h"
+#include "script.h"
 #include "spells.h"
 #include "trigger.h"
 #include "ui.h"
@@ -55,7 +56,9 @@
 #include "version.h"
 #include "wc2mission.h"
 
+#include <atomic>
 #include <ctime>
+#include <thread>
 
 extern void StartMap(const std::string &filename, bool clean);
 
@@ -127,27 +130,88 @@ bool CommitSaveGame(const fs::path &target, bool complete)
 	return moved;
 }
 
+bool WriteSaveText(const fs::path &target, const std::string &text)
+{
+	// Written beside the target and moved over it when complete: a write that fails or is cut
+	// short leaves the save that was there.
+	CommitSaveGame(target, false); // what an earlier, interrupted save left
+	CFile file;
+	if (file.open(SaveGameTemporary(target).string().c_str(), CL_WRITE_GZ | CL_OPEN_WRITE) == -1) {
+		return false;
+	}
+	file.write(text);
+	const bool written = file.close() == 0;
+	return CommitSaveGame(target, written);
+}
+
+namespace
+{
+/// The save writer thread: one write in flight at a time. Joined before the process ends.
+struct SaveWriterThread {
+	std::thread thread;
+	std::atomic<bool> busy{false};
+	std::atomic<bool> lastOk{true};
+	std::string lastName; // game thread only
+
+	void Join()
+	{
+		if (thread.joinable()) {
+			thread.join();
+		}
+	}
+	~SaveWriterThread() { Join(); }
+};
+
+SaveWriterThread SaveWriter;
+
+/// After a background write has ended: say on the game thread if it failed.
+void ReportBackgroundWrite()
+{
+	if (!SaveWriter.lastOk.exchange(true)) {
+		ErrorPrint("Can't save to '%s'\n", SaveWriter.lastName.c_str());
+	}
+}
+} // namespace
+
+bool SaveGameWriting()
+{
+	return SaveWriter.busy.load();
+}
+
+void WaitForSaveGame()
+{
+	SaveWriter.Join();
+	ReportBackgroundWrite();
+}
+
+bool WriteSaveTextInBackground(const fs::path &target, std::string text)
+{
+	if (SaveWriter.busy.load()) {
+		return false;
+	}
+	WaitForSaveGame(); // the last one has ended; take its thread back
+	SaveWriter.lastName = target.filename().string();
+	SaveWriter.busy = true;
+	SaveWriter.thread = std::thread([target, text = std::move(text)]() {
+		const bool ok = WriteSaveText(target, text);
+		SaveWriter.lastOk = ok;
+		SaveWriter.busy = false;
+	});
+	return true;
+}
+
 /**
-**  Save a game to file.
+**  Build the text of a save game (Lua) in memory, from the game state of now.
 **
-**  @param filename  File name to be stored.
-**  @return  -1 if saving failed, 0 if all OK
+**  @param filename  File name it will be stored under (it is named in the header).
+**  @param text      The text.
 **
 **  @note  Later we want to store in a more compact binary format.
 */
-int SaveGame(const std::string &filename)
+static void BuildSaveText(const std::string &filename, std::string &text)
 {
 	CFile file;
-	fs::path fullpath(GetSaveDir());
-
-	fullpath /= filename;
-	// Written beside the target and moved over it when complete: a write that fails or is cut
-	// short leaves the save that was there.
-	CommitSaveGame(fullpath, false); // what an earlier, interrupted save left
-	if (file.open(SaveGameTemporary(fullpath).string().c_str(), CL_WRITE_GZ | CL_OPEN_WRITE) == -1) {
-		ErrorPrint("Can't save to '%s'\n", filename.c_str());
-		return -1;
-	}
+	file.open("", CL_WRITE_MEMORY | CL_OPEN_WRITE);
 
 	time_t now;
 	char dateStr[64];
@@ -175,7 +239,8 @@ int SaveGame(const std::string &filename)
 	file.printf("---  \"comment\", \"Visit https://github.com/Wargus/stratagus for more information\",\n");
 	file.printf("---  \"type\",    \"%s\",\n", "single-player");
 	file.printf("---  \"date\",    \"%s\",\n", dateStr);
-	file.printf("---  \"map\",     \"%s\",\n", Map.Info.Description.c_str());
+	// Escaped: a line break in the map's description would end this comment line (audit EA-403).
+	file.printf("---  \"map\",     \"%s\",\n", EscapeLuaString(Map.Info.Description).c_str());
 	file.printf("---  \"media-version\", \"%s\"", "Undefined");
 	file.printf("---  \"engine\",  {%d, %d, %d},\n",
 				StratagusMajorVersion, StratagusMinorVersion, StratagusPatchLevel);
@@ -210,10 +275,39 @@ int SaveGame(const std::string &filename)
 		file.printf("-- Lua state\n\n%s\n", s.c_str());
 	}
 	SaveTriggers(file); //Triggers are saved in SaveGlobal, so load it after Global
-	const bool written = file.close() == 0;
-	if (!CommitSaveGame(fullpath, written)) {
+	text = file.TakeText();
+	file.close();
+}
+
+/**
+**  Save a game to file, complete when this returns (a manual save).
+**
+**  @param filename  File name to be stored.
+**  @return  -1 if saving failed, 0 if all OK
+*/
+int SaveGame(const std::string &filename)
+{
+	WaitForSaveGame(); // a background write of the same name must not end after this one
+	const fs::path fullpath = GetSaveDir() / filename;
+	std::string text;
+	BuildSaveText(filename, text);
+	if (!WriteSaveText(fullpath, text)) {
 		ErrorPrint("Can't save to '%s'\n", filename.c_str());
 		return -1;
+	}
+	return 0;
+}
+
+int SaveGameInBackground(const std::string &filename)
+{
+	if (SaveGameWriting()) {
+		return 1;
+	}
+	const fs::path fullpath = GetSaveDir() / filename;
+	std::string text;
+	BuildSaveText(filename, text);
+	if (!WriteSaveTextInBackground(fullpath, std::move(text))) {
+		return 1;
 	}
 	return 0;
 }
@@ -276,6 +370,7 @@ bool DeleteSaveGame(const std::string &filename)
 		return false; // not a plain file (missing / dir / symlink target etc.)
 	}
 
+	WaitForSaveGame(); // never under a write that is still running
 	// Guard 3: only now delete, and only the verified file.
 	if (!fs::remove(canonTarget, ec) || ec) {
 		ErrorPrint("delete failed for '%s'", canonTarget.u8string().c_str());

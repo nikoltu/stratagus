@@ -92,6 +92,13 @@ static int TransformUnitIntoType(CUnit &unit, const CUnitType &newtype)
 	}
 	const Vec2i pos = unit.tilePos + oldtype.GetHalfTileSize() - newtype.GetHalfTileSize();
 	CUnit *container = unit.Container;
+	// FOW-BUG2 (work/FOW_BUG2.md): a unit that stays on the map through the transform (same size
+	// and flags: Town Hall -> Keep -> Castle, Great Hall -> Stronghold -> Fortress) must give back
+	// the sight of the old type and take that of the new one. Without it the Keep kept the Hall's
+	// lit tiles while CurrentSightRange said the Keep's range: every later unmark (a Peasant that
+	// was inside at the moment of the upgrade coming out, the Keep's own death or next upgrade)
+	// took away a ring it never gave - own units and buildings in that ring fell under fog.
+	bool inPlace = false;
 
 	if (container) {
 		MapUnmarkUnitSight(unit);
@@ -103,6 +110,10 @@ static int TransformUnitIntoType(CUnit &unit, const CUnitType &newtype)
 			unit.Type->TileWidth == newtype.TileWidth) {
 			// the unit is the same size and has the same flags,
 			// it can be here
+			inPlace = !unit.Removed;
+			if (inPlace) {
+				MapUnmarkUnitSight(unit);
+			}
 		} else {
 			// the new type is sufficiently different, we check
 			// by removing the unit and looking at the map fields
@@ -170,6 +181,8 @@ static int TransformUnitIntoType(CUnit &unit, const CUnitType &newtype)
 		if (removed) {
 			unit.Place(pos);
 			RestoreSelection();
+		} else if (inPlace) {
+			MapMarkUnitSight(unit);
 		}
 	} else {
 		MapMarkUnitSight(unit);
@@ -281,6 +294,19 @@ static void AnimateActionUpgradeTo(CUnit &unit)
 	UnitShowAnimation(unit, !animations.Upgrade.empty() ? &animations.Upgrade : &animations.Still);
 }
 
+/**
+**  Does a finished upgrade to this type print a message line?
+**
+**  Not for a hall (a type that stores gold: Keep, Castle, Stronghold, Fortress): the original
+**  prints no line when a hall upgrade completes (live run 53, message area grabbed every 250 ms:
+**  Town Hall -> Keep 0 lines in 39 grabs, Great Hall -> Stronghold 0 lines in 38 grabs; 2 of 2).
+**  Other upgrades (towers) are not measured and keep the line.
+*/
+bool UpgradeToCompletePrintsLine(const CUnitType &newtype)
+{
+	return !newtype.CanStore[GoldCost];
+}
+
 void COrder_UpgradeTo::Execute(CUnit &unit) /* override */
 {
 	AnimateActionUpgradeTo(unit);
@@ -308,13 +334,20 @@ void COrder_UpgradeTo::Execute(CUnit &unit) /* override */
 	}
 
 	if (TransformUnitIntoType(unit, newtype) == 0) {
-		player.Notify(ColorYellow, unit.tilePos, _("Upgrade to %s canceled"), newtype.Name.c_str());
+		// U-16: no line. The game's string table has no text for a failed transform.
 		// give resources back
 		player.AddCosts(newstats.Costs);
 		this->Finished = true;
 		return ;
 	}
-	player.Notify(ColorGreen, unit.tilePos, _("Upgrade to %s complete"), unit.Type->Name.c_str());
+	if (UpgradeToCompletePrintsLine(newtype)) {
+		// U-16 UNKNOWN: the game's string table has no "Upgrade to %s complete"; whether the original
+		// prints a line for a finished tower upgrade is not measured, so the line stays for it.
+		player.Notify(ColorGreen, unit.tilePos, _("Upgrade to %s complete"), unit.Type->Name.c_str());
+	} else {
+		// No text, the minimap mark stays (as for a research).
+		player.Notify(ColorGreen, unit.tilePos, "%s", "");
+	}
 
 	//  Warn AI.
 	if (player.AiEnabled) {

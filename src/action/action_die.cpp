@@ -39,8 +39,11 @@
 
 #include "animation.h"
 #include "iolib.h"
+#include "script.h"
 #include "unit.h"
 #include "unittype.h"
+
+#include <climits>
 
 /*----------------------------------------------------------------------------
 --  Functions
@@ -57,6 +60,7 @@ void COrder_Die::Save(CFile &file, const CUnit &unit) const /* override */
 	if (this->Finished) {
 		file.printf(", \"finished\"");
 	}
+	file.printf(", \"death-frame\", %d", this->DeathFrame);
 	file.printf("}");
 }
 
@@ -65,7 +69,13 @@ bool COrder_Die::ParseSpecificData(lua_State *l,
                                    std::string_view value,
                                    const CUnit &unit) /* override */
 {
-	return false;
+	if (value == "death-frame") {
+		++j;
+		this->DeathFrame = LuaToNumber(l, -1, j + 1);
+	} else {
+		return false;
+	}
+	return true;
 }
 
 bool COrder_Die::IsValid() const /* override */
@@ -99,6 +109,9 @@ static bool AnimateActionDie(CUnit &unit)
 
 void COrder_Die::Execute(CUnit &unit) /* override */
 {
+	if (this->DeathFrame < INT_MAX) {
+		++this->DeathFrame;
+	}
 	// Show death animation
 	if (AnimateActionDie(unit) == false) {
 		// some units has no death animation

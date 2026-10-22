@@ -89,8 +89,9 @@ constexpr int WC2_MISSIONS = 52;
 constexpr int WC2_UNIT_ALLOW_MAX = 65536;
 
 // ---- unit/building allow bits -------------------------------------------------------------------
-// Index = bit number. A null pair means the bit is not mapped to any ident; bit 13 is set in no
-// campaign mask and tested by no button, so it stays UNKNOWN and is deliberately ignored.
+// Index = bit number. A null pair means the bit is not mapped to any ident; bit 13 is tested by no
+// button, so it stays UNKNOWN and is deliberately ignored (the audit counts it set in 34 of the 52
+// campaign masks, EA-225 - what it gates in the original, if anything, is not established).
 struct RacePair {
 	const char *human;
 	const char *orc;
@@ -107,8 +108,12 @@ const RacePair UnitAllowBits[32] = {
 	/*  7 */ {"unit-human-destroyer", "unit-orc-destroyer"},
 	/*  8 */ {"unit-human-transport", "unit-orc-transport"},
 	/*  9 */ {"unit-battleship", "unit-ogre-juggernaught"},
-	/* 10 */ {"unit-gnomish-submarine", "unit-giant-turtle"},
-	/* 11 */ {"unit-gnomish-flying-machine", "unit-zeppelin"},
+	// The idents are the ones the unit scripts define (the PUD converter's names): the Gnomish
+	// Submarine / Giant Turtle are "unit-human-submarine" / "unit-orc-submarine", the Gnomish Flying
+	// Machine is "unit-balloon", the Gnomish Inventor "unit-inventor". An ident the scripts do not
+	// define is skipped silently by ApplyUnitBit, which left these units ungated (audit EA-205).
+	/* 10 */ {"unit-human-submarine", "unit-orc-submarine"},
+	/* 11 */ {"unit-balloon", "unit-zeppelin"},
 	/* 12 */ {"unit-gryphon-rider", "unit-dragon"},
 	/* 13 */ {nullptr, nullptr}, // UNKNOWN: no button predicate tests this bit
 	/* 14 */ {"unit-dwarves", "unit-goblin-sappers"},
@@ -120,7 +125,7 @@ const RacePair UnitAllowBits[32] = {
 	/* 20 */ {"unit-mage-tower", "unit-temple-of-the-damned"},
 	/* 21 */ {"unit-human-foundry", "unit-orc-foundry"},
 	/* 22 */ {"unit-human-refinery", "unit-orc-refinery"},
-	/* 23 */ {"unit-gnomish-inventor", "unit-alchemist"},
+	/* 23 */ {"unit-inventor", "unit-alchemist"},
 	/* 24 */ {"unit-church", "unit-altar-of-storms"},
 	/* 25 */ {"unit-human-watch-tower", "unit-orc-watch-tower"},
 	/* 26 */ {"unit-town-hall", "unit-great-hall"},
@@ -1631,8 +1636,23 @@ void ReadRuleCode(const std::string &d, const PeImage &pe, size_t vicHit, size_t
 	           dispVa, c.generic, shaped);
 }
 
-/// Read the five tables out of the Remastered executable. Runs at most once per process.
+static bool ReadRuleTablesOnce();
+
+/// Read the five tables out of the Remastered executable. Runs at most once per process. The
+/// outcome is logged once: without the tables every campaign mission keeps the generic rule of
+/// stratagus.lua, which also counts flying machines, zeppelins, transports and tankers.
 bool EnsureRuleTables()
+{
+	const bool first = !g_tablesLoaded;
+	const bool ok = ReadRuleTablesOnce();
+	if (first) {
+		LogPrint("MissionRules: tables %s (%s)\n", ok ? "read" : "NOT read",
+		         WC2SourcePath.empty() ? "no game folder" : (fs::path(WC2SourcePath) / "Warcraft II.exe").string().c_str());
+	}
+	return ok;
+}
+
+static bool ReadRuleTablesOnce()
 {
 	if (g_tablesLoaded) {
 		return g_tablesValid;
@@ -2102,37 +2122,11 @@ void LoadRegionMap(const fs::path &mapPath)
 {
 	g_live.region.clear();
 	g_live.regionW = g_live.regionH = 0;
-	const fs::path pud = ResolveMapPud(mapPath.string());
-	if (pud.empty()) {
-		return;
-	}
-	std::ifstream in(pud, std::ios::binary);
-	std::string d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 	int w = 0, h = 0;
-	size_t regm = 0, regmLen = 0;
-	for (size_t o = 0; o + 8 <= d.size();) {
-		const uint32_t len = rdU32(d, o + 4);
-		if (o + 8 + (size_t) len > d.size()) {
-			break;
-		}
-		if (memcmp(d.data() + o, "DIM ", 4) == 0 && len >= 4) {
-			w = rdU16(d, o + 8);
-			h = rdU16(d, o + 10);
-		} else if (memcmp(d.data() + o, "REGM", 4) == 0) {
-			regm = o + 8;
-			regmLen = len;
-		}
-		o += 8 + (size_t) len;
+	if (ReadPudRegionMap(mapPath, w, h, g_live.region)) {
+		g_live.regionW = w;
+		g_live.regionH = h;
 	}
-	if (w <= 0 || h <= 0 || regmLen != (size_t) w * h * 2) {
-		return;
-	}
-	g_live.region.resize((size_t) w * h);
-	for (size_t k = 0; k < g_live.region.size(); ++k) {
-		g_live.region[k] = rdU16(d, regm + k * 2);
-	}
-	g_live.regionW = w;
-	g_live.regionH = h;
 }
 
 /// Install the decoded rule of the mission's rule id, if there is one.
@@ -2411,6 +2405,52 @@ int CclGetMissionRules(lua_State *l)
 }
 
 } // namespace
+
+const char *MissionUnitAllowIdent(int bit, bool orc)
+{
+	if (bit < 0 || bit >= 32) {
+		return nullptr;
+	}
+	return orc ? UnitAllowBits[bit].orc : UnitAllowBits[bit].human;
+}
+
+bool ReadPudRegionMap(const fs::path &mapPath, int &width, int &height, std::vector<uint16_t> &words)
+{
+	words.clear();
+	width = height = 0;
+	const fs::path pud = ResolveMapPud(mapPath.string());
+	if (pud.empty()) {
+		return false;
+	}
+	std::ifstream in(pud, std::ios::binary);
+	std::string d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	int w = 0, h = 0;
+	size_t regm = 0, regmLen = 0;
+	for (size_t o = 0; o + 8 <= d.size();) {
+		const uint32_t len = rdU32(d, o + 4);
+		if (o + 8 + (size_t) len > d.size()) {
+			break;
+		}
+		if (memcmp(d.data() + o, "DIM ", 4) == 0 && len >= 4) {
+			w = rdU16(d, o + 8);
+			h = rdU16(d, o + 10);
+		} else if (memcmp(d.data() + o, "REGM", 4) == 0) {
+			regm = o + 8;
+			regmLen = len;
+		}
+		o += 8 + (size_t) len;
+	}
+	if (w <= 0 || h <= 0 || regmLen != (size_t) w * h * 2) {
+		return false;
+	}
+	words.resize((size_t) w * h);
+	for (size_t k = 0; k < words.size(); ++k) {
+		words[k] = rdU16(d, regm + k * 2);
+	}
+	width = w;
+	height = h;
+	return true;
+}
 
 bool LoadWC2MissionRules(const fs::path &mapPath)
 {

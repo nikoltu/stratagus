@@ -2138,3 +2138,379 @@ TEST_CASE("Minimal impact distance: the unit stands when ordered onto a target b
 		CHECK(f.unit.tilePos == Vec2i(30, 30));
 	}
 }
+
+TEST_CASE("Grid step 2: the Eye of Kilrogg's measured orders (live run 36)")
+{
+	GridFixture f;
+	f.unit.Type = &f.flyer;
+
+	struct Row
+	{
+		Vec2i start;
+		Vec2i click;
+		Vec2i rest;
+	};
+	// An odd coordinate ends one tile short, on the even tile on the side the Eye comes from.
+	const Row rows[] = {
+		{{14, 10}, {17, 10}, {16, 10}}, // 3 east
+		{{14, 10}, {19, 10}, {18, 10}}, // 5 east
+		{{18, 10}, {15, 10}, {16, 10}}, // 3 west
+		{{14, 12}, {14, 7}, {14, 8}},   // 5 north
+		{{4, 2}, {13, 9}, {12, 8}},
+		{{12, 8}, {16, 9}, {16, 8}},
+		{{16, 10}, {15, 13}, {14, 12}},
+		{{4, 2}, {14, 10}, {14, 10}},   // even tiles are reached exactly
+		{{16, 10}, {22, 10}, {22, 10}},
+		{{22, 10}, {22, 14}, {22, 14}},
+		{{22, 14}, {18, 14}, {18, 14}},
+	};
+	for (const Row &row : rows) {
+		CAPTURE(row.start);
+		CAPTURE(row.click);
+		f.unit.tilePos = row.start;
+		const WalkResult walk = Walk(f.unit, row.click);
+		CHECK(walk.end == PF_REACHED);
+		CHECK(f.unit.tilePos == row.rest);
+		CHECK(walk.onGrid);
+	}
+}
+
+namespace
+{
+/// The original's oil margin test (0x4A1020): blocked when, on both axes, the gap between the two
+/// boxes is less than the margin (an overlap is a negative gap).
+bool OriginalMarginBlocks(const Vec2i &pos, int size, const Vec2i &other, int otherSize, int margin)
+{
+	const int gapX = std::max(other.x - (pos.x + size), pos.x - (other.x + otherSize));
+	const int gapY = std::max(other.y - (pos.y + size), pos.y - (other.y + otherSize));
+	return gapX < margin && gapY < margin;
+}
+
+struct OilRuleFixture
+{
+	OilRuleFixture() : map(64, 64)
+	{
+		for (CUnitType *type : {&building, &patch}) {
+			type->TileWidth = 3;
+			type->TileHeight = 3;
+			type->BoolFlag.resize(UnitTypeVar.GetNumberBoolFlag());
+		}
+		patchUnit.Type = &patch;
+		patchUnit.tilePos = patchPos;
+		// every tile of the patch, as CMap::Insert leaves a building
+		for (int y = 0; y < 3; ++y) {
+			for (int x = 0; x < 3; ++x) {
+				Map.Field(patchPos + Vec2i(x, y))->UnitCache.push_back(&patchUnit);
+			}
+		}
+	}
+	bool Allowed(int distance, const Vec2i &pos) const
+	{
+		CBuildRestrictionDistance rule;
+		rule.Distance = distance;
+		rule.DistanceType = EComparison::GreaterThan;
+		rule.RestrictType = const_cast<CUnitType *>(&patch);
+		CUnit *ontop = nullptr;
+		return rule.Check(&builder, building, pos, ontop);
+	}
+	const Vec2i patchPos{30, 30};
+	SyntheticMap map;
+	CUnitType building;
+	CUnitType patch;
+	CUnit patchUnit;
+	CUnit builder;
+};
+} // namespace
+
+TEST_CASE("Oil rule: the distance rule against the original's margin (DECODE_B8 item 3)")
+{
+	OilRuleFixture f;
+
+	SUBCASE("own-race Foundry: Distance 1 with '>' is the original's margin 1 on every tile")
+	{
+		int differs = 0;
+		for (int y = 22; y <= 38; ++y) {
+			for (int x = 22; x <= 38; ++x) {
+				const Vec2i pos(x, y);
+				const bool blocked = OriginalMarginBlocks(pos, 3, f.patchPos, 3, 1);
+				differs += f.Allowed(1, pos) == blocked;
+			}
+		}
+		CHECK(differs == 0);
+		// touching on a side or a corner is refused, one free tile between is allowed
+		CHECK_FALSE(f.Allowed(1, {33, 30}));
+		CHECK_FALSE(f.Allowed(1, {33, 33}));
+		CHECK_FALSE(f.Allowed(1, {27, 27}));
+		CHECK(f.Allowed(1, {34, 30}));
+		CHECK(f.Allowed(1, {34, 33}));
+		CHECK(f.Allowed(1, {26, 26}));
+	}
+	SUBCASE("Shipyard / Refinery: Distance 3 is one tile short of the original's margin 4")
+	{
+		// straight beside the patch, gap 3: the original refuses it, Distance 3 allows it
+		CHECK(OriginalMarginBlocks({36, 30}, 3, f.patchPos, 3, 4));
+		CHECK(f.Allowed(3, {36, 30}));
+		CHECK_FALSE(f.Allowed(3, {35, 30}));
+		// Distance 4 refuses gap 3 and allows gap 4 on a side, as the original
+		CHECK_FALSE(f.Allowed(4, {36, 30}));
+		CHECK_FALSE(f.Allowed(4, {30, 24}));
+		CHECK(f.Allowed(4, {37, 30}));
+		CHECK(f.Allowed(4, {30, 23}));
+	}
+	SUBCASE("Distance 4: the only differences from margin 4 are the three corner cells per corner")
+	{
+		std::vector<Vec2i> differs;
+		for (int y = 18; y <= 42; ++y) {
+			for (int x = 18; x <= 42; ++x) {
+				const Vec2i pos(x, y);
+				const bool blocked = OriginalMarginBlocks(pos, 3, f.patchPos, 3, 4);
+				if (f.Allowed(4, pos) == blocked) {
+					differs.push_back(pos);
+					// each one the original refuses and the port allows: gaps (3, 3), (3, 2), (2, 3)
+					CHECK(blocked);
+				}
+			}
+		}
+		CHECK(differs.size() == 12);
+		// Distance 3 differs on many more tiles (every side cell at gap 3 too)
+		int differs3 = 0;
+		for (int y = 18; y <= 42; ++y) {
+			for (int x = 18; x <= 42; ++x) {
+				const Vec2i pos(x, y);
+				differs3 += f.Allowed(3, pos) == OriginalMarginBlocks(pos, 3, f.patchPos, 3, 4);
+			}
+		}
+		CHECK(differs3 > 12);
+	}
+}
+
+#include "group_move.h"
+
+#include <algorithm>
+#include <random>
+
+namespace
+{
+/// A plain move to a tile whose range the test widens itself, as COrder_Move does on PF_UNREACHABLE.
+class TestTileMove : public COrder
+{
+public:
+	explicit TestTileMove(const Vec2i &goal) : COrder(UnitAction::Move), goal(goal) {}
+	std::unique_ptr<COrder> Clone() const override { return std::make_unique<TestTileMove>(*this); }
+	void Execute(CUnit &) override {}
+	bool IsValid() const override { return true; }
+	PixelPos Show(const CViewport &, const PixelPos &lastScreenPos) const override { return lastScreenPos; }
+	void Save(CFile &, const CUnit &) const override {}
+	bool ParseSpecificData(lua_State *, int &, std::string_view, const CUnit &) override { return false; }
+	void UpdatePathFinderData(PathFinderInput &input) override
+	{
+		input.SetGoal(goal, Vec2i(0, 0));
+		input.SetMaxRange(Range);
+		input.SetMinRange(0);
+	}
+	Vec2i goal;
+	int Range = 0;
+};
+
+/// A unit's tile changes as CUnit::MoveToXY changes it: the flag and the cache follow the unit.
+void ShiftOnMap(CUnit &unit, const Vec2i &to, tile_flags flag)
+{
+	CMapField &from = *Map.Field(unit.tilePos);
+	from.UnitCache.erase(std::find(from.UnitCache.begin(), from.UnitCache.end(), &unit));
+	if (from.UnitCache.empty()) {
+		from.Flags &= ~flag;
+	}
+	unit.tilePos = to;
+	Map.Field(to)->Flags |= flag;
+	Map.Field(to)->UnitCache.push_back(&unit);
+}
+
+struct SimShip
+{
+	CUnit unit;
+	int speed = 4;  /// cycles per 2-tile step
+	int timer = 0;  /// cycles left in the current step or wait
+	Vec2i from;     /// tile the picture leaves in the current step
+};
+} // namespace
+
+// Owner report B12 (3.4.61): ships can stack on one tile. Many group orders of warships, steps taking
+// time (the tile is taken at the step's start, CUnit::MoveToXY; the picture travels the whole step).
+TEST_CASE("Ship stacking: warships under group orders never share a tile nor rest closer than 2")
+{
+	GridFixture f;
+	// a few islands to go round (land for a warship: LandAllowed)
+	f.map.Fill({40, 40}, {47, 47}, MapFieldLandAllowed);
+	f.map.Fill({60, 30}, {61, 60}, MapFieldLandAllowed);
+	f.map.Fill({20, 60}, {35, 63}, MapFieldLandAllowed);
+
+	constexpr int count = 9;
+	std::vector<std::unique_ptr<SimShip>> ships;
+	for (int i = 0; i != count; ++i) {
+		auto s = std::make_unique<SimShip>();
+		s->unit.Player = &f.player;
+		s->unit.Type = &f.ship;
+		s->speed = 3 + i % 3;
+		f.map.Rest(s->unit, Vec2i(50 + 2 * (i % 3), 70 + 2 * (i / 3)), MapFieldSeaUnit);
+		s->from = s->unit.tilePos;
+		ships.push_back(std::move(s));
+	}
+	{
+		// Open gap NAVAL-MIDDLE-TILE, pinned on its own: the tile crossed in the middle of a step is
+		// not tested, so a ship may start a diagonal step whose middle tile (51,51) another ship is
+		// passing over in its own step. (The random sim below showed it only while a wait dropped the
+		// blocked step and ships walked their ways shifted - C5, work/PATHFINDING_2026-10-21.md.)
+		SimShip a;
+		SimShip b;
+		for (SimShip *s : {&a, &b}) {
+			s->unit.Player = &f.player;
+			s->unit.Type = &f.ship;
+		}
+		f.map.Rest(a.unit, {50, 50}, MapFieldSeaUnit);
+		f.map.Rest(b.unit, {52, 50}, MapFieldSeaUnit);
+		a.unit.Orders.push_back(std::make_unique<TestTileMove>(Vec2i(54, 54)));
+		b.unit.Orders.push_back(std::make_unique<TestTileMove>(Vec2i(48, 54)));
+		const auto [da, dirA] = NextPathElement(a.unit);
+		REQUIRE(da > 0);
+		REQUIRE(dirA == Vec2i(2, 2));
+		ShiftOnMap(a.unit, a.unit.tilePos + dirA, MapFieldSeaUnit);
+		a.unit.Moving = 1;
+		const auto [db, dirB] = NextPathElement(b.unit);
+		CHECK(db > 0);
+		CHECK(dirB == Vec2i(-2, 2));
+		CHECK((a.unit.tilePos + Vec2i(50, 50)) == (b.unit.tilePos + b.unit.tilePos + dirB)); // same middle tile
+		for (SimShip *s : {&a, &b}) {
+			s->unit.Orders.clear();
+			CMapField &field = *Map.Field(s->unit.tilePos);
+			field.UnitCache.erase(std::find(field.UnitCache.begin(), field.UnitCache.end(), &s->unit));
+			if (field.UnitCache.empty()) {
+				field.Flags &= ~MapFieldSeaUnit;
+			}
+		}
+	}
+	std::mt19937 rnd(12345);
+	int sameTile = 0;
+	int restNearer = 0;
+	double minPicture = 99.0;
+	int pictureUnderOne = 0;
+	int crossing = 0;
+
+	for (int round = 0; round != 60; ++round) {
+		const Vec2i target(10 + rnd() % 100, 10 + rnd() % 100);
+		std::vector<Vec2i> starts;
+		for (auto &s : ships) {
+			starts.push_back(s->unit.tilePos);
+		}
+		const std::vector<Vec2i> goals = GroupMoveGridGoals(starts, target, 128, 128, 2);
+		for (int i = 0; i != count; ++i) {
+			ships[i]->unit.Orders.clear();
+			ships[i]->unit.Orders.push_back(std::make_unique<TestTileMove>(goals[i]));
+			ships[i]->unit.pathFinderData->output.Length = 0;
+		}
+		for (int cycle = 0; cycle != 1500; ++cycle) {
+			bool busy = false;
+			for (auto &s : ships) {
+				CUnit &u = s->unit;
+				if (s->timer > 0) {
+					busy = true;
+					if (--s->timer == 0) {
+						u.Moving = 0;
+						s->from = u.tilePos;
+					}
+					continue;
+				}
+				if (u.Orders.empty()) {
+					continue;
+				}
+				busy = true;
+				auto &order = static_cast<TestTileMove &>(*u.Orders.front());
+				const auto [d, dir] = NextPathElement(u);
+				if (d == PF_REACHED) {
+					u.Orders.clear();
+				} else if (d == PF_UNREACHABLE) {
+					if (++order.Range > 128) {
+						u.Orders.clear();
+					}
+				} else if (d == PF_WAIT) {
+					s->timer = 1;
+				} else {
+					REQUIRE(UnitCanBeAt(u, u.tilePos + dir));
+					s->from = u.tilePos;
+					ShiftOnMap(u, u.tilePos + dir, MapFieldSeaUnit);
+					u.Moving = 1;
+					s->timer = s->speed;
+				}
+			}
+			// checks after the cycle
+			for (int a = 0; a != count; ++a) {
+				for (int b = a + 1; b != count; ++b) {
+					const SimShip &sa = *ships[a];
+					const SimShip &sb = *ships[b];
+					const Vec2i da = sa.unit.tilePos - sb.unit.tilePos;
+					if (da.x == 0 && da.y == 0) {
+						++sameTile;
+					}
+					if (sa.timer == 0 && sb.timer == 0 && std::max(std::abs(da.x), std::abs(da.y)) < 2) {
+						++restNearer;
+					}
+					// the picture: from 'from' to the tile over the step
+					const auto picture = [](const SimShip &s) {
+						const double t = s.timer == 0 ? 1.0 : 1.0 - double(s.timer) / s.speed;
+						return std::pair<double, double>(s.from.x + (s.unit.tilePos.x - s.from.x) * t,
+						                                 s.from.y + (s.unit.tilePos.y - s.from.y) * t);
+					};
+					const auto pa = picture(sa);
+					const auto pb = picture(sb);
+					const double dist = std::max(std::abs(pa.first - pb.first), std::abs(pa.second - pb.second));
+					minPicture = std::min(minPicture, dist);
+					if (dist < 1.0) {
+						++pictureUnderOne;
+						if (dist < 0.5) {
+							// two diagonal steps that cross: both pass the same middle tile
+							const Vec2i ma = sa.from + sa.unit.tilePos;
+							const Vec2i mb = sb.from + sb.unit.tilePos;
+							crossing += ma == mb;
+						}
+					}
+				}
+			}
+			if (!busy) {
+				break;
+			}
+		}
+	}
+	MESSAGE("ship sim: same tile ", sameTile, ", resting nearer than 2: ", restNearer,
+	        ", closest pictures (tiles): ", minPicture, ", cycle-pairs with pictures under 1 tile: ", pictureUnderOne);
+	CHECK(sameTile == 0);
+	CHECK(restNearer == 0);
+	// Open gap NAVAL-MIDDLE-TILE: the tile crossed in the middle of a step is not tested, so two ships
+	// whose diagonal steps cross pass over each other there. Whether the original lets them is not
+	// measured; the port's present behaviour is pinned by the direct case above (this sim no longer
+	// shows a crossing since a wait keeps the blocked step, C5), the count is only reported.
+	MESSAGE("ship sim: crossing diagonal steps ", crossing);
+	for (auto &s : ships) {
+		s->unit.Orders.clear();
+	}
+}
+
+// Owner report B12: what the port lets stand closer than two tiles. A transport docks on a coast tile off the
+// grid (S2, ORIG14 / ORIG15 U3); the port tests only the unit's own tile, so a warship may rest on the grid
+// tile beside it and a second transport on the next coast tile. Present behaviour, NOT measured on the
+// original (the live run must check it).
+TEST_CASE("Ship stacking: a docked transport has neighbours one tile away")
+{
+	ShoreFixture f;
+	f.Paint({0, 21}, {"cccccccccccccccccccc", "####################"});
+
+	const Vec2i docked(11, 21);
+	REQUIRE(UnitTypeCanBeAt(f.transport, docked));
+	f.map.Rest(f.unit, docked, MapFieldSeaUnit);
+	CHECK_FALSE(UnitTypeCanBeAt(f.transport, docked));
+	CHECK_FALSE(UnitTypeCanBeAt(f.ship, docked));
+	// a warship on the grid tile diagonally next to it
+	CHECK(UnitTypeCanBeAt(f.ship, {10, 20}));
+	CHECK(UnitTypeCanBeAt(f.ship, {12, 20}));
+	// a second transport on the coast tile beside it
+	CHECK(UnitTypeCanBeAt(f.transport, {12, 21}));
+	CHECK(UnitTypeCanBeAt(f.transport, {10, 21}));
+}

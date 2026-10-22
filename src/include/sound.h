@@ -197,6 +197,9 @@ extern void SetAudioFocus(AudioFocus f);
 /// Bring the mixer to the asked audio-focus state (engine thread, once a frame)
 extern void ApplyAudioFocus();
 
+/// Whether the Options -> Sound switches let a unit voice play (pure rule; OPTIONS-SOUND-SWITCHES-INERT)
+extern bool UnitVoiceEnabled(EUnitVoice voice, bool isBuilding, bool unitSpeech, bool unitAck,
+                             bool buildingSound);
 /// Play a unit sound
 extern void PlayUnitSound(const CUnit &, EUnitVoice, bool sampleUnique = false);
 /// Play a unit sound

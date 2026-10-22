@@ -23,9 +23,11 @@
 #include "stratagus.h"
 
 #include "wc2ai.h"
+#include "wc2ai_ferry.h"
 
 #include "../ai/ai_local.h"
 #include "action/action_resource.h"
+#include "actions.h"
 #include "commands.h"
 #include "depend.h"
 #include "home_leash.h"
@@ -152,14 +154,46 @@ static std::vector<uint8_t> Wc2AiCellKinds;
 static wc2ai::CellMap Wc2AiCellMap;
 static long Wc2AiCellTick = -1;
 
+/// The reserved tiles of the scripted slots (tile flag 0x400 of the original, DECODE_B8 item 2), one
+/// byte per map tile, kept for one map; and whether the map's own buildings have been marked (at
+/// the first cycle of a new game, or read back from a saved game).
+static std::vector<uint8_t> Wc2AiReserved;
+static bool Wc2AiReservedReady = false;
+
+/// The land units of each scripted slot that wait for a transport, and the islands of the map in
+/// use (wc2ai::LandRegions, kept for one map). See FerryPass.
+struct FerryWait {
+	int unit = -1;      ///< unit number of the waiting land unit
+	int transport = -1; ///< unit number of the transport that has it, -1 none
+	int region = 0;     ///< island of its wave place
+	int x = -1, y = -1; ///< its wave place (its home tile); another home = it waits no more
+};
+static std::array<std::vector<FerryWait>, PlayerMax> Wc2AiFerry;
+static std::vector<int> Wc2AiRegions;
+
 void Wc2AiClearIds()
 {
+	for (auto &waits : Wc2AiFerry) {
+		waits.clear();
+	}
+	Wc2AiRegions.clear();
+	Wc2AiReserved.clear();
+	Wc2AiReservedReady = false;
 	Wc2AiIds.fill(-1);
 	Wc2AiStates.fill(wc2ai::State());
 	Wc2AiTypeNumbers.clear();
 	Wc2AiCellKinds.clear();
 	Wc2AiCellMap = wc2ai::CellMap();
 	Wc2AiCellTick = -1;
+}
+
+void Wc2AiDropId(int player)
+{
+	if (player >= 0 && player < PlayerMax) {
+		Wc2AiIds[player] = -1;
+		Wc2AiStates[player] = wc2ai::State();
+		Wc2AiFerry[player].clear();
+	}
 }
 
 /// The original's number of an engine unit type, by its ident in the map converter's table;
@@ -190,8 +224,10 @@ static int WeightOf(const CUnitType &type)
 }
 
 /// The player's fighters of one kind (land, sea, air) that the map did not fix: alive, on the
-/// map, able to attack, not buildings and not workers. All of them are what conditions 4 / 5 / 6
-/// count (wc2ai::Counted); with `pickable` only the ones a wave may take (wc2ai::Pickable).
+/// map or aboard a transport (live run 57: boarding does not lower free_land, only deaths do),
+/// able to attack, not buildings and not workers. All of them are what conditions 4 / 5 / 6
+/// count (wc2ai::Counted); with `pickable` only the ones on the map a wave may take
+/// (wc2ai::Pickable).
 static std::vector<CUnit *> Fighters(int index, EMovement kind, bool pickable)
 {
 	const CPlayer &player = Players[index];
@@ -199,7 +235,12 @@ static std::vector<CUnit *> Fighters(int index, EMovement kind, bool pickable)
 	const CUnitType *peon = UnitTypeByIdentOrNull("unit-peon");
 	std::vector<CUnit *> free;
 	for (CUnit *unit : player.GetUnits()) {
-		if (!unit || !unit->IsAliveOnMap() || !unit->Type) {
+		if (!unit || !unit->Type) {
+			continue;
+		}
+		const bool aboard = unit->Removed && unit->Container && unit->Container->Type
+		                    && unit->Container->Type->CanTransport();
+		if (pickable ? !unit->IsAliveOnMap() : !wc2ai::FerryCountsFighter(unit->IsAlive(), unit->Removed, aboard)) {
 			continue;
 		}
 		const CUnitType &type = *unit->Type;
@@ -397,6 +438,343 @@ static bool WaveGoal(const CUnit &unit, const wc2ai::Place &place, Vec2i &goal)
 	return path != PF_UNREACHABLE && path != PF_FAILED;
 }
 
+/// The islands of the map in use, once per map: water tiles against all others (a coast tile is
+/// land for a land unit).
+static const std::vector<int> &Regions()
+{
+	const size_t size = static_cast<size_t>(Map.Info.MapWidth) * Map.Info.MapHeight;
+	if (size == 0 || Wc2AiRegions.size() == size) {
+		return Wc2AiRegions;
+	}
+	std::vector<uint8_t> water(size, 0);
+	for (int y = 0; y < Map.Info.MapHeight; ++y) {
+		for (int x = 0; x < Map.Info.MapWidth; ++x) {
+			water[static_cast<size_t>(y) * Map.Info.MapWidth + x] = Map.Field(x, y)->WaterOnMap() ? 1 : 0;
+		}
+	}
+	Wc2AiRegions = wc2ai::LandRegions(Map.Info.MapWidth, Map.Info.MapHeight, water);
+	return Wc2AiRegions;
+}
+
+static int RegionAt(const Vec2i &pos)
+{
+	return wc2ai::RegionOf(Regions(), Map.Info.MapWidth, Map.Info.MapHeight, pos.x, pos.y);
+}
+
+/// A land unit of a wave that no path leads to the place: when the place lies on another island
+/// the original marks the unit "waits for a transport", holds it to the place (role 2) and gives
+/// it no order (role setter 0x4B6000, DECODE_B3 1 point 4). It is not picked for a later wave.
+/// On the same island nothing is written (ours: no path means no order, WaveGoal).
+static void WaitForTransport(int player, CUnit &unit, const wc2ai::Place &place)
+{
+	const Vec2i goal(place.x, place.y);
+	const int region = RegionAt(goal);
+	if (region == 0 || region == RegionAt(unit.tilePos)) {
+		return;
+	}
+	unit.HomeRole = HomeRolePoint;
+	unit.HomePos = goal;
+	std::vector<FerryWait> &waits = Wc2AiFerry[player];
+	const int number = UnitNumber(unit);
+	const FerryWait entry{number, -1, region, goal.x, goal.y};
+	for (FerryWait &wait : waits) {
+		if (wait.unit == number) {
+			wait = entry;
+			return;
+		}
+	}
+	waits.push_back(entry);
+}
+
+/// The unit of a wait entry while the entry still stands for it: alive, the player's, held to
+/// the same place. A unit number is given to a new unit only 500 cycles after a death
+/// (unit_manager.cpp); the entries are looked at every 50.
+static CUnit *WaitingUnit(int player, const FerryWait &wait)
+{
+	CUnit *unit = UnitManager->FindSlotUnit(wait.unit);
+	if (!unit || unit->Destroyed || !unit->IsAlive() || unit->Player != &Players[player]
+		|| unit->HomeRole != HomeRolePoint || unit->HomePos != Vec2i(wait.x, wait.y)) {
+		return nullptr;
+	}
+	return unit;
+}
+
+/// A transport of the player that may carry for it: a living ship that carries, on the map and
+/// not in the last stand (there every unit is held to a place, role 2: the original's transport
+/// routine is role 3 only). A map-placed transport ferries like a trained one (live run 57, 1 of 1).
+static bool FreeTransport(int player, const CUnit &unit)
+{
+	return unit.Player == &Players[player] && unit.IsAliveOnMap() && unit.Type && unit.Type->CanTransport()
+	       && unit.Type->MoveType == EMovement::Naval && unit.HomeRole < HomeRolePoint;
+}
+
+/// The nearest living enemy of the whole map a unit can attack (tile distance, the first of
+/// equals in unit order); nullptr when none.
+static CUnit *NearestEnemyOf(const CUnit &unit)
+{
+	CUnit *nearest = nullptr;
+	int best = 0;
+	for (CUnit *other : UnitManager->GetUnits()) {
+		if (!other || !other->IsAliveOnMap() || !other->Type || !unit.IsEnemy(*other)
+			|| !CanTarget(*unit.Type, *other->Type)) {
+			continue;
+		}
+		const int distance = HomeLeashDistance(unit.tilePos.x, unit.tilePos.y, other->tilePos.x, other->tilePos.y);
+		if (!nearest || distance < best) {
+			nearest = other;
+			best = distance;
+		}
+	}
+	return nearest;
+}
+
+/// The nearest building of the hall class of the player to a tile (the original's 0x4C4950).
+static const CUnit *NearestOf(const CPlayer &player, const Vec2i &from, std::initializer_list<const char *> idents)
+{
+	const CUnit *hall = nullptr;
+	int best = 0;
+	for (const CUnit *unit : player.GetUnits()) {
+		if (!unit || !unit->IsAliveOnMap() || !unit->Type || !unit->Type->Building || !IsOneOf(*unit->Type, idents)) {
+			continue;
+		}
+		const int distance = HomeLeashDistance(unit->tilePos.x, unit->tilePos.y, from.x, from.y);
+		if (!hall || distance < best) {
+			hall = unit;
+			best = distance;
+		}
+	}
+	return hall;
+}
+
+static const CUnit *NearestHall(const CPlayer &player, const Vec2i &from)
+{
+	return NearestOf(player, from, {"unit-town-hall", "unit-keep", "unit-castle", "unit-great-hall",
+	                                "unit-stronghold", "unit-fortress"});
+}
+
+/// The original's transport routine (role 3, 0x4B5950) for each free transport of the player
+/// that stands idle, calibrated to live run 57 (Human XII, 2 land waves, work/CALIB_RUN57.md):
+///   1. a unit given to it stands outside: the units walk to it and board (CommandBoard); the
+///      transport stays where it lies;
+///   2. all given units are aboard: it sails at once to a coast tile of the place's island (with
+///      parameter 0x0C a coast tile in a random direction from the place, wc2ai::LandingCoast;
+///      else the engine's drop zone nearest the place) and unloads there;
+///   3. empty: waiting units of one island (wc2ai::FerryClaims, up to 6) are given to the free
+///      empty transport nearest them (wc2ai::FerryPickNearest), map-placed ones included;
+///   4. nobody to take: it goes to the water beside the player's nearest hall.
+/// A landed unit attacks the nearest enemy at once (3 of 4 landed units in run 57; the fourth
+/// was first ordered to the place: the majority rule is taken), then the role-2 pass leads it.
+/// `quick` (every cycle between the 50-cycle passes): only landings and departures, so that a
+/// transport sails in the cycle its last unit boards, as measured.
+/// Not ported: the escort (live run 57: 0 escorts in 6 chances).
+static void FerryPass(int player, const wc2ai::State &state, bool quick)
+{
+	std::vector<FerryWait> &waits = Wc2AiFerry[player];
+	if (quick && waits.empty()) {
+		return;
+	}
+	// Forget the entries whose unit is gone, held elsewhere, or standing on its place's island; a
+	// unit just put ashore there attacks the nearest enemy.
+	waits.erase(std::remove_if(waits.begin(), waits.end(), [&](const FerryWait &wait) {
+		CUnit *unit = WaitingUnit(player, wait);
+		if (!unit) {
+			return true;
+		}
+		if (unit->Removed || RegionAt(unit->tilePos) != wait.region) {
+			return false;
+		}
+		if (CUnit *enemy = NearestEnemyOf(*unit)) {
+			CommandAttack(*unit, enemy->tilePos, enemy->IsVisibleAsGoal(*unit->Player) ? enemy : nullptr,
+			              EFlushMode::On);
+		}
+		return true;
+	}), waits.end());
+
+	CPlayer &owner = Players[player];
+	const auto transportOf = [&](const FerryWait &wait) -> CUnit * {
+		CUnit *transport = wait.transport >= 0 ? UnitManager->FindSlotUnit(wait.transport) : nullptr;
+		return (transport && !transport->Destroyed && FreeTransport(player, *transport)) ? transport : nullptr;
+	};
+	const std::vector<CUnit *> units = owner.GetUnits();
+
+	// Who takes waiting units: the free empty idle transport nearest the first of them.
+	std::vector<wc2ai::FerryCandidate> candidates;
+	for (const FerryWait &wait : waits) {
+		wc2ai::FerryCandidate candidate;
+		const CUnit *unit = WaitingUnit(player, wait);
+		candidate.region = (unit && !unit->Removed) ? wait.region : 0;
+		candidate.heldElsewhere = transportOf(wait) != nullptr;
+		candidates.push_back(candidate);
+	}
+	const CUnit *taker = nullptr;
+	if (!quick) {
+		const std::vector<size_t> open = wc2ai::FerryClaims(candidates, wc2ai::FerryLoad);
+		const CUnit *first = open.empty() ? nullptr : WaitingUnit(player, waits[open.front()]);
+		std::vector<const CUnit *> empty;
+		std::vector<int> distances;
+		for (const CUnit *unit : units) {
+			if (!first || !unit || !FreeTransport(player, *unit) || !unit->IsIdle() || unit->BoardCount != 0) {
+				continue;
+			}
+			const int number = UnitNumber(*unit);
+			if (std::any_of(waits.begin(), waits.end(), [&](const FerryWait &wait) { return wait.transport == number; })) {
+				continue;
+			}
+			empty.push_back(unit);
+			distances.push_back(HomeLeashDistance(first->tilePos.x, first->tilePos.y, unit->tilePos.x, unit->tilePos.y));
+		}
+		const int pick = wc2ai::FerryPickNearest(distances);
+		taker = pick >= 0 ? empty[static_cast<size_t>(pick)] : nullptr;
+	}
+
+	for (CUnit *transportPtr : units) {
+		if (!transportPtr || !FreeTransport(player, *transportPtr) || !transportPtr->IsIdle()) {
+			continue;
+		}
+		CUnit &transport = *transportPtr;
+		const int number = UnitNumber(transport);
+
+		// The units given to this transport that stand outside.
+		std::vector<CUnit *> outside;
+		bool given = false;
+		for (const FerryWait &wait : waits) {
+			if (wait.transport != number) {
+				continue;
+			}
+			given = true;
+			CUnit *unit = WaitingUnit(player, wait);
+			if (unit && !unit->Removed) {
+				outside.push_back(unit);
+			}
+		}
+		if (quick && !given) {
+			continue;
+		}
+		// The last of its load that is held to a place.
+		const CUnit *last = nullptr;
+		for (const CUnit *unit : units) {
+			if (unit && unit->Container == &transport && unit->HomeRole == HomeRolePoint && unit->HomePos.x >= 0) {
+				last = unit;
+			}
+		}
+		const wc2ai::FerryStep step = wc2ai::FerryNext(!outside.empty(), last != nullptr, &transport == taker);
+		if (quick && step != wc2ai::FerryStep::Sail) {
+			continue;
+		}
+		switch (step) {
+			case wc2ai::FerryStep::CallAboard:
+				// The units walk to it; it stays where it lies.
+				for (CUnit *unit : outside) {
+					const bool boarding = unit->CurrentAction() == UnitAction::Board
+					                      && unit->CurrentOrder()->GetGoal() == &transport;
+					if (!boarding) {
+						CommandBoard(*unit, transport, EFlushMode::On);
+					}
+				}
+				break;
+			case wc2ai::FerryStep::Sail: {
+				Vec2i landing = last->HomePos;
+				if (state.params[0x0C] != 0) {
+					std::vector<uint8_t> coast(static_cast<size_t>(Map.Info.MapWidth) * Map.Info.MapHeight, 0);
+					for (int y = 0; y < Map.Info.MapHeight; ++y) {
+						for (int x = 0; x < Map.Info.MapWidth; ++x) {
+							coast[static_cast<size_t>(y) * Map.Info.MapWidth + x] = Map.Field(x, y)->CoastOnMap() ? 1 : 0;
+						}
+					}
+					const wc2ai::Place shore = wc2ai::LandingCoast(Map.Info.MapWidth, Map.Info.MapHeight, Regions(), coast,
+					                                               landing.x, landing.y, SyncRand(8));
+					if (shore.found) {
+						landing = Vec2i(shore.x, shore.y);
+					}
+				}
+				CommandUnload(transport, landing, nullptr, EFlushMode::On);
+				// The load is let go: a unit put ashore on its place's island waits no more (the
+				// next pass forgets it), one put ashore anywhere else is free to be taken again.
+				for (FerryWait &wait : waits) {
+					if (wait.transport == number) {
+						wait.transport = -1;
+					}
+				}
+				break;
+			}
+			case wc2ai::FerryStep::Take: {
+				const int load = std::min(wc2ai::FerryLoad, transport.Type->MaxOnBoard - transport.BoardCount);
+				for (size_t index : wc2ai::FerryClaims(candidates, load)) {
+					FerryWait &wait = waits[index];
+					wait.transport = number;
+					if (CUnit *unit = WaitingUnit(player, wait)) {
+						CommandBoard(*unit, transport, EFlushMode::On);
+					}
+				}
+				break;
+			}
+			case wc2ai::FerryStep::Home: {
+				Vec2i tile;
+				// Beside its own Shipyard (where it was trained): it stays (live run 64, Human XIII:
+				// 5 new Transports of 2 computers lay 1-3 tiles from their yards, the halls 19-23 tiles
+				// away inland; 9 of 9 with run 62). After a wave it goes to the hall (run 57; run 64 1).
+				const CUnit *yard = NearestOf(owner, transport.tilePos, {"unit-human-shipyard", "unit-orc-shipyard"});
+				if (yard && ShipTileNear(transport, yard->tilePos, tile)
+				    && !HomeLeashSendsHome(transport.tilePos.x, transport.tilePos.y, tile.x, tile.y,
+				                           transport.Type->ReactRangeComputer)) {
+					break;
+				}
+				const CUnit *hall = NearestHall(owner, transport.tilePos);
+				// Beside the hall already (the leash's own limit): it stays.
+				if (!hall || !ShipTileNear(transport, hall->tilePos, tile)
+					|| !HomeLeashSendsHome(transport.tilePos.x, transport.tilePos.y, tile.x, tile.y,
+					                       transport.Type->ReactRangeComputer)) {
+					break;
+				}
+				const int path = PlaceReachable(transport, tile, 1, 1, 0, 1, false);
+				if (path != PF_UNREACHABLE && path != PF_FAILED) {
+					CommandMove(transport, tile, EFlushMode::On);
+				}
+				break;
+			}
+		}
+	}
+}
+
+/// The idle ships and flyers of a scripted computer, every 50 cycles (live run 57, Human XII):
+/// a trained warship that no wave holds patrols between where it stands and the water beside
+/// the player's nearest hall (10 of 10 patrolled; the original's patrol points - 93,46 / 87,59 /
+/// 121,27 and others - are not derived: UNKNOWN rule, this pair is ours); a flyer that cannot
+/// attack (Zeppelin, balloon) wanders to a point up to a quarter of the map away (5 of 5
+/// map-placed Zeppelins; trained ones not seen). A map-fixed warship has role 1 and stands.
+static void IdleShipsAndFlyers(int player)
+{
+	CPlayer &owner = Players[player];
+	for (CUnit *unit : owner.GetUnits()) {
+		if (!unit || !unit->IsAliveOnMap() || !unit->Type || unit->Type->Building || !unit->CanMove()) {
+			continue;
+		}
+		const CUnitType &type = *unit->Type;
+		if (type.MoveType == EMovement::Fly && !type.CanAttack && !type.CanTransport()) {
+			if (unit->IsIdle()) {
+				const int x = WanderAxis(unit->tilePos.x, Map.Info.MapWidth, static_cast<unsigned>(SyncRand()));
+				const int y = WanderAxis(unit->tilePos.y, Map.Info.MapHeight, static_cast<unsigned>(SyncRand()));
+				CommandMove(*unit, Vec2i(x, y), EFlushMode::On);
+			}
+			continue;
+		}
+		const bool warship = type.MoveType == EMovement::Naval && type.CanAttack && !type.CanTransport()
+		                     && !type.BoolFlag[HARVESTER_INDEX].value;
+		if (!wc2ai::WarshipPatrols(warship, unit->MapFixed != 0, unit->HomeRole, unit->IsIdle())) {
+			continue;
+		}
+		const CUnit *hall = NearestHall(owner, unit->tilePos);
+		Vec2i tile;
+		if (!hall || !ShipTileNear(*unit, hall->tilePos, tile) || tile == unit->tilePos) {
+			continue;
+		}
+		const int path = PlaceReachable(*unit, tile, 1, 1, 0, 1, false);
+		if (path != PF_UNREACHABLE && path != PF_FAILED) {
+			CommandPatrolUnit(*unit, tile, EFlushMode::On);
+		}
+	}
+}
+
 /// How many units of the named types a player has.
 static int CountOf(const CPlayer &player, std::initializer_list<const char *> idents)
 {
@@ -437,6 +815,87 @@ static bool ConditionHolds(int condition, void *context)
 	}
 }
 
+/// The reserved tiles, sized to the map (a map of another size starts with none).
+static std::vector<uint8_t> &ReservedTiles()
+{
+	const size_t size = static_cast<size_t>(Map.Info.MapWidth) * Map.Info.MapHeight;
+	if (Wc2AiReserved.size() != size) {
+		Wc2AiReserved.assign(size, 0);
+	}
+	return Wc2AiReserved;
+}
+
+void Wc2AiReservePlanned(const CUnitType &type, int x, int y)
+{
+	const int number = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, 0x69, type.Ident);
+	if (number == 0x3A || number == 0x3B) {
+		return; // a farm: the bare site only, a planned site while the order lives
+	}
+	wc2ai::ReserveSquare(ReservedTiles(), Map.Info.MapWidth, Map.Info.MapHeight, x, y, type.TileWidth, 1, false);
+}
+
+void Wc2AiReserveRoad(int depotX, int depotY, int mineX, int mineY)
+{
+	std::vector<uint8_t> &tiles = ReservedTiles();
+	for (const wc2ai::Place &tile : wc2ai::RoadTiles(depotX, depotY, mineX, mineY)) {
+		if (Map.Info.IsPointOnMap(tile.x, tile.y)) {
+			tiles[static_cast<size_t>(tile.y) * Map.Info.MapWidth + tile.x] = 1;
+		}
+	}
+}
+
+void Wc2AiReserveBuilding(const CUnit &building, bool mapPlaced)
+{
+	const CUnitType &type = *building.Type;
+	const int number = wc2ai::TypeNumberOfIdent(wc2pud::UnitScriptNames, 0x69, type.Ident);
+	const int x = building.tilePos.x;
+	const int y = building.tilePos.y;
+	const int size = type.TileWidth;
+	std::vector<uint8_t> &tiles = ReservedTiles();
+	switch (wc2ai::ReserveKindOf(number)) {
+		case wc2ai::ReserveKind::Border:
+			wc2ai::ReserveSquare(tiles, Map.Info.MapWidth, Map.Info.MapHeight, x, y, size, 1, mapPlaced);
+			break;
+		case wc2ai::ReserveKind::Coast:
+			for (int ty = y - 6; ty <= y + 6; ++ty) {
+				for (int tx = x - 6; tx <= x + 6; ++tx) {
+					const bool inner = tx >= x && tx < x + size && ty >= y && ty < y + size;
+					if (Map.Info.IsPointOnMap(tx, ty) && (mapPlaced || !inner) && Map.Field(tx, ty)->CoastOnMap()) {
+						tiles[static_cast<size_t>(ty) * Map.Info.MapWidth + tx] = 1;
+					}
+				}
+			}
+			break;
+		case wc2ai::ReserveKind::None:
+			break;
+	}
+}
+
+bool Wc2AiReservedAt(int x, int y, int w, int h)
+{
+	return wc2ai::ReservedAny(Wc2AiReserved, Map.Info.MapWidth, Map.Info.MapHeight, x, y, w, h);
+}
+
+/// At the first cycle of a new game: the buildings the map placed for the scripted slots.
+static void ReserveMapBuildings()
+{
+	if (Wc2AiReservedReady) {
+		return;
+	}
+	Wc2AiReservedReady = true;
+	ReservedTiles();
+	for (int p = 0; p < PlayerMax; ++p) {
+		if (!Wc2AiRuns(p)) {
+			continue;
+		}
+		for (const CUnit *unit : Players[p].GetUnits()) {
+			if (unit && unit->IsAliveOnMap() && unit->Type->Building) {
+				Wc2AiReserveBuilding(*unit, true);
+			}
+		}
+	}
+}
+
 void Wc2AiCycle(int player)
 {
 	if (player < 0 || player >= PlayerMax || Wc2AiIds[player] < 0) {
@@ -446,6 +905,7 @@ void Wc2AiCycle(int player)
 	if (!program.Loaded()) {
 		return;
 	}
+	ReserveMapBuildings();
 	wc2ai::State &state = Wc2AiStates[player];
 	if (state.id != Wc2AiIds[player]) {
 		if (state.id == -1 && state.executed != 0) {
@@ -467,7 +927,8 @@ void Wc2AiCycle(int player)
 	// groups of up to `size` fighters of that kind a wave may take at a player that is not a computer, then the
 	// trigger is cleared. A wave goes to the place the original picks for its kind
 	// (wc2ai::LandPlace, wc2ai::SeaPlace, wc2ai::AirPlace). Every unit sent is held to the place
-	// ordered (role 2 of the home leash). How a group travels is the engine's own.
+	// ordered (role 2 of the home leash). How a group travels is the engine's own; a land unit
+	// whose place is on another island is carried by the player's transports (FerryPass).
 	if (GameCycle % 50 == 0 && (state.params[0x09] | state.params[0x0A] | state.params[0x0B]) != 0) {
 		const CPlayer *target = WaveTarget(Players[player]);
 		static const struct { int trigger, size, count; EMovement kind; } waves[] = {
@@ -498,8 +959,12 @@ void Wc2AiCycle(int player)
 						CUnit &unit = *free[next];
 						Vec2i goal;
 						// A ship or a land unit that no path leads there stays, and its place in the
-						// group is used up.
+						// group is used up; a land unit whose place is on another island waits
+						// there for a transport (FerryPass).
 						if (!WaveGoal(unit, place, goal)) {
+							if (wave.kind == EMovement::Land) {
+								WaitForTransport(player, unit, place);
+							}
 							continue;
 						}
 						unit.HomeRole = HomeRolePoint;
@@ -510,6 +975,12 @@ void Wc2AiCycle(int player)
 			}
 			state.params[wave.trigger] = 0;
 		}
+	}
+	// The transports: in full every 50 cycles, landings and departures every cycle; the idle
+	// ships and flyers every 50 cycles.
+	FerryPass(player, state, GameCycle % 50 != 0);
+	if (GameCycle % 50 == 0) {
+		IdleShipsAndFlyers(player);
 	}
 }
 
@@ -799,6 +1270,24 @@ int Wc2AiLumberWanted(const CPlayer &player)
 	return wc2ai::LumberWorkers(player.Resources[GoldCost], player.Resources[WoodCost], Wc2AiWorkerCount(player));
 }
 
+int Wc2AiOnLumber(const CPlayer &player, const CUnit *except)
+{
+	int onLumber = 0;
+	for (const CUnit *unit : player.GetUnits()) {
+		if (!unit || unit == except || !unit->IsAlive() || !unit->Type
+			|| !unit->Type->BoolFlag[HARVESTER_INDEX].value) {
+			continue;
+		}
+		if (unit->Orders.size() == 1 && unit->CurrentAction() == UnitAction::Resource) {
+			const auto &order = *static_cast<const COrder_Resource *>(unit->Orders[0].get());
+			onLumber += order.GetCurrentResource() == WoodCost;
+		} else if (unit->IsIdle() && unit->ResourcesHeld && unit->CurrentResource == WoodCost) {
+			++onLumber;
+		}
+	}
+	return onLumber;
+}
+
 CUnit *Wc2AiRepairTarget(const CPlayer &player, const std::vector<const CUnit *> &unreachable)
 {
 	std::vector<wc2ai::RepairView> views;
@@ -835,7 +1324,7 @@ CUnit *Wc2AiRepairTarget(const CPlayer &player, const std::vector<const CUnit *>
 			return other->IsAliveOnMap() && other->Type->CanAttack && player.IsEnemy(*other);
 		});
 		view.enemyFighterNear = !near.empty();
-		view.priority = type.DefaultStat.Variables[PRIORITY_INDEX].Value;
+		view.priority = type.AnnoyComputerFactor; // the unit data's "annoy computer factor" (DECODE_B7 1), not Priority
 		views.push_back(view);
 		buildings.push_back(unit);
 	}
@@ -1036,8 +1525,34 @@ std::string Wc2AiSaveText()
 			text += std::to_string(state.params[p]) + (p < wc2ai::ParamLast ? ", " : "");
 		}
 		text += "}) end\n";
+		if (!Wc2AiFerry[i].empty()) {
+			text += "if SetWc2AiFerry then SetWc2AiFerry(" + std::to_string(i) + ", {";
+			for (const FerryWait &wait : Wc2AiFerry[i]) {
+				text += std::to_string(wait.unit) + ", " + std::to_string(wait.transport) + ", "
+				        + std::to_string(wait.region) + ", " + std::to_string(wait.x) + ", " + std::to_string(wait.y) + ", ";
+			}
+			text += "}) end\n";
+		}
+	}
+	if (Wc2AiReservedReady) {
+		text += "if SetWc2AiReserved then SetWc2AiReserved(" + std::to_string(Map.Info.MapWidth) + ", "
+		        + std::to_string(Map.Info.MapHeight) + ", \"" + wc2ai::ReservedText(Wc2AiReserved) + "\") end\n";
 	}
 	return text;
+}
+
+/// Lua: SetWc2AiReserved(width, height, "start,count,...") -- the reserved tiles from a saved game.
+static int CclSetWc2AiReserved(lua_State *l)
+{
+	LuaCheckArgs(l, 3);
+	const int width = LuaToNumber(l, 1);
+	const int height = LuaToNumber(l, 2);
+	if (width <= 0 || height <= 0) {
+		return 0;
+	}
+	Wc2AiReserved = wc2ai::ReservedFromText(std::string(LuaToString(l, 3)), static_cast<size_t>(width) * height);
+	Wc2AiReservedReady = true;
+	return 0;
 }
 
 /// Lua: SetWc2AiState(player, mapId, scriptId, ip, wait, executed, {params}) -- from a saved game.
@@ -1061,6 +1576,61 @@ static int CclSetWc2AiState(lua_State *l)
 		lua_pop(l, 1);
 	}
 	return 0;
+}
+
+/// Lua: SetWc2AiFerry(player, {unit, transport, region, x, y, ...}) -- the land units that wait for
+/// a transport, from a saved game (after SetWc2AiState of the same player).
+static int CclSetWc2AiFerry(lua_State *l)
+{
+	LuaCheckArgs(l, 2);
+	const int player = LuaToNumber(l, 1);
+	if (player < 0 || player >= PlayerMax || !lua_istable(l, 2)) {
+		return 0;
+	}
+	std::vector<FerryWait> &waits = Wc2AiFerry[player];
+	waits.clear();
+	const int count = static_cast<int>(lua_rawlen(l, 2));
+	for (int i = 1; i + 4 <= count; i += 5) {
+		int values[5];
+		for (int k = 0; k < 5; ++k) {
+			lua_rawgeti(l, 2, i + k);
+			values[k] = lua_isnumber(l, -1) ? static_cast<int>(lua_tonumber(l, -1)) : -1;
+			lua_pop(l, 1);
+		}
+		waits.push_back(FerryWait{values[0], values[1], values[2], values[3], values[4]});
+	}
+	return 0;
+}
+
+/// Lua: GetWc2AiFerry(player) -> text, one line per waiting land unit
+/// ("unit <n> transport <n|-1> region <r> place <x>,<y> aboard <0|1>"), then one line per transport
+/// of the player ("transport <n> <x>,<y> action <n> load <k> free <0|1>"). For checks through the
+/// debug bridge. Read-only.
+static int CclGetWc2AiFerry(lua_State *l)
+{
+	LuaCheckArgs(l, 1);
+	const int player = LuaToNumber(l, 1);
+	std::string text;
+	if (player >= 0 && player < PlayerMax) {
+		for (const FerryWait &wait : Wc2AiFerry[player]) {
+			const CUnit *unit = WaitingUnit(player, wait);
+			text += "unit " + std::to_string(wait.unit) + " transport " + std::to_string(wait.transport) + " region "
+			        + std::to_string(wait.region) + " place " + std::to_string(wait.x) + "," + std::to_string(wait.y)
+			        + " aboard " + std::to_string(unit && unit->Removed ? 1 : 0) + "\n";
+		}
+		for (const CUnit *unit : Players[player].GetUnits()) {
+			if (!unit || !unit->IsAlive() || !unit->Type || !unit->Type->CanTransport()
+				|| unit->Type->MoveType != EMovement::Naval) {
+				continue;
+			}
+			text += "transport " + std::to_string(UnitNumber(*unit)) + " " + std::to_string(unit->tilePos.x) + ","
+			        + std::to_string(unit->tilePos.y) + " action "
+			        + std::to_string(static_cast<int>(unit->CurrentAction())) + " load " + std::to_string(unit->BoardCount)
+			        + " free " + std::to_string(FreeTransport(player, *unit) ? 1 : 0) + "\n";
+		}
+	}
+	lua_pushstring(l, text.c_str());
+	return 1;
 }
 
 /// Lua: SetWc2AiSent(player, {unit numbers}) -- called by a game saved while the sent units were
@@ -1344,8 +1914,11 @@ void Wc2AiCclRegister()
 	lua_register(Lua, "GetWc2AiId", CclGetWc2AiId);
 	lua_register(Lua, "GetWc2AiInfo", CclGetWc2AiInfo);
 	lua_register(Lua, "SetWc2AiState", CclSetWc2AiState);
+	lua_register(Lua, "SetWc2AiReserved", CclSetWc2AiReserved);
 	lua_register(Lua, "GetWc2AiState", CclGetWc2AiState);
 	lua_register(Lua, "SetWc2AiSent", CclSetWc2AiSent);
+	lua_register(Lua, "SetWc2AiFerry", CclSetWc2AiFerry);
+	lua_register(Lua, "GetWc2AiFerry", CclGetWc2AiFerry);
 	lua_register(Lua, "GetWc2AiSentCount", CclGetWc2AiSentCount);
 	lua_register(Lua, "GetWc2AiQueue", CclGetWc2AiQueue);
 	lua_register(Lua, "GetWc2AiWorkers", CclGetWc2AiWorkers);

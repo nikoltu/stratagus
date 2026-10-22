@@ -120,6 +120,8 @@ public:
 	unsigned Fast:4; /// Flag fast move (one step). Fits at most MAX_FAST
 	unsigned OverflowLength:4;      /// overflow length not stored in Path (may be more). Fits at most MAX_OVERFLOW
 	uint8_t Length;                /// stored path length
+	uint8_t Waited;                /// cycles waited for the held step so far (see PathWaitExpiryCycles)
+	uint8_t LastWait;              /// the wait the last blocked call set (added to Waited on the next one)
 	char Path[MAX_PATH_LENGTH];     /// directions of stored path
 };
 
@@ -210,8 +212,41 @@ extern int AStarMovingUnitCrossingCost;
 extern bool AStarKnowUnseenTerrain;
 /// Cost of using a square we haven't seen before.
 extern int AStarUnknownTerrainCost;
-/// Maximum number of iterations of A* before giving up.
+/// Maximum number of iterations of A* before giving up (0: twice the tiles of the map).
 extern int AStarMaxSearchIterations;
+/// Nodes generated or improved by the last A* search (host tests).
+extern int AStarLastSearchIterations;
+/// Calls of AStarFindPath since the start (host tests).
+extern int AStarSearchCalls;
+/// The last AStarFindPath failed (PF_UNREACHABLE after its flood) and on the way it refused a tile
+/// held by a standing unit of the same player that is on its way (a Move to another tile, a worker
+/// on its trip): the way may open when those units walk on. Not set for a goal apart by terrain,
+/// a goal area with no free tile, or a way closed only by units that stand for good.
+extern bool AStarLastFailByUnits;
+/// The last AStarFindPath failed after its flood without entering a single tile (every tile round
+/// the unit held by terrain, a building or a unit) and at least one of the units round it stands for
+/// good (not on its way): the unit is boxed in and no Range can take it a step nearer.
+extern bool AStarLastFailBoxed;
+/// The last AStarFindPath failed because no tile of the goal area can be stood on (AStarFailGoalFull)
+/// and at least one of those tiles is held by a unit that stands for good (live run 78: a gold mine
+/// ringed by idle units).
+extern bool AStarLastFailGoalHeldForGood;
+/// Why the last AStarFindPath answered PF_UNREACHABLE / PF_FAILED (host tests, the 3.4.80b report).
+enum AStarFailReason {
+	AStarFailNone = 0,
+	AStarFailSimple,             /// the goal one step away is held
+	AStarFailRegion,             /// the goal area is apart by terrain (no search)
+	AStarFailGoalFull,           /// no tile of the goal area can be stood on
+	AStarFailGoalUnitsOnTheWay,  /// the same, a tile held by an own unit on its way
+	AStarFailFloodUnitsOnTheWay, /// the search found no way, an own unit on its way refused
+	AStarFailFloodStandingUnits, /// the same, only units standing for good refused
+	AStarFailFloodTerrain,       /// the same, no unit refused
+	AStarFailOpenSet,            /// the open set was full
+	AStarFailCount
+};
+extern int AStarLastFailReason;
+/// Searches that ran out of their budget and answered a part way (host tests).
+extern int AStarBudgetOuts;
 
 //
 //  Convert heading into direction.
@@ -237,8 +272,35 @@ extern void InitPathfinder();
 /// Free the pathfinder
 extern void FreePathfinder();
 
+/// Cycles a unit waits for a held step before its way is searched again (C5 expiry). Live run 67
+/// (ORIG67 Retry): the original re-routes after about 1 s of waiting - M2b 38 frames = 0.99 s on the
+/// tile (1 case); M1 t3 a mate waited 1.24 s (one step 0.41 s + ~0.8 s) and then took the cleared
+/// gap, so the expiry is above ~31 frames of waiting (1 case). One game cycle is one frame of the
+/// original at the factory speed (settings.h GAME-SPEED-STEPS: step 6, 26 ms, 38.5 cycles/s):
+/// 1 s = 38 cycles.
+constexpr int PathWaitExpiryCycles = 38;
+/// The wait of a unit whose next step is held when nothing else decides it, in cycles.
+constexpr int PathWaitDefaultCycles = 10;
+
 /// Returns the next element of the path
 extern std::pair<int, Vec2i> NextPathElement(CUnit &unit);
+/// C5: a PF_WAIT keeps the held step (on in the game); host tests turn it off for the 3.4.75 way.
+extern bool PathKeepsHeldStep;
+/// Set the wait of a unit whose step is held (NextPathElement answered PF_WAIT): at most what is
+/// left of PathWaitExpiryCycles, so the way is searched again once that time has been waited.
+extern void SetPathWait(CUnit &unit, int cycles);
+/// Search a way for the unit that goes round @p wall (a unit the search would cross: a moving one)
+/// and take it when it is at most @p maxLength steps long; false leaves the cached way unchanged.
+extern bool PathRoundUnit(CUnit &unit, const CUnit &wall, int maxLength);
+/// Search a way that crosses own units standing on their way at a cost (round 3.4.81, UNMEASURED);
+/// true caches it (its first step usually held), false leaves no way cached.
+extern bool PathThroughWaitingMates(CUnit &unit);
+/// Is there a way for the unit that does not go through @p wall (own units waiting on their way
+/// crossed at a cost, so only terrain, buildings, units standing for good and the wall close it)?
+/// The cached way is left as it was (live run 73 R: a closed 1-tile road).
+extern bool PathHasWayRound(CUnit &unit, const CUnit &wall);
+/// Make a one-tile step @p dir (each axis -1..1) the unit's whole cached way.
+extern void PathStepAside(CUnit &unit, const Vec2i &dir);
 /// Return path length to unit 'dst'.
 extern int UnitReachable(const CUnit &src, const CUnit &dst, int range, bool from_outside_container,
 						 bool squareRange = false);

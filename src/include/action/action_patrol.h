@@ -52,13 +52,28 @@ public:
 	PixelPos Show(const CViewport &vp, const PixelPos &lastScreenPos) const override;
 	void UpdatePathFinderData(PathFinderInput &input) override;
 	const Vec2i GetGoalPos() const override;
+	wc2ai::Reissue ReissueReady(const CUnit &unit, unsigned long cycle) override;
 
 	const Vec2i &GetWayPoint() const { return WayPoint; }
+	/// Read-only views for the network sync hash.
+	int GetRange() const { return Range; }
+	bool GetGoalPulled() const { return GoalPulled; }
+	/// Is this patrol remembered for a re-issue after a fight (the original's order 5 memory)?
+	bool Remembered(const CUnit &unit) const;
 private:
 	Vec2i WayPoint{-1, -1}; /// position for patroling.
 	unsigned int WaitingCycle = 0; /// number of cycle pathfinder wait.
 	int Range = 0;
 	Vec2i goalPos{-1, -1};
+	unsigned long ReissueAt = 0; /// game cycle from which the remembered leg may be sent again.
+	/// The leg's goal has been pulled toward the unit (0x4C2630) from the tile it stood on when the
+	/// leg began (each turn-round is a new order 5 through 0x4D8970). Saved as "goal-pulled".
+	bool GoalPulled = false;
+	/// The leg's ordered point before the pull (the original's memory +0x94, the click: run 49 P1 / P2).
+	/// A re-issue of the remembered leg sets the order again from it (0x4D892B -> 0x4D8970), so it is
+	/// pulled again from the tile the unit stands on then. (-1, -1): unknown (a save written before
+	/// this key), the pulled goal is kept. Saved as "ordered".
+	Vec2i Ordered{-1, -1};
 };
 
 //@}

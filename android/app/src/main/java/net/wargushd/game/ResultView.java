@@ -59,8 +59,11 @@ final class ResultView extends View {
     private boolean victory;
     /** A campaign mission rather than a scenario: which, and of which campaign. */
     private boolean campaign, expansion, orcSide;
-    /** A game continued from a save: there is nothing to play again or go on to. */
+    /** A game continued from a save: there is nothing to play again; a won campaign mission
+     *  goes on to the next mission (decision 83). */
     private boolean loaded;
+    /** A won campaign mission continued from a save that has a mission after it: Continue. */
+    private boolean goesOn;
     /** A campaign mission, started from the list or continued from a save: its lines are shown. */
     private boolean story;
     private int mission;
@@ -92,7 +95,7 @@ final class ResultView extends View {
     private boolean again;
     /** LAN: the teams among the rows; the winning team, or -1 when the record does not tell. */
     private int teams, winTeam = -1;
-    /** LAN: the game's length in the engine's cycles. */
+    /** The game's length in the engine's cycles (launch.lua writes it for every record). */
     private long cycles;
 
     /** The game's picture as it ended; drawn under the scrim. Null: whatever the engine shows. */
@@ -124,7 +127,6 @@ final class ResultView extends View {
         try {
             final JSONObject whole = new JSONObject(record);
             campaign = "campaign".equals(whole.optString("mode"));
-            loaded = "load".equals(whole.optString("mode"));
             final JSONArray games = whole.getJSONArray("games");
             final JSONObject game = games.getJSONObject(games.length() - 1);
             // The profile came with the launch; the session's earlier games (Play Again, a
@@ -135,7 +137,7 @@ final class ResultView extends View {
                 final String outcome = earlier.optString("outcome");
                 if ("victory".equals(outcome)) {
                     ++before.victories;
-                } else if ("defeat".equals(outcome) || "draw".equals(outcome)) {
+                } else if ("defeat".equals(outcome) || "draw".equals(outcome) || "quit".equals(outcome)) {
                     ++before.defeats;
                 }
                 final JSONArray players = earlier.optJSONArray("players");
@@ -157,6 +159,9 @@ final class ResultView extends View {
             }
             victory = "victory".equals(game.optString("outcome"));
             final String path = game.optString("map", "");
+            // The game itself was a saved one (also after the in-game Load in another mode); a
+            // campaign mission gone on to from a save is not (launch.lua, decision 83).
+            loaded = path.startsWith("~save/");
             mission = game.optInt("mission", 0);
             // campaigns/<human|orc|human-exp|orc-exp>/…: the strings name the four "human", "orc",
             // "xhuman", "xorc".
@@ -174,6 +179,7 @@ final class ResultView extends View {
                 code = (expansion ? "x" : "") + (orcSide ? "orc" : "human");
             }
             story = campaign || !named.isEmpty();
+            goesOn = loaded && victory && !named.isEmpty() && mission >= 1 && mission < (expansion ? 12 : 14);
             final String base = path.substring(path.lastIndexOf('/') + 1);
             // A map's file name without its extension; a save's without ".sav" and what follows.
             final int cut = loaded ? base.lastIndexOf(".sav") : base.lastIndexOf('.');
@@ -204,6 +210,7 @@ final class ResultView extends View {
             score = game.optLong("score", score);
             rank = game.optInt("rank_index", 0);
             orc = "orc".equals(game.optString("race"));
+            cycles = game.optLong("cycles", 0L);
             final String mode = whole.optString("mode");
             if ("lan_host".equals(mode) || "lan_join".equals(mode)) {
                 again = whole.optBoolean("solo", false);
@@ -211,7 +218,7 @@ final class ResultView extends View {
                 lanMapW = game.optInt("map_w", 0);
                 lanMapH = game.optInt("map_h", 0);
                 lanTerrain = game.optInt("terrain", -1);
-                cycles = game.optLong("cycles", 0L);
+                heroNames(c);
                 groupByTeam();
                 lan = true;
             }
@@ -262,6 +269,31 @@ final class ResultView extends View {
         return (n < 0 ? "-" : "") + s;
     }
 
+    /** Logical units of the view that lie hidden above its seen part; set by fitToView. */
+    private float viewTop;
+
+    /**
+     * Owner's rule 1A (board of 2026-10-18): the window is fitted into the part of the view that
+     * is seen (the game's view reaches under the system's strips), 120 above and below it, the
+     * buttons 72 above its lower edge. The kit's height becomes the seen part's; the canvas is
+     * moved down by what lies hidden above it, and the touches up (see onTouchEvent).
+     */
+    private void fitToView(Canvas c) {
+        final android.graphics.Rect seen = new android.graphics.Rect();
+        getWindowVisibleDisplayFrame(seen);
+        final int[] at = new int[2];
+        getLocationOnScreen(at);
+        final int top = Math.max(0, seen.top - at[1]);
+        final int bottom = Math.min(getHeight(), seen.bottom - at[1]);
+        if (seen.isEmpty() || bottom - top <= 0) {
+            viewTop = 0f;
+            return;
+        }
+        viewTop = top / kit.unit;
+        kit.height = (bottom - top) / kit.unit;
+        c.translate(0f, top);
+    }
+
     private float ix() { return WIN_X + INSET; }
     private float iw() { return WIN_W - INSET * 2f; }
     /**
@@ -307,7 +339,10 @@ final class ResultView extends View {
             clock = (now - firstFrame) / slowdown;
         }
         final int scrim = Math.round((SHADE >>> 24) * part(clock, 0L, SCRIM_MS));
-        kit.fill(c, 0f, 0f, Screen.CANVAS_W, kit.height, (scrim << 24) | (SHADE & 0xFFFFFF), 0f);
+        // The whole view, the hidden strips too: drawn before fitToView, sized by the view itself.
+        kit.fill(c, 0f, 0f, Screen.CANVAS_W, getHeight() / kit.unit, (scrim << 24) | (SHADE & 0xFFFFFF), 0f);
+        c.save();
+        fitToView(c);
         // The window on its way in: decelerating towards its place.
         final float way = part(clock, WINDOW_FROM, WINDOW_MS);
         final float eased = 1f - (1f - way) * (1f - way);
@@ -325,15 +360,17 @@ final class ResultView extends View {
         kit.textTop(c, kit.string(victory ? "victory" : "defeat", victory ? "Victory!" : "Defeat"),
                     ix, 192f, CAP_TITLE, victory ? GOLD : WARN, true);
         final String who = kit.own(opponents == 1 ? "{0} opponent" : "{0} opponents", opponents);
+        final String played = length();
+        final String lengthPart = played.isEmpty() ? "" : " - " + played;
         final String missionName = (mission >= 1 && mission <= ROMAN.length)
             ? ROMAN[mission - 1] + ". " + kit.string(code + "_" + mission + "_name", "") : map;
         if (story) {
             kit.textTop(c, kit.string(expansion ? "campaign_expansion" : "campaign_base",
                                       expansion ? "Expansion" : "Campaign")
                         + " - " + kit.string(orcSide ? "orc" : "human", orcSide ? "Orc" : "Human")
-                        + " - " + missionName, ix, 288f, CAP_SMALL, INK_MUTED, true);
+                        + " - " + missionName + lengthPart, ix, 288f, CAP_SMALL, INK_MUTED, true);
         } else {
-            kit.textTop(c, map + " - " + kit.own(loaded ? "Saved game" : "Custom Scenario") + " - " + who, ix, 288f,
+            kit.textTop(c, map + " - " + kit.own(loaded ? "Saved game" : "Custom Scenario") + " - " + who + lengthPart, ix, 288f,
                         CAP_SMALL, INK_MUTED, true);
         }
 
@@ -420,7 +457,7 @@ final class ResultView extends View {
             if (head.endsWith(":") || head.endsWith("：")) {
                 head = head.substring(0, head.length() - 1).trim();
             }
-            kit.textTopRight(c, kit.fit(head, CAP_SMALL, cw - 36f), nx + cw * k + cw - 24f, TABLE_Y + 36f,
+            kit.textTopRight(c, kit.fitHeading(head, CAP_SMALL, cw - 36f), nx + cw * k + cw - 24f, TABLE_Y + 36f,
                              CAP_SMALL, INK_MUTED, true);
         }
         // The table reaches down to the buttons (four rows on a tablet); with more players the
@@ -472,10 +509,14 @@ final class ResultView extends View {
         // or runs the mission again; a scenario is played again with the same map and settings.
         final float by = buttonY();
         kit.nine(c, buttonPlain, ix, by, BUTTON_W, BUTTON_H, 14);
-        kit.textCentre(c, kit.own(campaign ? "Mission List" : "Back to Launcher"), ix, by, BUTTON_W, BUTTON_H,
-                       CAP_BODY, INK, true);
+        kit.textCentre(c, kit.own(loaded ? "Back" : campaign ? "Mission List" : "Back to Launcher"), ix, by,
+                       BUTTON_W, BUTTON_H, CAP_BODY, INK, true);
         final float ax = ix + iw - BUTTON_W;
-        if (campaign) {
+        if (goesOn) {
+            kit.nine(c, buttonMarked, ax, by, BUTTON_W, BUTTON_H, 14);
+            kit.textCentre(c, kit.string("common_continue", "Continue"), ax, by, BUTTON_W, BUTTON_H,
+                           CAP_BODY, GOLD, true);
+        } else if (campaign && !loaded) {
             kit.nine(c, buttonMarked, ax, by, BUTTON_W, BUTTON_H, 14);
             kit.textCentre(c, victory ? kit.string("common_continue", "Continue")
                                       : kit.string("defeat_btn", "Restart"),
@@ -487,6 +528,7 @@ final class ResultView extends View {
         if (arriving) {
             c.restore();
         }
+        c.restore();
         if (clock < COUNT_FROM + COUNT_MS + ROW_STEP * rows.size()) {
             postInvalidateOnAnimation();
         }
@@ -497,7 +539,7 @@ final class ResultView extends View {
         if (lan) {
             return touchLan(e);
         }
-        final float ty = e.getY() / kit.unit;
+        final float ty = e.getY() / kit.unit - viewTop;
         if (e.getAction() == MotionEvent.ACTION_DOWN) {
             downY = ty;
             downScroll = scroll;
@@ -518,6 +560,8 @@ final class ResultView extends View {
                 final float ax = ix() + iw() - BUTTON_W;
                 if (x >= ix() && x < ix() + BUTTON_W) {
                     listener.onCommand(WargusHDActivity.CMD_EXIT_BACK);
+                } else if (goesOn && x >= ax && x < ax + BUTTON_W) {
+                    listener.onCommand(WargusHDActivity.CMD_CONTINUE);
                 } else if (!loaded && x >= ax && x < ax + BUTTON_W) {
                     listener.onCommand(!campaign ? WargusHDActivity.CMD_PLAY_AGAIN
                                        : victory ? WargusHDActivity.CMD_CONTINUE
@@ -539,10 +583,41 @@ final class ResultView extends View {
     private static final float LAN_ROW_H = 96f, LAN_ROW_PITCH = 102f;
     /** Widths of a row's name and relation, and of the first line under the tiles. */
     private static final float LAN_NAME_W = 330f, LAN_RELATION_W = 200f, LAN_SUM_W = 1620f;
+    /** A computer's hero portrait in a row: 72 high at the frame's 207 : 171. */
+    private static final float LAN_HERO_W = 87f;
     /** The LAN game's map: size in tiles and terrain index, 0 / -1 when the record has none. */
     private int lanMapW, lanMapH, lanTerrain = -1;
     /** The engine's cycles in a second of a game at its normal speed (src/include/settings.h). */
     private static final int CYCLES_PER_SECOND = 30;
+
+    /** The heroes' portraits of the computers' rows, by row. */
+    private final java.util.HashMap<JSONObject, android.graphics.Bitmap> heroFaces = new java.util.HashMap<>();
+
+    /**
+     * A computer's row takes the name of the hero the room gave its seat, and his portrait
+     * ("bot_slot"), from the launcher's file beside the request (LanPage.writeBotNames). The
+     * seat is found by its colour, which no other seat of the room has.
+     */
+    private void heroNames(Context c) {
+        final String text = GameLaunch.readText(new java.io.File(GameLaunch.launchDir(c), LanPage.BOT_NAMES_FILE));
+        if (text == null) {
+            return;
+        }
+        try {
+            final JSONArray bots = new JSONArray(text);
+            for (int k = 0; k < bots.length(); ++k) {
+                final JSONObject b = bots.getJSONObject(k);
+                for (JSONObject p : rows) {
+                    if (!p.optBoolean("me", false) && p.optInt("color", -1) == b.optInt("color", -2)) {
+                        p.put("name", b.optString("name", p.optString("name", "")));
+                        p.put("bot_slot", b.optInt("slot", -1));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // The engine's names stay.
+        }
+    }
 
     /** A row's team as the room gave it, or -1 when the record has none for it. */
     private static int team(JSONObject p) {
@@ -634,7 +709,10 @@ final class ResultView extends View {
             clock = (now - firstFrame) / slowdown;
         }
         final int scrim = Math.round((SHADE >>> 24) * part(clock, 0L, SCRIM_MS));
-        kit.fill(c, 0f, 0f, Screen.CANVAS_W, kit.height, (scrim << 24) | (SHADE & 0xFFFFFF), 0f);
+        // The whole view, the hidden strips too: drawn before fitToView, sized by the view itself.
+        kit.fill(c, 0f, 0f, Screen.CANVAS_W, getHeight() / kit.unit, (scrim << 24) | (SHADE & 0xFFFFFF), 0f);
+        c.save();
+        fitToView(c);
         // The window on its way in, as in the other form.
         final float way = part(clock, WINDOW_FROM, WINDOW_MS);
         final float eased = 1f - (1f - way) * (1f - way);
@@ -754,7 +832,7 @@ final class ResultView extends View {
             if (head.endsWith(":") || head.endsWith("：")) {
                 head = head.substring(0, head.length() - 1).trim();
             }
-            kit.textTopRight(c, kit.fit(head, CAP_SMALL, cw - 36f), nx + cw * k + cw - 24f, LAN_TABLE_Y + 24f,
+            kit.textTopRight(c, kit.fitHeading(head, CAP_SMALL, cw - 36f), nx + cw * k + cw - 24f, LAN_TABLE_Y + 24f,
                              CAP_SMALL, INK_MUTED, true);
         }
         // Eight rows fit a full window. In a lower view, or with more rows than that, the rows
@@ -780,12 +858,21 @@ final class ResultView extends View {
                                me ? INK : INK_MUTED, true);
             }
             final int color = p.optInt("color", -1);
-            if (color >= 0 && color < Profiles.COLORS.length) {
+            final int heroSlot = p.optInt("bot_slot", -1);
+            if (heroSlot >= 0 && color >= 0 && color < Profiles.COLORS.length) {
+                // A computer's hero, in the player's colour, where the swatch stands (87 x 72 keeps
+                // the portrait frame's sides and ends before the name).
+                if (!heroFaces.containsKey(p)) {
+                    heroFaces.put(p, Portraits.tinted(kit, heroSlot, Profiles.COLORS[color]));
+                }
+                kit.picture(c, heroFaces.get(p), rx + 212f, ry + 12f, LAN_HERO_W, 72f);
+            } else if (color >= 0 && color < Profiles.COLORS.length) {
                 kit.fill(c, rx + 212f, ry + 12f, 72f, 72f, Profiles.COLORS[color], 12f);
                 kit.outline(c, rx + 212f, ry + 12f, 72f, 72f, SWATCH_LINE, 12f);
             }
-            kit.textMiddle(c, kit.fit(p.optString("name", ""), CAP_BODY, LAN_NAME_W), rx + 308f, ry, LAN_ROW_H,
-                           CAP_BODY, me ? GOLD : INK, true);
+            final String rowName = (heroSlot >= 0) ? LobbyPage.fitBot(kit, p.optString("name", ""), CAP_BODY, LAN_NAME_W)
+                                                   : kit.fit(p.optString("name", ""), CAP_BODY, LAN_NAME_W);
+            kit.textMiddle(c, rowName, rx + 308f, ry, LAN_ROW_H, CAP_BODY, me ? GOLD : INK, true);
             // The relation in the game's own words; it has none for a neutral player.
             final String relation = p.optString("relation", me ? "you" : "");
             if (relation.equals("you") || relation.equals("enemy") || relation.equals("ally")) {
@@ -821,13 +908,14 @@ final class ResultView extends View {
         if (arriving) {
             c.restore();
         }
+        c.restore();
         if (clock < COUNT_FROM + COUNT_MS + ROW_STEP * rows.size()) {
             postInvalidateOnAnimation();
         }
     }
 
     private boolean touchLan(MotionEvent e) {
-        final float ty = e.getY() / kit.unit;
+        final float ty = e.getY() / kit.unit - viewTop;
         if (e.getAction() == MotionEvent.ACTION_DOWN) {
             downY = ty;
             downScroll = scroll;

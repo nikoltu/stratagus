@@ -481,6 +481,12 @@ void DrawTouchGroupStrip()
 	const int inkTop = ResourcesFont ? cellH * TouchGroupInkTop / TouchGroupCellRows : 0;
 	const int inkH = ResourcesFont ? cellH * TouchGroupInkRows / TouchGroupCellRows : cellH;
 	const int lineGap = inkH / 3; // between the number and the count: a third of a digit's height
+	// Owner decision 71: one own unit selected that is in a group -- the slot of the group it was
+	// put in last has a gold outline; tapping the slot stays the slot's own action. The gold is
+	// the UI's gold of a highlighted text (240, 210, 80; widgets.cpp, the launcher's GOLD).
+	const int markedGroup = (Selected.size() == 1 && Selected[0]->Player == ThisPlayer)
+		? GetLastGroupOfUnit(*Selected[0]) : -1;
+	const Uint32 gold = Video.MapRGB(TheScreen->format, 240, 210, 80);
 
 	// The slots lie inside the map view by construction; the clip makes the primitives
 	// independent of whatever clip the HUD draws before this one left behind.
@@ -503,7 +509,11 @@ void DrawTouchGroupStrip()
 			// stored group: dark plate, frame (yellow when it is the selection),
 			// the number above, the unit count below
 			Video.FillTransRectangleClip(ColorBlack, x, y, w, h, 160);
-			TouchGroupFrame(state == 3 ? ColorYellow : ColorGray, 255, x, y, w, h, t);
+			if (group == markedGroup) {
+				TouchGroupFrame(gold, 255, x, y, w, h, 2 * t);
+			} else {
+				TouchGroupFrame(state == 3 ? ColorYellow : ColorGray, 255, x, y, w, h, t);
+			}
 			// Owner's rule: the number large, the unit count small. The count takes the
 			// HUD's small face (scripts/fonts.lua "remaster_hud_small") when it is defined.
 			static CFont *countFont = CFont::Get("remaster_hud_small");
@@ -908,6 +918,10 @@ static bool CommandKey(int key)
 		case SDLK_F3:
 		case SDLK_F4: // Set/Goto place
 			CommandKey_MapPosition(key - SDLK_F2);
+			break;
+
+		case SDLK_F5: // the classic / Remastered view, as the HUD's F5 slot (o11_81, o11_82)
+			UiToggleClassicView();
 			break;
 
 		case SDLK_SPACE: // center on last action

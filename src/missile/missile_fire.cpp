@@ -54,19 +54,20 @@ void MissileFire::Action() /* override */
 	}
 	if (this->NextMissileFrame(1, 0)) {
 		this->SpriteFrame = 0;
-		const int f = (100 * unit.Variable[HP_INDEX].Value) / unit.Variable[HP_INDEX].Max;
-		MissileType *fire = MissileBurningBuilding(f);
+	}
+	// The picture follows the HP at every step of the fire, not only at the end of its loop: live
+	// run 54 item 10 saw the fire start, grow and go within one 250 ms grab of the HP change (3 of
+	// 3: Farm, Town Hall, Shipyard); the loop is 12 cycles (small) / 20 cycles (big) long, a step 2.
+	MissileType *fire = MissileBurningBuilding(unit.Variable[HP_INDEX].Value, unit.Variable[HP_INDEX].Max);
 
-		if (!fire) {
-			this->TTL = 0;
-			unit.Burning = 0;
-		} else {
-			if (this->Type != fire) {
-				this->position += this->Type->size / 2;
-				this->Type = fire;
-				this->position -= this->Type->size / 2;
-			}
-		}
+	if (!fire) {
+		this->TTL = 0;
+		unit.Burning = 0;
+	} else if (this->Type != fire) {
+		this->position += this->Type->size / 2;
+		this->Type = fire;
+		this->position -= this->Type->size / 2;
+		this->SpriteFrame = 0;
 	}
 }
 

@@ -41,7 +41,7 @@ final class ModPackage {
     /** The names a package's root may hold: the two manifests and the reserved directories. */
     private static final List<String> ROOT_NAMES = Arrays.asList(
         "mod.json", "manifest.json", "defs", "hd", "graphics", "sounds", "strings", "scripts", "maps",
-        "card", "editor");
+        "card", "editor", "briefings");
 
     /** How unpacking ended. */
     static final class Result {

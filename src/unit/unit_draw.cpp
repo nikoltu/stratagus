@@ -43,11 +43,13 @@
 #include "actions.h"
 #include "action/action_build.h"
 #include "action/action_built.h"
+#include "action/action_die.h"
 #include "action/action_resource.h"
 #include "action/action_upgradeto.h"
 #include "construct.h"
 #include "cursor.h"
 #include "editor.h"
+#include "flyer_death.h"
 #include "font.h"
 #include "interface.h"
 #include "map.h"
@@ -1153,6 +1155,12 @@ void CUnit::Draw(const CViewport &vp) const
 			cframe = nullptr;
 		}
 	} else {
+		// LOAD-CRASH-3473 (work/LOAD_CRASH_3473.md): a unit known under fog whose remembered look
+		// was never filled has no type to draw from; reading Seen.Type->Construction was the
+		// SIGSEGV at 0x958. IsVisibleInViewport leaves such a unit out; this is the last guard.
+		if (this->Seen.Type == nullptr) {
+			return;
+		}
 		screenPos = vp.TilePosToScreen_TopLeft(this->Seen.tilePos);
 
 		screenPos.x += this->Seen.IX;
@@ -1196,7 +1204,11 @@ void CUnit::Draw(const CViewport &vp) const
 	if (state == 1 && constructed && cframe) {
 		DrawConstructionShadow(*type, *cframe, frame, screenPos);
 	} else {
-		if (action != UnitAction::Die) {
+		// A flyer's shadow stays under its Death pictures for their first frames (flyer_death.h).
+		const bool dyingFlyerShadow = action == UnitAction::Die && (ReplayRevealMap || IsVisible)
+			&& FlyerDeathShadowDrawn(type->BoolFlag[AIRUNIT_INDEX].value,
+			                         static_cast<const COrder_Die *>(this->CurrentOrder())->GetDeathFrame());
+		if (action != UnitAction::Die || dyingFlyerShadow) {
 			if (this->ZDisplaced) {
 				DrawShadow(*type, frame, screenPos, this->IY);
 			} else {
@@ -1225,14 +1237,13 @@ void CUnit::Draw(const CViewport &vp) const
 		// A load below the full one is carried too once the chopping is over (the tile ran out
 		// under the axe, or the worker was sent elsewhere with what it had): only a worker still
 		// at its tree is drawn with empty hands.
-		bool chopping = false;
-		if (resinfo->TerrainHarvester && this->CurrentAction() == UnitAction::Resource) {
-			const COrder_Resource &order = *static_cast<const COrder_Resource *>(this->CurrentOrder());
-			chopping = !order.IsGatheringFinished();
-		}
-		const bool carrying = resinfo->TerrainHarvester
-			? (this->ResourcesHeld > 0 && !chopping)
-			: (this->ResourcesHeld > 0);
+		// "At its tree" is the order's gathering state only (U3): walking to the tree or finding
+		// it unreachable shows the load held.
+		const bool resourceOrder = this->CurrentAction() == UnitAction::Resource;
+		const int state =
+			resourceOrder ? static_cast<const COrder_Resource *>(this->CurrentOrder())->GetState() : 0;
+		const bool carrying =
+			HarvesterShowsLoad(resinfo->TerrainHarvester, this->ResourcesHeld, resourceOrder, state);
 		if (carrying) {
 			if (resinfo->SpriteWhenLoaded) {
 				sprite = resinfo->SpriteWhenLoaded;
@@ -1265,7 +1276,13 @@ void CUnit::Draw(const CViewport &vp) const
 		// Draw the future unit type, if upgrading to it.
 		//
 	} else {
-		DrawUnitType(*type, sprite.get(), Colors < 0 ? GameSettings.Presets[player].PlayerColor : Colors, frame, screenPos);
+		// A flyer's idle bob (idle_bob.h) moves the sprite only: shadow, selection and bars stay.
+		PixelPos spritePos = screenPos;
+		if (this->IdleBob.Offset && (ReplayRevealMap || IsVisible)) {
+			spritePos = vp.MapToScreenPixelPos(this->GetInterpolatedMapPixelPosTopLeft()
+			                                   + PixelPos(0, IdleBobPixels(PixelTileSize.y)));
+		}
+		DrawUnitType(*type, sprite.get(), Colors < 0 ? GameSettings.Presets[player].PlayerColor : Colors, frame, spritePos);
 	}
 
 	// Unit's extras not fully supported.. need to be decorations themselves.
@@ -1322,8 +1339,10 @@ static inline bool DrawLevelCompare(const CUnit *c1, const CUnit *c2)
 */
 std::vector<CUnit *> FindAndSortUnits(const CViewport &vp)
 {
-	//  Select all units touching the viewpoint.
-	const Vec2i offset(1, 1);
+	//  Select all units touching the viewpoint. CULL-HD-EXTENT: 2 tiles, not 1 -- a unit moving out
+	//  is drawn up to a tile behind its tilePos and its HD canvas overhangs the footprint by up to
+	//  ~0.9 tile (corpses); IsVisibleInViewport then decides by the real draw extent.
+	const Vec2i offset(2, 2);
 	const Vec2i vpSize(vp.MapWidth, vp.MapHeight);
 	const Vec2i minPos = vp.MapPos - offset;
 	const Vec2i maxPos = vp.MapPos + vpSize + offset;

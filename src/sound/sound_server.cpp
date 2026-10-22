@@ -47,6 +47,7 @@
 #endif
 
 #include "iolib.h"
+#include "mods.h"
 #include "unit.h"
 
 #include <SDL.h>
@@ -464,7 +465,9 @@ Mix_Music *LoadMusic(const std::string &name)
 */
 sdl2::ChunkPtr LoadSample(const std::string &name)
 {
-	const fs::path filename = LibraryFileName(name);
+	// An enabled mod's unit voice stands in for the game's file of the same name.
+	const std::string modded = ModsUnitSound(name);
+	const fs::path filename = LibraryFileName(modded.empty() ? name : modded);
 	auto sample = LoadSample(filename.string().c_str());
 
 	if (sample == nullptr) {

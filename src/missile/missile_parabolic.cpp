@@ -75,7 +75,9 @@ static bool ParabolicMissile(Missile &missile)
 	// Until Z is used for drawing, modify X and Y.
 	missile.position.x += (int)(z * zprojToX / 64.0);
 	missile.position.y += (int)(z * zprojToY / 64.0);
-	missile.MissileNewHeadingFromXY(missile.position - orig_pos);
+	// The picture's direction is the flight's, held from launch to impact (ORIG51 s.6: a rock is drawn
+	// in one direction for its whole flight, 6 flights of 6); the arc does not turn it.
+	missile.MissileNewHeadingFromXY(diff);
 	for (; pos.x * sign.x <= missile.position.x * sign.x
 		 && pos.y * sign.y <= missile.position.y * sign.y;
 		 pos.x += (double)diff.x * missile.Type->SmokePrecision / missile.TotalStep,

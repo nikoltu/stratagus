@@ -6,6 +6,10 @@ import android.graphics.Canvas;
 /**
  * A modal sheet with one text field: a profile's name. It sits in the upper part of the
  * screen, clear of the keyboard. The typing itself arrives from the view that shows it.
+ *
+ * In place (owner's board 2B, 2026-10-18) it is no sheet of its own: it holds the name typed
+ * into a field of another sheet (the profile sheet's name, the first start's sheet), which
+ * draws that field with drawField.
  */
 final class NameSheet {
     static final int NONE = 0, CANCEL = 1, OK = 2;
@@ -21,9 +25,24 @@ final class NameSheet {
     private final String title;
     private final StringBuilder name = new StringBuilder();
     private Bitmap buttonPlain, buttonMarked;
+    /** The name is typed into another sheet's field; this one is not drawn nor touched. */
+    final boolean inPlace;
+    /** The most characters the field takes. */
+    private final int max;
 
     NameSheet(String title, String initial) {
+        this(title, initial, false);
+    }
+
+    NameSheet(String title, String initial, boolean inPlace) {
+        this(title, initial, inPlace, Profiles.NAME_MAX);
+    }
+
+    /** A sheet for a longer text than a name (the mods source's address, owner decision 90 2A). */
+    NameSheet(String title, String initial, boolean inPlace, int max) {
         this.title = title;
+        this.inPlace = inPlace;
+        this.max = max;
         if (initial != null) {
             name.append(initial);
         }
@@ -35,7 +54,7 @@ final class NameSheet {
     }
 
     void type(CharSequence text) {
-        for (int i = 0; i < text.length() && name.length() < Profiles.NAME_MAX; ++i) {
+        for (int i = 0; i < text.length() && name.length() < max; ++i) {
             final char ch = text.charAt(i);
             if (ch >= 0x20 && ch != 0x7F) {
                 name.append(ch);
@@ -63,14 +82,7 @@ final class NameSheet {
         kit.outline(c, x, TOP, W, H, LINE, 18f);
         kit.textTop(c, title, px, TOP + PAD, CAP_BODY, GOLD, true);
 
-        final float fy = TOP + PAD + 108f;
-        kit.fill(c, px, fy, pw, FIELD_H, FIELD, 14f);
-        kit.outline(c, px, fy, pw, FIELD_H, GOLD, 14f);
-        final String shown = name.toString();
-        kit.textMiddle(c, shown, px + 36f, fy, FIELD_H, CAP_BODY, INK, true);
-        // The caret stands after the last letter.
-        final float caret = px + 36f + (shown.isEmpty() ? 0f : kit.width(shown, CAP_BODY) + 8f);
-        kit.fill(c, caret, fy + 30f, 4f, FIELD_H - 60f, GOLD, 0f);
+        drawField(c, kit, px, TOP + PAD + 108f, pw, FIELD_H, CAP_BODY);
 
         final float by = buttonY();
         kit.nine(c, buttonPlain, cancelX(), by, BUTTON_W, BUTTON_H, 14);
@@ -79,6 +91,17 @@ final class NameSheet {
         kit.nine(c, buttonMarked, okX(), by, BUTTON_W, BUTTON_H, 14);
         kit.textCentre(c, kit.string("common_ok", "OK"), okX(), by, BUTTON_W, BUTTON_H, CAP_BODY, GOLD,
                        true);
+    }
+
+    /** The field with the name as typed and the caret after it, in logical units. */
+    void drawField(Canvas c, SkinKit kit, float fx, float fy, float fw, float fh, float cap) {
+        kit.fill(c, fx, fy, fw, fh, FIELD, 14f);
+        kit.outline(c, fx, fy, fw, fh, GOLD, 14f);
+        final String shown = name.toString();
+        kit.textMiddle(c, shown, fx + 36f, fy, fh, cap, INK, true);
+        // The caret stands after the last letter.
+        final float caret = fx + 36f + (shown.isEmpty() ? 0f : kit.width(shown, cap) + 8f);
+        kit.fill(c, caret, fy + fh / 4f, 4f, fh / 2f, GOLD, 0f);
     }
 
     /** A finger was lifted at (x, y), in logical units. */

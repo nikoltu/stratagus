@@ -46,6 +46,7 @@
 #include "map.h"
 #include "missile.h"
 #include "network.h"
+#include "palette_cycle.h"
 #include "particle.h"
 #include "replay.h"
 #include "results.h"
@@ -55,6 +56,7 @@
 #include "ui.h"
 #include "unit.h"
 #include "video.h"
+#include "water_anim.h"
 #include "parameters.h"
 #include "frame_profiler.h"
 
@@ -183,6 +185,49 @@ void DrawMapArea(const fieldHighlightChecker highlightChecker = nullptr)
 }
 
 /**
+**  PERF-A3a: are the map and the HUD left undrawn this frame? See UpdateDisplay; the switch is
+**  Preference.HoldFrameUnderWindow (Lua), on by default.
+*/
+static bool PausedUnderWindow()
+{
+	return Preference.HoldFrameUnderWindow && GameRunning && GamePaused && !IsNetworkGame() && !Editor.Running
+	       && InGameWindowUp();
+}
+
+static bool HoldFrameUnderWindow()
+{
+	const bool hold = PausedUnderWindow() && GreyFrameHeld();
+	static bool wasHeld = false;
+	if (hold != wasHeld) {
+		wasHeld = hold;
+		LogPrint("Grey frame held: map and HUD %s\n", hold ? "not drawn" : "drawn again");
+	}
+	// The original's water moves on under its paused windows (run 52): when the animated water was
+	// shown and has a new step, this one frame is drawn and its greys taken again (~8.3 / s, never
+	// every frame); every other frame stays held. With the cover measured (sdl.cpp, held water on
+	// the GPU) the water is added over the kept greys instead and nothing is drawn again.
+	// Options -> "Animated Water" off under the window stops it at once (WATER_ANIM.md section 14).
+	static bool wasAnimated = true;
+	const bool animated = Preference.AnimatedWater;
+	const bool switchedOff = wasAnimated && !animated;
+	wasAnimated = animated;
+	if (!hold) {
+		return false;
+	}
+	switch (water_anim::PlanHeldWater(animated, switchedOff, GreyFrameWaterOnGpu(), HDWaterShown(),
+	                                  water_anim::Game(), SDL_GetTicks())) {
+		case water_anim::HeldWater::DropGpu:
+			GreyFrameWaterProbe(false); // drops the GPU water state; the kept greys have no layer
+			return true;
+		case water_anim::HeldWater::Redraw:
+			GreyFrameRetake();
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
 **  Display update.
 **
 **  This functions updates everything on screen. The map, the gui, the
@@ -295,9 +340,24 @@ void UpdateDisplay()
 			}
 		}
 		FrameProfEnd(FP_OVLCLEAR);
-		FrameProfBegin(FP_WORLD);
-		DrawMapArea();
-		FrameProfEnd(FP_WORLD);
+		// PERF-A3a: a single-player game paused under an in-game window stands still, and the
+		// greys kept of it (GreyFrameUnderMenu) cover the whole frame: the map and the HUD drawn
+		// under them are not seen, so they are not drawn while that kept frame is only laid over.
+		// The frame it is taken from (first frame of the window, a change of size, the end of a
+		// bare pause) is still drawn in full. Never in a network game: the game runs under it.
+		const bool holdUnderWindow = HoldFrameUnderWindow();
+		if (!holdUnderWindow) {
+			FrameProfBegin(FP_WORLD);
+			// Held water (WATER_ANIM.md "Frame-time check"): under a paused window the frames that are
+			// taken are drawn with a probe of the water layer; asked before HDWaterNewFrame, as it
+			// looks at the last map draw.
+			HDWaterSetProbe(GreyFrameWaterProbe(PausedUnderWindow() && Preference.AnimatedWater
+			                                    && HDWaterShown() && HDWaterHeldCapable()));
+			HDWaterNewFrame();
+			DrawMapArea();
+			HDWaterSetProbe(HDWaterProbe::None);
+			FrameProfEnd(FP_WORLD);
+		}
 		FrameProfBegin(FP_HUD);
 		// Draw the in-game HUD text (messages, resources, info panel, status line, button
 		// labels) straight to the GPU backbuffer instead of into the CPU overlay. The fillers
@@ -314,73 +374,75 @@ void UpdateDisplay()
 		// Remastered widgets have no place in it and are not drawn there. The objectives and the
 		// message line have their classic places (DrawObjectives, DrawMessages), under the frame
 		// and the tooltip.
-		const bool classicHud = ClassicHudActive();
-		DrawObjectives();
-		DrawMessages();
-
-		if (CursorState == CursorStates::Rectangle) {
-			FrameProfBegin(FP_HUD_CURSOR);
-			DrawCursor();
-			FrameProfEnd(FP_HUD_CURSOR);
-		}
-
 		if ((Preference.BigScreen && !BigMapMode) || (!Preference.BigScreen && BigMapMode)) {
 			UiToggleBigMap();
 		}
 
-		if (!BigMapMode && classicHud) {
-			FrameProfBegin(FP_HUD_FILLERS);
-			DrawClassicHud();
-			FrameProfEnd(FP_HUD_FILLERS);
-			FrameProfBegin(FP_HUD_MINIMAP);
-			UI.Minimap.Draw();
-			for (std::size_t i = 0; i != UI.NumViewports; ++i) {
-				UI.Minimap.DrawViewportArea(UI.Viewports[i],
-				                            UI.SelectedViewport == &UI.Viewports[i] ? 255 : 128);
+		if (!holdUnderWindow) {
+			const bool classicHud = ClassicHudActive();
+			DrawObjectives();
+			DrawMessages();
+
+			if (CursorState == CursorStates::Rectangle) {
+				FrameProfBegin(FP_HUD_CURSOR);
+				DrawCursor();
+				FrameProfEnd(FP_HUD_CURSOR);
 			}
-			FrameProfEnd(FP_HUD_MINIMAP);
-		} else if (!BigMapMode) {
-			FrameProfBegin(FP_HUD_FILLERS);
-			for (auto &filler : UI.Fillers) {
-				// GPU: static opaque HUD fillers RenderCopy straight to the backbuffer (under the
-				// CPU overlay, which is transparent here so the dynamic HUD composites on top). RGBA
-				// fillers carry mTexture; paletted ones (mTexture == null) keep the CPU DrawSubClip.
-				if (TheRenderer && filler.G->mTexture) {
-					filler.G->DrawClipTex(filler.X, filler.Y);
-				} else {
-					filler.G->DrawSubClip(0, 0, filler.G->Width, filler.G->Height, filler.X, filler.Y);
+
+			if (!BigMapMode && classicHud) {
+				FrameProfBegin(FP_HUD_FILLERS);
+				DrawClassicHud();
+				FrameProfEnd(FP_HUD_FILLERS);
+				FrameProfBegin(FP_HUD_MINIMAP);
+				UI.Minimap.Draw();
+				for (std::size_t i = 0; i != UI.NumViewports; ++i) {
+					UI.Minimap.DrawViewportArea(UI.Viewports[i],
+					                            UI.SelectedViewport == &UI.Viewports[i] ? 255 : 128);
 				}
+				FrameProfEnd(FP_HUD_MINIMAP);
+			} else if (!BigMapMode) {
+				FrameProfBegin(FP_HUD_FILLERS);
+				for (auto &filler : UI.Fillers) {
+					// GPU: static opaque HUD fillers RenderCopy straight to the backbuffer (under the
+					// CPU overlay, which is transparent here so the dynamic HUD composites on top). RGBA
+					// fillers carry mTexture; paletted ones (mTexture == null) keep the CPU DrawSubClip.
+					if (TheRenderer && filler.G->mTexture) {
+						filler.G->DrawClipTex(filler.X, filler.Y);
+					} else {
+						filler.G->DrawSubClip(0, 0, filler.G->Width, filler.G->Height, filler.X, filler.Y);
+					}
+				}
+				FrameProfEnd(FP_HUD_FILLERS);
+				FrameProfBegin(FP_HUD_PANELS);
+				DrawMenuButtonArea();
+				DrawUserDefinedButtons();
+				FrameProfEnd(FP_HUD_PANELS);
+
+				FrameProfBegin(FP_HUD_MINIMAP);
+				UI.Minimap.Draw();
+				for (std::size_t i = 0; i != UI.NumViewports; ++i) {
+					UI.Minimap.DrawViewportArea(UI.Viewports[i],
+					                            UI.SelectedViewport == &UI.Viewports[i] ? 255 : 128);
+				}
+				FrameProfEnd(FP_HUD_MINIMAP);
+
+				FrameProfBegin(FP_HUD_PANELS);
+				UI.InfoPanel.Draw();
+				DrawResources();
+				UI.StatusLine.Draw();
+				UI.StatusLine.DrawCosts();
+				UI.ButtonPanel.Draw();
+				FrameProfEnd(FP_HUD_PANELS);
 			}
-			FrameProfEnd(FP_HUD_FILLERS);
-			FrameProfBegin(FP_HUD_PANELS);
-			DrawMenuButtonArea();
-			DrawUserDefinedButtons();
-			FrameProfEnd(FP_HUD_PANELS);
 
-			FrameProfBegin(FP_HUD_MINIMAP);
-			UI.Minimap.Draw();
-			for (std::size_t i = 0; i != UI.NumViewports; ++i) {
-				UI.Minimap.DrawViewportArea(UI.Viewports[i],
-				                            UI.SelectedViewport == &UI.Viewports[i] ? 255 : 128);
+			if (!classicHud) {
+				DrawTimer();
 			}
-			FrameProfEnd(FP_HUD_MINIMAP);
-
-			FrameProfBegin(FP_HUD_PANELS);
-			UI.InfoPanel.Draw();
-			DrawResources();
-			UI.StatusLine.Draw();
-			UI.StatusLine.DrawCosts();
-			UI.ButtonPanel.Draw();
-			FrameProfEnd(FP_HUD_PANELS);
+			DrawNetWaitPlate();
+			// TOUCH-R1: the group strip, over the map view. In the HUD pass, so that its plates and
+			// its text both go to the GPU backbuffer in draw order and the CPU overlay stays clean.
+			DrawTouchGroupStrip();
 		}
-
-		if (!classicHud) {
-			DrawTimer();
-		}
-		DrawNetWaitPlate();
-		// TOUCH-R1: the group strip, over the map view. In the HUD pass, so that its plates and
-		// its text both go to the GPU backbuffer in draw order and the CPU overlay stays clean.
-		DrawTouchGroupStrip();
 	}
 
 	// End of the in-game HUD text: guichan widgets/menus/tooltips below draw into the CPU
@@ -508,8 +570,11 @@ static void RunOneGameCycle()
 	// Update map fog of war.
 	// Call AI.
 	// Check game goals.
-	// Check rescue of units.
 	//
+	// Rescue of units runs on every cycle: in the original a unit is taken over 1 - 3 frames after
+	// an own unit reaches a touching tile (ORIG55 item 6, 3 of 3); once a second (the old case 6
+	// below) took up to 30 cycles.
+	RescueUnits();
 	switch (GameCycle % CYCLES_PER_SECOND) {
 		case 0: // At cycle 0, start all ai players...
 			if (GameCycle == 0) {
@@ -530,8 +595,7 @@ static void RunOneGameCycle()
 		case 5: // forest grow
 			Map.RegenerateForest();
 			break;
-		case 6: // overtaking units
-			RescueUnits();
+		case 6: // was: overtaking units (now every cycle, above)
 			break;
 		default: {
 			// FIXME: assume that NumPlayers < (CYCLES_PER_SECOND - 7)
@@ -641,6 +705,14 @@ static void SingleGameLoop()
 {
 	extern double GameCycleRate; // game.cpp: the Game Speed setting, in cycles per second
 	long lastTicks = (long)SDL_GetTicks();
+	// The glow pictures' palette-cycle steps start at 0 with the mission's tileset.
+	{
+		const std::string ts = CurrentEffectTileset();
+		palette_cycle::Game().Setup(ts == "winter" ? palette_cycle::Tileset::Winter
+		                            : ts == "swamp" ? palette_cycle::Tileset::Wasteland
+		                            : ts == "xswamp" ? palette_cycle::Tileset::Swamp
+		                            : palette_cycle::Tileset::Forest);
+	}
 	while (GameRunning) {
 		// The cycle length follows the Game Speed setting (it may change while the game runs).
 		const double period = 1000.0 / (GameCycleRate > 1.0 ? GameCycleRate : (double)CYCLES_PER_SECOND);
@@ -688,10 +760,17 @@ static void SingleGameLoop()
 
 		// The timed automatic save goes by wall time, between two cycles; a paused game and one
 		// with a menu up write it as well. No text: the original has no status strip.
-		if (AutosaveDue(SDL_GetTicks(), AutosaveNextMs, Preference.AutosaveMinutes, IsNetworkGame(),
-		                IsReplayGame(), false)) {
-			SaveGame("autosave.sav");
+		// The text is built in this frame; the compression and the file write run on the save
+		// writer thread. While the last one still writes the next one waits for it (the due
+		// time stays, so it comes in the first frame after).
+		if (!SaveGameWriting()
+		    && AutosaveDue(SDL_GetTicks(), AutosaveNextMs, Preference.AutosaveMinutes, IsNetworkGame(),
+		                   IsReplayGame(), false)) {
+			SaveGameInBackground("autosave.sav");
 		}
+
+		// The glow pictures step on real time (20 ms ticks), not on game cycles; never while paused.
+		palette_cycle::Game().Advance((uint32_t)SDL_GetTicks(), GamePaused);
 
 		DisplayLoop();            // renders with GetGameCycleFraction() = accumulator/period
 		PerFrameHousekeeping();   // input + frame pacing (WaitEventsOneFrame)
@@ -732,7 +811,8 @@ void GameMainLoop(bool clean)
 	// Every game writes its automatic save when it comes up, a loaded one too.
 	if (AutosaveDue(SDL_GetTicks(), AutosaveNextMs, Preference.AutosaveMinutes, IsNetworkGame(),
 	                IsReplayGame(), true)) {
-		SaveGame("autosave.sav");
+		WaitForSaveGame(); // the last game's may still write the same file
+		SaveGameInBackground("autosave.sav");
 	}
 
 	long ticks = SDL_GetTicks();
@@ -754,6 +834,8 @@ void GameMainLoop(bool clean)
 	// LAN-MESH S9: the others are told before anything of the game is taken down. Exit() sets
 	// the cycle to 0 before its own call, which gave the quit a cycle long past.
 	NetworkQuitGame();
+
+	WaitForSaveGame(); // a game that ends leaves its automatic save complete
 
 	if (GameResult == GameExit) {
 		Exit(0);

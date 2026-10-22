@@ -650,14 +650,17 @@ static void DrawUnitOn(const CUnit &unit, int red_phase, int scaleX, int scaleY)
 	int mx = 1 + UI.Minimap.XOffset + Map2MinimapX[unit.tilePos.x];
 	int my = 1 + UI.Minimap.YOffset + Map2MinimapY[unit.tilePos.y];
 	// The loops below draw w + 1 by h0 + 1 pixels from the pixel of the unit's own tile.
+	// Remastered view: the footprint, a one-tile unit never under 2 of the original's 128 minimap
+	// pixels (live run 71, MINIMAP-MARK-SIZE; hdatlas::remasteredMinimapMarkPixels).
 	const bool classic = ClassicHudActive();
+	const int surfacePx = std::min(SurfaceW, SurfaceH);
 	int w = (classic ? hdatlas::classicMinimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC)
-					 : hdatlas::minimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC)) - 1;
+					 : hdatlas::remasteredMinimapMarkPixels(type->TileWidth, scaleX, MINIMAP_FAC, surfacePx)) - 1;
 	if (mx + w >= SurfaceW) { // clip right side
 		w = SurfaceW - mx;
 	}
 	int h0 = (classic ? hdatlas::classicMinimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC)
-					  : hdatlas::minimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC)) - 1;
+					  : hdatlas::remasteredMinimapMarkPixels(type->TileHeight, scaleY, MINIMAP_FAC, surfacePx)) - 1;
 	if (my + h0 >= SurfaceH) { // clip bottom side
 		h0 = SurfaceH - my;
 	}
@@ -709,12 +712,25 @@ void CMinimap::Update()
 	const uint32_t fogColorSDL = FogOfWar->GetFogColorSDL();
 	if (!ReplayRevealMap) {
 		uint32_t *const minimapFog = static_cast<uint32_t *>(MinimapFogSurface->pixels);
+		// Classic view (S1_MINIMAP_NOTE.md section 2, cuts o11_95 / o11_24): explored-but-unseen
+		// ground is not darkened but checkered - opaque black on the logical minimap pixels whose
+		// x + y is odd, the ground colour untouched on the others. Only with the classic HUD, where
+		// one surface pixel is one logical (128-box) pixel. Never-seen ground and visible ground
+		// keep the alphas below in both views; Remastered unchanged.
+		const bool classicChecker = ClassicHudActive() && IsClassicView();
+		const uint32_t classicBlack = SDL_MapRGB(MinimapFogSurface->format, 0, 0, 0) & ~AMASK;
 		size_t index = 0;
 		for (uint16_t my = 0; my < SurfaceH; ++my) {
 			for (uint16_t mx = 0; mx < SurfaceW; ++mx) {
 
 				const Vec2i tilePos(Minimap2MapX[mx], Minimap2MapY[my] / Map.Info.MapWidth);
 				const uint8_t vis = FogOfWar->GetVisibilityForTile(tilePos);
+
+				if (classicChecker && vis == 1) {
+					const uint32_t a = ((mx + my) & 1) ? 0xFFu : 0x00u;
+					minimapFog[index++] = classicBlack | (a << ASHIFT);
+					continue;
+				}
 
 				const uint32_t fogAlpha = vis == 0 ? (GameSettings.RevealMap != MapRevealModes::cHidden ? Settings.FogRevealedOpacity : Settings.FogUnseenOpacity)
 											   	   : vis == 1 ? Settings.FogExploredOpacity

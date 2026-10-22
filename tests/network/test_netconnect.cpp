@@ -33,7 +33,9 @@
 #include "netconnect.h"
 #include "net_mesh.h"
 #include "network.h"
+#include "network_test_hooks.h"
 
+#include <fstream>
 #include <string>
 
 namespace {
@@ -618,4 +620,56 @@ TEST_CASE("map_transfer_name_rules")
 	CHECK(IsSafeMapTransferName("maps/x.sms"));
 	CHECK_FALSE(IsSafeMapTransferName("maps\\..\\x.pud"));
 	CHECK_FALSE(IsSafeMapTransferName(""));
+}
+
+TEST_CASE("map_transfer_host_lists_a_missing_directory_as_empty")
+{
+	const fs::path base = fs::temp_directory_path() / "stratagus_mapxfer_test";
+	std::error_code ec;
+	fs::remove_all(base, ec);
+	// a game-folder map: no such directory under the library path, no throw, nothing to send
+	CHECK(MapTransferFiles(base / "maps" / "nowhere", "x").empty());
+
+	fs::create_directories(base / "maps", ec);
+	for (const char *name : {"x.smp", "x.sms.gz", "xy.smp", "y.smp"}) {
+		std::ofstream(base / "maps" / name) << "1";
+	}
+	const auto files = MapTransferFiles(base / "maps", "x");
+	REQUIRE(files.size() == 2);
+	CHECK(files.begin()->filename() == "x.smp");
+	CHECK(MapTransferNetworkName(base, base / "maps" / "x.smp") == "maps/x.smp");
+	// a file outside the library path has no name to go under (the old walk never ended)
+	CHECK(MapTransferNetworkName(base / "maps" / "sub", base / "maps" / "x.smp").empty());
+	CHECK(MapTransferNetworkName("libpath", "elsewhere/x.smp").empty());
+	fs::remove_all(base, ec);
+}
+
+TEST_CASE("Client takes room messages only from the server it joined")
+{
+	REQUIRE(NetworkSetupServerAddress("192.168.1.10", 6660) == 0);
+	const CHost server("192.168.1.10", 6660);
+	const CHost stranger("192.168.1.20", 6660); // same port
+	const CHost otherPort("192.168.1.10", 6661); // the server's address, another port
+
+	unsigned char buf[CInitMessage_Header::Size()];
+	CInitMessage_Header(MessageInit_FromServer, ICMServerQuit).Serialize(buf);
+
+	NetConnectRunning = 2;
+	NetworkTestSetClientState(ccs_synced);
+
+	// a quit from anyone else is dropped: the room stays open
+	CHECK(NetworkParseSetupEvent(buf, sizeof(buf), stranger));
+	CHECK(NetConnectRunning == 2);
+	CHECK(GetNetworkState() == ccs_synced);
+	CHECK(NetworkParseSetupEvent(buf, sizeof(buf), otherPort));
+	CHECK(NetConnectRunning == 2);
+	CHECK(GetNetworkState() == ccs_synced);
+
+	// the same quit from the server ends the room
+	CHECK(NetworkParseSetupEvent(buf, sizeof(buf), server));
+	CHECK(NetConnectRunning == 0);
+	CHECK(GetNetworkState() == ccs_serverquits);
+
+	NetworkTestSetClientState(ccs_unused);
+	NetConnectRunning = 0;
 }

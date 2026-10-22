@@ -62,3 +62,55 @@ TEST_CASE("sound: audio focus scales a volume - full, ducked, silent")
 	CHECK(FocusScaledVolume(0, AudioFocus::Ducked) == 0);
 	CHECK(FocusScaledVolume(1, AudioFocus::Ducked) == 0);
 }
+
+// Options -> Sound switches (OPTIONS-SOUND-SWITCHES-INERT): UnitVoiceEnabled(voice, isBuilding,
+// unitSpeech, unitAck, buildingSound).
+
+TEST_CASE("sound switches: all on lets every voice play")
+{
+	for (EUnitVoice v : {EUnitVoice::Selected, EUnitVoice::Acknowledging, EUnitVoice::Ready,
+	                     EUnitVoice::HelpMe, EUnitVoice::Dying, EUnitVoice::WorkCompleted,
+	                     EUnitVoice::Building, EUnitVoice::Docking, EUnitVoice::Repairing,
+	                     EUnitVoice::Harvesting, EUnitVoice::Attack, EUnitVoice::Build}) {
+		CHECK(UnitVoiceEnabled(v, false, true, true, true));
+		CHECK(UnitVoiceEnabled(v, true, true, true, true));
+	}
+}
+
+TEST_CASE("sound switches: Unit Speech off silences a unit's own talk only")
+{
+	CHECK_FALSE(UnitVoiceEnabled(EUnitVoice::Selected, false, false, true, true));
+	CHECK_FALSE(UnitVoiceEnabled(EUnitVoice::Ready, false, false, true, true));
+	CHECK_FALSE(UnitVoiceEnabled(EUnitVoice::WorkCompleted, false, false, true, true));
+	CHECK(UnitVoiceEnabled(EUnitVoice::Acknowledging, false, false, true, true));
+	CHECK(UnitVoiceEnabled(EUnitVoice::Attack, false, false, true, true));
+	// a building's selection is not unit speech
+	CHECK(UnitVoiceEnabled(EUnitVoice::Selected, true, false, true, true));
+}
+
+TEST_CASE("sound switches: Unit Acknowledgements off silences answers to orders only")
+{
+	for (EUnitVoice v : {EUnitVoice::Acknowledging, EUnitVoice::Attack, EUnitVoice::Build,
+	                     EUnitVoice::Repairing, EUnitVoice::Harvesting}) {
+		CHECK_FALSE(UnitVoiceEnabled(v, false, true, false, true));
+	}
+	CHECK(UnitVoiceEnabled(EUnitVoice::Selected, false, true, false, true));
+	CHECK(UnitVoiceEnabled(EUnitVoice::Ready, false, true, false, true));
+}
+
+TEST_CASE("sound switches: Building Sound off silences buildings, not units")
+{
+	CHECK_FALSE(UnitVoiceEnabled(EUnitVoice::Selected, true, true, true, false));
+	CHECK_FALSE(UnitVoiceEnabled(EUnitVoice::Building, true, true, true, false));
+	CHECK_FALSE(UnitVoiceEnabled(EUnitVoice::Ready, true, true, true, false));
+	CHECK(UnitVoiceEnabled(EUnitVoice::Selected, false, true, true, false));
+	CHECK(UnitVoiceEnabled(EUnitVoice::Ready, false, true, true, false));
+}
+
+TEST_CASE("sound switches: alerts and effects are never gated")
+{
+	for (EUnitVoice v : {EUnitVoice::HelpMe, EUnitVoice::Dying, EUnitVoice::Docking}) {
+		CHECK(UnitVoiceEnabled(v, false, false, false, false));
+		CHECK(UnitVoiceEnabled(v, true, false, false, false));
+	}
+}

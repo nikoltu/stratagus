@@ -272,6 +272,8 @@ static void CclSpellAutocast(lua_State *l, AutoCastInfo *autocast)
 			lua_rawgeti(l, -1, j + 1);
 			autocast->PositionAutoCast.init(l, -1);
 			lua_pop(l, 1);
+		} else if (value == "position-goal") {
+			autocast->PositionGoal = LuaToBoolean(l, -1, j + 1);
 		} else if (value == "combat") {
 			autocast->Combat = Ccl2Condition(l, LuaToString(l, -1, j + 1));
 		} else if (value == "attacker") {

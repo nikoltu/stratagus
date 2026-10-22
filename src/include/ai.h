@@ -53,6 +53,8 @@ extern int AiSleepCycles;  /// Ai sleeps # cycles
 ----------------------------------------------------------------------------*/
 
 extern void AiEachCycle(CPlayer &player);   /// Called each game cycle
+/// The casting pass of all players run by their original script, units in slot order
+extern void AiCheckMagicAll();
 extern void AiEachSecond(CPlayer &player);  /// Called each second
 
 extern void InitAiModule();       /// Init AI global structures

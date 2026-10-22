@@ -34,6 +34,7 @@
 
 #include "unitptr.h"
 #include "vec2i.h"
+#include "wc2ai.h"
 
 #include <memory>
 #include <string_view>
@@ -122,6 +123,13 @@ public:
 
 	virtual bool OnAiHitUnit(CUnit &unit, CUnit *attacker, int /*damage*/);
 
+	/// May this saved order be put back now? An order with a cool-down answers Wait while it runs and
+	/// starts it when it says Ready; Forget drops the memory.
+	virtual wc2ai::Reissue ReissueReady(const CUnit & /*unit*/, unsigned long /*cycle*/)
+	{
+		return wc2ai::Reissue::Ready;
+	}
+
 	bool ParseGenericData(lua_State *l, int &j, std::string_view value);
 	bool HasGoal() const { return Goal != nullptr; }
 	CUnit *GetGoal() const { return Goal; }
@@ -176,6 +184,35 @@ using COrderPtr = COrder *;
 ----------------------------------------------------------------------------*/
 
 extern unsigned SyncHash;  /// Hash calculated to find sync failures
+
+/**
+**  What the sync hash takes from one unit after its step: integers only, the same on every peer
+**  of a game in step. Order fields are those of the current order; a field the order does not
+**  have is -1 (positions, slots) or 0 (range, flags).
+*/
+struct SyncUnitState
+{
+	bool hasOrder = false;    /// false: no order at all (action counts as 0)
+	int action = 0;           /// UnitAction of the current order
+	int refs = 0;             /// reference count
+	int tileX = 0;            /// tile position
+	int tileY = 0;
+	int hp = 0;               /// HP_INDEX value
+	int goalX = -1;           /// the current order's goal tile (GetGoalPos)
+	int goalY = -1;
+	int goalSlot = -1;        /// slot number of the current order's goal unit
+	int range = 0;            /// Range of a Move / Attack / AttackGround / Patrol order
+	int pointX = -1;          /// attack-move point (Attack / AttackGround) or way point (Patrol)
+	int pointY = -1;
+	int goalPulled = 0;       /// GoalPulled of a Move / Attack / AttackGround / Patrol order
+};
+
+/// The covered state of a unit, read without changing anything.
+extern SyncUnitState SyncUnitStateOf(const CUnit &unit);
+/// The sync hash after mixing one unit's state into `hash`. Pure; each step is a bijection of the
+/// running hash, so a change of any single field always changes the result.
+extern unsigned SyncHashMixUnit(unsigned hash, const SyncUnitState &state);
+
 extern void ResetSyncDebugCycleHistory();
 extern void DumpSyncDebugCycleHistory(unsigned long centerCycle,
                                       unsigned int receivedSeed,

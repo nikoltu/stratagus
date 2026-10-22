@@ -418,3 +418,71 @@ TEST_CASE("MissileCadence: a rune flashes for 17 cycles in every 256")
 	}
 	CHECK(shown == 17);
 }
+
+TEST_CASE("MissileCadence: a unit's own explosion is made 8 classic pixels above its centre")
+{
+	CHECK(UnitExplosionLift(32) == 8);
+	CHECK(UnitExplosionLift(64) == 16);
+	CHECK(UnitExplosionLift(0) == 0);
+}
+
+TEST_CASE("HitReaction: the attacker is the first candidate, then the box, the attacker not twice")
+{
+	// DECODE_B8 item 5 (0x495830 with argument 0): the remembered attacker is scored first at any
+	// distance, then every unit of the box in list order; the first of equal scores wins.
+	CHECK(HitReactionCandidates(7, std::vector<int>{}) == std::vector<int>{7});
+	CHECK(HitReactionCandidates(7, std::vector<int>{3, 5}) == std::vector<int>{7, 3, 5});
+	CHECK(HitReactionCandidates(7, std::vector<int>{3, 7, 5}) == std::vector<int>{7, 3, 5});
+	CHECK(HitReactionCandidates(7, std::vector<int>{7}) == std::vector<int>{7});
+}
+
+TEST_CASE("target search: candidates north to south, a tie goes to the northernmost")
+{
+	// DECODE_B10_ROUND2 item 5: the box is walked by pixel y (stable), and the first of equal
+	// scores stays. A candidate here: {pixel y, score, name}.
+	struct Candidate {
+		int y;
+		int score;
+		int name;
+	};
+	std::vector<Candidate> table = {{96, 5, 1}, {32, 5, 2}, {64, 7, 3}, {32, 7, 4}, {64, 0, 5}};
+	SortNorthFirst(table, [](const Candidate &c) { return c.y; });
+	std::vector<int> names;
+	for (const Candidate &c : table) {
+		names.push_back(c.name);
+	}
+	CHECK(names == std::vector<int>{2, 4, 3, 5, 1}); // equal y keep the order given
+
+	const auto score = [](const Candidate &c) { return c.score; };
+	auto best = FirstOfBestScore(table.begin(), table.end(), score);
+	REQUIRE(best != table.end());
+	CHECK(best->name == 4); // 7 at y 32 beats 7 at y 64
+
+	std::vector<Candidate> tie = {{160, 5, 1}, {96, 5, 2}};
+	CHECK(FirstOfBestScore(tie.begin(), tie.end(), score)->name == 1); // unsorted: list order
+	SortNorthFirst(tie, [](const Candidate &c) { return c.y; });
+	CHECK(FirstOfBestScore(tie.begin(), tie.end(), score)->name == 2); // the smaller y wins
+
+	std::vector<Candidate> refused = {{0, 0, 1}, {32, 0, 2}};
+	CHECK(FirstOfBestScore(refused.begin(), refused.end(), score) == refused.end());
+}
+
+TEST_CASE("order cross: pictures 3 2 1 0 held 6 3 2 1 cycles")
+{
+	const int pictures[ClickCrossCycles] = {3, 3, 3, 3, 3, 3, 2, 2, 2, 1, 1, 0};
+	for (int tick = 0; tick < ClickCrossCycles; ++tick) {
+		CHECK(ClickCrossPictureOn(tick) == pictures[tick]);
+	}
+	CHECK(ClickCrossPictureOn(-1) == -1);
+	CHECK(ClickCrossPictureOn(12) == -1);
+	CHECK(ClickCrossPictureOn(100) == -1);
+	// each picture held as the original's screen shows it: the whole X first
+	int held[4] = {};
+	for (int tick = 0; tick < ClickCrossCycles; ++tick) {
+		++held[ClickCrossPictureOn(tick)];
+	}
+	CHECK(held[0] == 1);
+	CHECK(held[1] == 2);
+	CHECK(held[2] == 3);
+	CHECK(held[3] == 6);
+}

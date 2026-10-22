@@ -386,7 +386,7 @@ CInitMessage_Hello::CInitMessage_Hello(const char *name) :
 {
 	strncpy_s(this->PlyName, sizeof(this->PlyName), name, _TRUNCATE);
 	this->Stratagus = NetworkProtocolVersion;
-	this->Version = FileChecksums;
+	this->Version = NetworkContentVersion(); // NET-CONTENT-ID
 }
 
 std::vector<unsigned char> CInitMessage_Hello::Serialize() const
@@ -503,7 +503,7 @@ void CInitMessage_EngineMismatch::Deserialize(const unsigned char *p)
 
 CInitMessage_LuaFilesMismatch::CInitMessage_LuaFilesMismatch() :
 	header(MessageInit_FromServer, ICMLuaFilesMismatch),
-	Version(FileChecksums)
+	Version(NetworkContentVersion())
 {
 }
 
@@ -529,7 +529,7 @@ void CInitMessage_LuaFilesMismatch::Deserialize(const unsigned char *p)
 
 CInitMessage_Welcome::CInitMessage_Welcome() :
 	header(MessageInit_FromServer, ICMWelcome),
-	Lag(CNetworkParameter::Instance.NetworkLag),
+	Lag(CNetworkParameter::Instance.SetupLag),
 	gameCyclesPerUpdate(CNetworkParameter::Instance.gameCyclesPerUpdate)
 {
 }

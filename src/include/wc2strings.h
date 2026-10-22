@@ -21,6 +21,7 @@
 #define __WC2STRINGS_H__
 
 #include <string>
+#include <vector>
 
 /**
 **  The Remastered ships its entire user-visible text in `Data/Strings/<lang>.json` -- 1599 keys in
@@ -74,6 +75,90 @@ extern int ResolveWC2Id(const std::string &family, const std::string &ident,
 **  gives false; an object without a single string empties the table and gives false.
 */
 extern bool LoadWC2StringsFromText(const std::string &jsonText);
+
+namespace content
+{
+class JsonValue;
+}
+
+/**
+**  A language mod's texts laid over the table (M2_LANGUAGE_MOD_SPEC): GetWC2String gives the
+**  overlay's text for a key it has, else the game's own. The name index (GetWC2Id) is not
+**  touched. Returns the number of texts taken, -1 (overlay empty) when `root` is not an object.
+*/
+extern int UseWC2StringsOverlay(const content::JsonValue &root);
+/// As UseWC2StringsOverlay, from JSON text; -1 when the text is not a JSON object.
+extern int UseWC2StringsOverlayText(const std::string &jsonText);
+/// Remove the overlay: every text is the game's own again.
+extern void ClearWC2StringsOverlay();
+
+/**
+**  LANGUAGE-ENGINE: the game's own table of the language the launcher chose, read from the
+**  player's Data/Strings/<language>.json. GetWC2String asks, in order: a language mod's overlay,
+**  this table, the enUS base. The base and the name index (GetWC2Id) stay English; a key this
+**  table lacks or leaves empty gives the English text. "enUS" or "" clears the table (0).
+**  Returns the number of texts taken, -1 when the code is not of the game's shape (two small,
+**  two capital letters), or the file is absent or not a JSON object (the table is then empty).
+*/
+extern int UseWC2Language(const std::string &language);
+/// As UseWC2Language, from the file's text (host tests); -1 when not a JSON object.
+extern int UseWC2LanguageText(const std::string &language, const std::string &jsonText);
+/// Remove the language table: the English base alone (under any overlay).
+extern void ClearWC2Language();
+/// The language whose table is in force; "enUS" when none is.
+extern const std::string &GetWC2Language();
+/// True for a code of the game's shape ("deDE", "zhTW").
+extern bool IsWC2LanguageCode(const std::string &code);
+
+/**
+**  A language mod's texts for the screen text that has no key in the game's table (M3): the
+**  mod's strings/extra_<lang>.json, {"format": 1, "strings": {"<English literal>": "<text>"}},
+**  keyed by the exact literal the scripts and the engine pass to _() (markup included). Translate
+**  asks it before the gettext catalog. An empty text is not taken. Returns the number of texts
+**  taken, -1 (table empty) when `root` is not such an object.
+*/
+extern int UseExtraStrings(const content::JsonValue &root);
+/// As UseExtraStrings, from JSON text; -1 when the text is not a JSON object.
+extern int UseExtraStringsText(const std::string &jsonText);
+/// Remove the extra texts: _() answers from the catalog alone again.
+extern void ClearExtraStrings();
+/// The extra text for the English literal `english`, or nullptr when the mod gives none.
+extern const std::string *GetExtraString(const std::string &english);
+
+/**
+**  The original's text for `key`, or the translation (_()) of `fallback` when the key is absent
+**  or empty. The English fallback is the original's own wording where it has one.
+*/
+extern std::string WC2Or(const std::string &key, const std::string &fallback);
+
+/**
+**  The closing credits (Data/Strings/credits.json of the player's installation), in the order the
+**  file lists them. The file is `xml.credits[].group[]`; a group has a name and `role` /
+**  `thirdParty` lists; a role names its creditees (or carries them as one text `_`), a third
+**  party has a name and sometimes a text `_`. Each line is one of:
+**    "group"  a group's name (centred heading)
+**    "entry"  a role's or a third party's name
+**    "name"   one creditee of a role
+**    "text"   the free text of a role or a third party (may hold line breaks)
+**    "gap"    the empty line after a heading and after each role / third party
+**  Members of an object are kept in the order of the text (a group may list its third parties
+**  before its roles).
+*/
+struct WC2CreditLine
+{
+	std::string kind;
+	std::string text;
+};
+
+/// Parse the text of a credits file. False (and `out` empty) when it is not one or lists nothing.
+extern bool ParseWC2Credits(const std::string &jsonText, std::vector<WC2CreditLine> &out);
+
+/// Read and parse the credits file at `path`. False when it cannot be read or parsed.
+extern bool ReadWC2Credits(const std::string &path, std::vector<WC2CreditLine> &out);
+
+/// Register RM_Credits() with Lua: a list of {kind = ..., text = ...} read from the player's
+/// Data/Strings/credits.json, or nil when the file is absent or unreadable.
+extern void WC2StringsCclRegister();
 
 /**
 **  TX8 convenience: the original's message text for `key`, or `fallback` when the player's string

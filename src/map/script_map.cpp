@@ -917,7 +917,11 @@ static int CclDefineTileset(lua_State *l)
 
 	ShowLoadProgress(_("Tileset '%s'"), Map.Tileset.ImageFile.c_str());
 	const PixelSize tilePixelSize = Map.Tileset.getPixelTileSize();
+	// CLASSIC-SHEET-LOOKUPS: when the game folder's HD terrain atlas draws this tileset (both views),
+	// the classic sheet is not searched for: Load() makes the same transparent placeholder at once.
+	const bool hdTerrain = HDTerrainCoversTileset(Map.Tileset.ImageFile);
 	Map.TileGraphic = CGraphic::New(Map.Tileset.ImageFile, tilePixelSize.x, tilePixelSize.y);
+	Map.TileGraphic->NoClassicFile = hdTerrain;
 	Map.TileGraphic->Load();
 	// The same image file can already be cached (GraphicHash) at a different frame
 	// size than the tileset's graphical tile size - most notably the fog-of-war
@@ -929,6 +933,7 @@ static int CclDefineTileset(lua_State *l)
 	// tileset's graphical tile size, independent of load order.
 	if (Map.TileGraphic->Width != tilePixelSize.x || Map.TileGraphic->Height != tilePixelSize.y) {
 		Map.TileGraphic = CGraphic::ForceNew(Map.Tileset.ImageFile, tilePixelSize.x, tilePixelSize.y);
+		Map.TileGraphic->NoClassicFile = hdTerrain;
 		Map.TileGraphic->Load();
 	}
 	// Resolved tile-size diagnostics (visible on device via stderr/logcat).
