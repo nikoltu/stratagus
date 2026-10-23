@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="Platform: Android" src="https://img.shields.io/badge/platform-Android%207.0%2B%20(arm64)-3DDC84?logo=android&logoColor=white">
-  <img alt="Version 3.4.89" src="https://img.shields.io/badge/version-3.4.89-blue">
+  <img alt="Version 3.4.91" src="https://img.shields.io/badge/version-3.4.91-blue">
   <img alt="Licence: GPL-2.0" src="https://img.shields.io/badge/licence-GPL--2.0-orange">
   <img alt="Engine: Stratagus" src="https://img.shields.io/badge/engine-Stratagus-8a2be2">
   <img alt="Languages: C++17 and Java" src="https://img.shields.io/badge/code-C%2B%2B17%20%7C%20Java%20%7C%20Lua-lightgrey">
@@ -95,8 +95,8 @@ Legend: **Working** — used in the regular regression run or seen on real table
 | Game | Save / load, in-game Game Menu, objectives, pause | Working | |
 | Game | Touch controls: tap, drag-select, control groups, placement with confirm | Working | Played on tablets and a phone |
 | Game | Result window with score, rank and profile statistics | Working | |
-| Multiplayer | LAN room: discovery on the local network, join by address, seats, teams, colours, chat | In progress | Works on two real tablets; hidden behind a developer preview switch in current builds |
-| Multiplayer | LAN game: lockstep "mesh" mode for 2–8 players, simultaneous start, waiting / return rules | In progress | Whole games played on two tablets; three or more devices not yet tested |
+| Multiplayer | LAN room: discovery on the local network, join by address, seats, teams, colours, chat | Working | Played between two devices; three or more devices not yet tested. Game texts are English in network games when a language mod is on |
+| Multiplayer | LAN game: lockstep "mesh" mode for 2–8 players, simultaneous start, waiting / return rules | Working | Whole games played on two devices; leaving a network game counts as surrender |
 | Multiplayer | Pause for everyone, watching after defeat, cut-off handling | In progress | Decided; partly built, not verified |
 | Multiplayer | Online play | Not planned | Local network only |
 | Graphics | Classic view (the original's F5 switch) | Working | Switches Remastered / classic graphics in game; terrain, units, fog, minimap and build preview |
@@ -379,14 +379,13 @@ docs/screenshots/       images used in this file
 
 ## Status and roadmap
 
-Version **3.4.89** — the first public release. Single-player (campaigns and custom scenarios with
+Version **3.4.91**. 3.4.89 was the first public release; 3.4.90 opened LAN multiplayer to everyone. Single-player (campaigns and custom scenarios with
 the Remastered art, profiles, save / load, statistics and ranks), the classic view, the map editor
 and mods are in the release. Unit behaviour, combat, spells, AI and timings were calibrated against
 measurements of the original.
 
-Known limits: `arm64-v8a` only; LAN multiplayer is built and was played on two tablets, but the
-Multiplayer section stays hidden in the release until three-device tests are done; edge scrolling
-in the classic view needs a mouse.
+Known limits: `arm64-v8a` only; LAN multiplayer was played between two devices, three or more are
+not yet tested; edge scrolling in the classic view needs a mouse.
 
 ## Credits
 

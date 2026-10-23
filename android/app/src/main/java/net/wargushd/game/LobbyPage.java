@@ -87,6 +87,11 @@ final class LobbyPage {
     private final StringBuilder message = new StringBuilder();
     /** The keyboard's height in logical units, or 0 when it is not known. */
     float keyboard;
+    /**
+     * Owner decision 101 (D1): a language mod takes no part in a network game, so the game's texts
+     * are the English ones there; while one is switched on the room says so in one line.
+     */
+    boolean englishTexts;
 
     LobbyPage(LanRoom room, ModStore.BotChoices bots, List<BotNames.Hero> heroes) {
         this.room = room;
@@ -570,6 +575,15 @@ final class LobbyPage {
         LanKit.panel(c, kit, RIGHT_X, y, RIGHT_W, h);
         final float x = RIGHT_X + 60f, w = RIGHT_W - 120f;
         kit.textTop(c, kit.own("Room chat"), x, y + 36f, LanKit.CAP_SMALL, LanKit.INK_MUTED, true);
+        if (englishTexts) {
+            // At the right end of the panel's heading row, fitted into the room the heading leaves.
+            // (A fitted text fills its room: it then starts where the room starts.)
+            final String english = kit.own("Game texts are in English in network games");
+            final float noteRoom = w - kit.width(kit.own("Room chat"), LanKit.CAP_SMALL) - 48f;
+            final float noteW = Math.min(noteRoom, kit.width(english, LanKit.CAP_SMALL));
+            final String note = kit.fit(english, LanKit.CAP_SMALL, noteRoom);
+            kit.textTop(c, note, x + w - noteW, y + 36f, LanKit.CAP_SMALL, LanKit.GOLD, true);
+        }
         final float foot = y + h - (field ? 168f : 24f);
         final int room = Math.max(0, (int) ((foot - (y + 108f)) / LanKit.LINE_PITCH));
         final List<LanRoom.Chat> chat = snap.chat;

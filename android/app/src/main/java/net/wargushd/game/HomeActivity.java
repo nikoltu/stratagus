@@ -555,11 +555,6 @@ public class HomeActivity extends Activity implements LanPage.Starter {
         return getSharedPreferences(PREFS, MODE_PRIVATE);
     }
 
-    /** The Multiplayer section is shown only where the file lan_preview is in the app's files. */
-    private boolean lanPreview() {
-        return new File(getFilesDir(), "lan_preview").exists();
-    }
-
     // ----- maps -----
 
     /**
@@ -2852,7 +2847,7 @@ public class HomeActivity extends Activity implements LanPage.Starter {
                                    && pressed != ENTRY_SCENARIO && pressed != ENTRY_CAMPAIGN
                                    && pressed != ENTRY_OPTIONS && pressed != ENTRY_LOAD
                                    && pressed != ENTRY_EDITOR && pressed != ENTRY_MODS
-                                   && !(pressed == ENTRY_MULTIPLAYER && lanPreview())) {
+                                   && pressed != ENTRY_MULTIPLAYER) {
                             // A section that is not built yet.
                             menuAudio.play(MenuAudio.ERROR);
                         } else if (pressed == ENTRY_EDITOR && entryAt(x, y) == ENTRY_EDITOR) {

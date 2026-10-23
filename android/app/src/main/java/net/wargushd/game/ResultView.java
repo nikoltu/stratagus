@@ -677,6 +677,8 @@ final class ResultView extends View {
     private static final float LAN_NAME_W = 330f, LAN_RELATION_W = 200f, LAN_SUM_W = 1620f;
     /** A computer's hero portrait in a row: 72 high at the frame's 207 : 171. */
     private static final float LAN_HERO_W = 87f;
+    /** The team column of the LAN table: from its text start (row + 24) to the swatch (row + 212), 12 apart. */
+    private static final float LAN_TEAM_W = 176f;
     /** The LAN game's map: size in tiles and terrain index, 0 / -1 when the record has none. */
     private int lanMapW, lanMapH, lanTerrain = -1;
     /** The engine's cycles in a second of a game at its normal speed (src/include/settings.h). */
@@ -917,7 +919,8 @@ final class ResultView extends View {
         well(c, ix, LAN_TABLE_Y, iw, lanTableH());
         final float nx = ix + 24f + 860f;
         final float cw = (ix + iw - 24f - 36f - nx) / COLUMNS.length;
-        kit.textTop(c, kit.own("Team"), ix + 48f, LAN_TABLE_Y + 24f, CAP_SMALL, INK_MUTED, true);
+        kit.textTop(c, kit.fitHeading(kit.own("Team"), CAP_SMALL, LAN_TEAM_W - 24f), ix + 48f, LAN_TABLE_Y + 24f,
+                    CAP_SMALL, INK_MUTED, true);
         for (int k = 0; k < COLUMNS.length; ++k) {
             // As in the other form: a label's colon is dropped, a wide heading made smaller.
             String head = kit.string(COLUMNS[k], "");
@@ -946,7 +949,11 @@ final class ResultView extends View {
             }
             kit.fill(c, rx, ry, rw, LAN_ROW_H, me ? ROW_OWN : ROW_FAINT, 10f);
             if (team(p) >= 0) {
-                kit.textMiddle(c, kit.own("Team {0}", team(p)), rx + 24f, ry, LAN_ROW_H, CAP_MID,
+                // D3 (3.4.91): the column ends where the swatch starts (rx + 212); a longer word
+                // (ltLT "Komanda 1") is fitted into it, any language alike, down to the heading floor
+                // (fitHeading, 50 %): at the 70 % floor of fit() it still ended in "Komand..." (device, 3.4.91a).
+                kit.textMiddle(c, kit.fitHeading(kit.own("Team {0}", team(p)), CAP_MID, LAN_TEAM_W), rx + 24f, ry,
+                               LAN_ROW_H, CAP_MID,
                                me ? INK : INK_MUTED, true);
             }
             final int color = p.optInt("color", -1);

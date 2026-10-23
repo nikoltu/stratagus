@@ -813,8 +813,15 @@ if (BUILD_VENDORED_SDL)
 	# only change is the optimisation. It is a compile flag of these sub-builds only, not written to
 	# SDL_config.h, so the engine's own SDL_assert level is unchanged.
 	set(WARGUSHD_SAVED_EXTERNAL_ARGS "${STRATAGUS_EXTERNAL_CMAKE_ARGS}")
-	list(APPEND STRATAGUS_EXTERNAL_CMAKE_ARGS "-DCMAKE_C_FLAGS:STRING=-O2 -DSDL_ASSERT_LEVEL=2"
-		"-DCMAKE_CXX_FLAGS:STRING=-O2 -DSDL_ASSERT_LEVEL=2")
+	# Android (3.4.90): the sub-builds' own source paths (C:/Git/stratagus/third-party/SDL/...) are
+	# mapped away too, so libmain.so carries no build folder (SDL assert file names).
+	set(WARGUSHD_SUB_PREFIX_MAP "")
+	if(ANDROID)
+		set(WARGUSHD_SUB_PREFIX_MAP " -ffile-prefix-map=${CMAKE_SOURCE_DIR}/=")
+	endif()
+	list(APPEND STRATAGUS_EXTERNAL_CMAKE_ARGS
+		"-DCMAKE_C_FLAGS:STRING=-O2 -DSDL_ASSERT_LEVEL=2${WARGUSHD_SUB_PREFIX_MAP}"
+		"-DCMAKE_CXX_FLAGS:STRING=-O2 -DSDL_ASSERT_LEVEL=2${WARGUSHD_SUB_PREFIX_MAP}")
 	vendored_sdl()
 	vendored_sdl_mixer()
 	vendored_sdl_image()

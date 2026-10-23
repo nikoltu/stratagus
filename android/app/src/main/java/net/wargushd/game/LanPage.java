@@ -627,6 +627,7 @@ final class LanPage {
                 heroes = BotNames.read(Provision.dataDir(activity));
             }
             lobby = new LobbyPage(room, bots, heroes);
+            lobby.englishTexts = ModStore.languageMod(activity) != null;
             if (typedAddress != null) {
                 AddressSheet.remember(activity, typedAddress, s.seats[0].name);
             }
